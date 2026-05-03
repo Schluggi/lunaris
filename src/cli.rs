@@ -126,9 +126,17 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub no_water_tank_sensor: bool,
 
-    /// Minimum **maximum** raw capacitance among the three Sensor zones on one mattress side to report that side as **occupied**. Lower if presence never triggers; raise if it sticks ON when empty (`RUST_LOG` `trace` shows zone values).
+    /// Minimum **maximum** raw capacitance among the three Sensor zones on one mattress side to report that side as **occupied**. Lower if presence never triggers; raise if it sticks ON when empty (`RUST_LOG` `trace` shows zone values). Unused after successful **MQTT calibrate presence** (opensleep baseline + Δ + debounce applies).
     #[arg(long, default_value_t = 800)]
     pub presence_cap_threshold: u16,
+
+    /// Duration (seconds) to average capacitance **with the mattress empty**, after MQTT **Calibrate presence** (opensleep `CALIBRATION_DURATION` = 10 s).
+    #[arg(long, default_value_t = 10)]
+    pub presence_calibrate_secs: u64,
+
+    /// `<object_id>` for `homeassistant/button/...` (presence baseline calibration — empty bed during the calibration window).
+    #[arg(long, default_value = "narcolepsy_calibrate_presence")]
+    pub discovery_object_id_calibrate_presence: String,
 
     /// Skip Sensor **bootloader handshake** (38400: Ping + JumpToFirmware, then `--sensor-baud`). Opensleep does this before firmware traffic; disable only if your MCU is already in firmware-only mode and the handshake causes trouble.
     #[arg(long, default_value_t = false)]
@@ -150,7 +158,7 @@ pub struct Cli {
     #[arg(long, default_value = "narcolepsy_vibrate_right")]
     pub discovery_object_id_vibrate_right: String,
 
-    /// `<object_id>` for `homeassistant/binary_sensor/<object_id>/config` (Sensor piezo priming active).
+    /// `<object_id>` for `homeassistant/binary_sensor/<object_id>/config` (Frozen **Prime** window + optional vibrate piezo priming).
     #[arg(long, default_value = "narcolepsy_priming")]
     pub discovery_object_id_priming: String,
 

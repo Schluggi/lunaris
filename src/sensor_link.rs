@@ -28,33 +28,25 @@ pub enum SensorLinkError {
     Port(#[from] tokio_serial::Error),
 }
 
-/// MQTT bridge notifications — paired enter/exit with refcounting in [`PrimingCounts`].
+/// MQTT bridge notifications for **vibrate / SetAlarm** piezo priming only.
+/// Periodic background priming (boot + every 5s) does not emit events — it is not user-visible
+/// and would make the HA **Priming** binary_sensor flap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimingEvent {
-    BackgroundEnter,
-    BackgroundExit,
     InteractiveEnter,
     InteractiveExit,
 }
 
 #[derive(Debug)]
 pub struct PrimingCounts {
-    pub background: AtomicUsize,
     pub interactive: AtomicUsize,
 }
 
 impl PrimingCounts {
-    pub fn any_active(&self) -> bool {
-        self.background.load(Ordering::SeqCst) > 0 || self.interactive.load(Ordering::SeqCst) > 0
+    /// `ON` for MQTT **Priming** while interactive (vibration path) priming is in progress.
+    pub fn mqtt_priming_active(&self) -> bool {
+        self.interactive.load(Ordering::SeqCst) > 0
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum PrimingKind {
-    /// Boot + periodic piezo priming.
-    Background,
-    /// Vibration / SetAlarm priming (MQTT OFF immediately when idle).
-    Interactive,
 }
 
 #[derive(Debug)]
@@ -65,73 +57,36 @@ pub struct SensorLinkHandle {
 }
 
 struct PrimingGuard {
-    kind: PrimingKind,
     counts: Arc<PrimingCounts>,
     edge: mpsc::Sender<PrimingEvent>,
 }
 
 impl Drop for PrimingGuard {
     fn drop(&mut self) {
-        match self.kind {
-            PrimingKind::Background => {
-                let prev = self.counts.background.fetch_sub(1, Ordering::SeqCst);
-                debug_assert!(prev >= 1);
-                if prev == 1 {
-                    if let Err(e) = self.edge.try_send(PrimingEvent::BackgroundExit) {
-                        tracing::warn!(
-                            ?e,
-                            "Sensor: BackgroundExit notify dropped (MQTT bridge lag)"
-                        );
-                    }
-                }
-            }
-            PrimingKind::Interactive => {
-                let prev = self.counts.interactive.fetch_sub(1, Ordering::SeqCst);
-                debug_assert!(prev >= 1);
-                if prev == 1 {
-                    if let Err(e) = self.edge.try_send(PrimingEvent::InteractiveExit) {
-                        tracing::warn!(
-                            ?e,
-                            "Sensor: InteractiveExit notify dropped (MQTT bridge lag)"
-                        );
-                    }
-                }
+        let prev = self.counts.interactive.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(prev >= 1);
+        if prev == 1 {
+            if let Err(e) = self.edge.try_send(PrimingEvent::InteractiveExit) {
+                tracing::warn!(
+                    ?e,
+                    "Sensor: InteractiveExit notify dropped (MQTT bridge lag)"
+                );
             }
         }
     }
 }
 
-fn priming_guard(
-    kind: PrimingKind,
-    counts: &Arc<PrimingCounts>,
-    edge: &mpsc::Sender<PrimingEvent>,
-) -> PrimingGuard {
-    match kind {
-        PrimingKind::Background => {
-            let prev = counts.background.fetch_add(1, Ordering::SeqCst);
-            if prev == 0 {
-                if let Err(e) = edge.try_send(PrimingEvent::BackgroundEnter) {
-                    tracing::warn!(
-                        ?e,
-                        "Sensor: BackgroundEnter notify dropped (MQTT bridge lag)"
-                    );
-                }
-            }
-        }
-        PrimingKind::Interactive => {
-            let prev = counts.interactive.fetch_add(1, Ordering::SeqCst);
-            if prev == 0 {
-                if let Err(e) = edge.try_send(PrimingEvent::InteractiveEnter) {
-                    tracing::warn!(
-                        ?e,
-                        "Sensor: InteractiveEnter notify dropped (MQTT bridge lag)"
-                    );
-                }
-            }
+fn priming_guard(counts: &Arc<PrimingCounts>, edge: &mpsc::Sender<PrimingEvent>) -> PrimingGuard {
+    let prev = counts.interactive.fetch_add(1, Ordering::SeqCst);
+    if prev == 0 {
+        if let Err(e) = edge.try_send(PrimingEvent::InteractiveEnter) {
+            tracing::warn!(
+                ?e,
+                "Sensor: InteractiveEnter notify dropped (MQTT bridge lag)"
+            );
         }
     }
     PrimingGuard {
-        kind,
         counts: counts.clone(),
         edge: edge.clone(),
     }
@@ -146,7 +101,6 @@ pub fn spawn(
 ) -> SensorLinkHandle {
     let (tx, rx) = mpsc::channel::<Vec<Vec<u8>>>(16);
     let priming_counts = Arc::new(PrimingCounts {
-        background: AtomicUsize::new(0),
         interactive: AtomicUsize::new(0),
     });
     let (priming_edge_tx, priming_edge_rx) = mpsc::channel::<PrimingEvent>(256);
@@ -231,7 +185,7 @@ async fn wait_for_vibration_ack(
             return Ok(());
         }
         if attempt > 0 && attempt % 10 == 0 {
-            let _g = priming_guard(PrimingKind::Interactive, priming_counts, priming_edge);
+            let _g = priming_guard(priming_counts, priming_edge);
             let prim = piezo_priming_frames();
             let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
             for (i, frame) in prim.iter().enumerate() {
@@ -259,7 +213,7 @@ async fn write_vibration_batch(
     priming_edge: &mpsc::Sender<PrimingEvent>,
 ) -> Result<(), SensorLinkError> {
     if vibrate_no_ack_wait {
-        let _g = priming_guard(PrimingKind::Interactive, priming_counts, priming_edge);
+        let _g = priming_guard(priming_counts, priming_edge);
         for frame in &frames {
             write_half.write_all(frame).await?;
         }
@@ -281,7 +235,7 @@ async fn write_vibration_batch(
         let alarm = &frames[off + 4..off + 5];
         let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
         {
-            let _g = priming_guard(PrimingKind::Interactive, priming_counts, priming_edge);
+            let _g = priming_guard(priming_counts, priming_edge);
             for (i, frame) in prim.iter().enumerate() {
                 write_half.write_all(frame).await?;
                 if i + 1 < prim.len() {
@@ -364,18 +318,15 @@ async fn run(
     });
 
     write_half.write_all(&ping_frame()).await?;
-    {
-        let _g = priming_guard(PrimingKind::Background, &priming_counts, &priming_edge);
-        let prim = piezo_priming_frames();
-        let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
-        for (i, frame) in prim.iter().enumerate() {
-            write_half.write_all(frame).await?;
-            if i + 1 < prim.len() {
-                sleep(gap).await;
-            }
+    let prim = piezo_priming_frames();
+    let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
+    for (i, frame) in prim.iter().enumerate() {
+        write_half.write_all(frame).await?;
+        if i + 1 < prim.len() {
+            sleep(gap).await;
         }
-        write_half.flush().await?;
     }
+    write_half.flush().await?;
     tracing::info!("Sensor link: ping + initial piezo priming sent");
 
     let mut priming_tick = interval(Duration::from_secs(5));
@@ -408,11 +359,6 @@ async fn run(
                     }
                 }
                 _ = priming_tick.tick() => {
-                    let _g = priming_guard(
-                        PrimingKind::Background,
-                        &priming_counts,
-                        &priming_edge,
-                    );
                     let prim = piezo_priming_frames();
                     for (i, frame) in prim.iter().enumerate() {
                         write_half.write_all(frame).await?;
@@ -426,7 +372,6 @@ async fn run(
             }
         } else {
             priming_tick.tick().await;
-            let _g = priming_guard(PrimingKind::Background, &priming_counts, &priming_edge);
             let prim = piezo_priming_frames();
             for (i, frame) in prim.iter().enumerate() {
                 write_half.write_all(frame).await?;

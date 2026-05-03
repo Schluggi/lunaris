@@ -5,7 +5,7 @@
 //! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rumqttc::{AsyncClient, ConnectionError, Event, Incoming, LastWill, MqttOptions, Publish, QoS};
@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 
 use crate::cli::Cli;
 use crate::frozen_frame::{set_target_temperature_frame, BedSide};
@@ -25,6 +25,8 @@ use crate::sensor_rx::SensorCapacitanceZones;
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
+/// After HA **Prime**, MQTT **Priming** stays **ON** this long (Frozen has no priming-complete frame here).
+const FROZEN_PRIME_SHOWN_AFTER_PRESS: Duration = Duration::from_secs(120);
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
@@ -67,9 +69,12 @@ pub struct BridgeConfig {
     pub discovery_object_id_target_temp_right: String,
     pub discovery_object_id_presence_left: String,
     pub discovery_object_id_presence_right: String,
+    pub discovery_object_id_calibrate_presence: String,
     pub discovery_object_id_water_tank: String,
-    /// Raw capacitance: side **occupied** if `max(zone on side) >= threshold` (opensleep `0x33` zones).
+    /// Uncalibrated: side occupied if **`max`** of three zones `>= threshold`. After MQTT calibration: opensleep baseline + Δ + debounce.
     pub presence_cap_threshold: u16,
+    /// Window for MQTT **Calibrate presence** (average samples → baseline per zone; opensleep default 10.).
+    pub presence_calibrate_secs: u64,
     /// MQTT occupancy from Sensor capacitance (needs open Sensor UART; see [`crate::main`]).
     pub presence_discovery: bool,
     pub vibration_intensity: u8,
@@ -81,7 +86,7 @@ pub struct BridgeConfig {
     pub frozen_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// When set, vibration batches go to [`crate::sensor_link`].
     pub sensor_tx: Option<mpsc::Sender<Vec<Vec<u8>>>>,
-    /// Present when [`crate::sensor_link`] runs — background vs interactive priming counts for MQTT sync.
+    /// Present when [`crate::sensor_link`] runs — interactive (vibrate) piezo priming refcount (combined with Frozen Prime for MQTT **Priming**).
     pub sensor_priming_counts: Option<Arc<PrimingCounts>>,
     /// Publish MQTT sensors for Frozen inbound temperatures (`0x41` / `0xC1`); set by [`crate::main`] with [`crate::frozen_link`].
     pub frozen_temperature_discovery: bool,
@@ -128,8 +133,12 @@ impl BridgeConfig {
                 .clone(),
             discovery_object_id_presence_left: cli.discovery_object_id_presence_left.clone(),
             discovery_object_id_presence_right: cli.discovery_object_id_presence_right.clone(),
+            discovery_object_id_calibrate_presence: cli
+                .discovery_object_id_calibrate_presence
+                .clone(),
             discovery_object_id_water_tank: cli.discovery_object_id_water_tank.clone(),
             presence_cap_threshold: cli.presence_cap_threshold,
+            presence_calibrate_secs: cli.presence_calibrate_secs.max(3),
             presence_discovery: false,
             vibration_intensity: cli.vibration_intensity.clamp(1, 100),
             vibration_duration_sec: cli.vibration_duration_sec.clamp(1, 600),
@@ -321,6 +330,17 @@ impl BridgeConfig {
             BedSide::Right => &self.discovery_object_id_presence_right,
         };
         format!("{}/binary_sensor/{}/config", self.discovery_prefix, id)
+    }
+
+    pub fn calibrate_presence_command_topic(&self) -> String {
+        format!("{}/button/calibrate_presence/set", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_calibrate_presence(&self) -> String {
+        format!(
+            "{}/button/{}/config",
+            self.discovery_prefix, self.discovery_object_id_calibrate_presence
+        )
     }
 
     pub fn water_tank_state_topic(&self) -> String {
@@ -555,10 +575,132 @@ fn discovery_payload_presence(config: &BridgeConfig, side: BedSide) -> String {
     .to_string()
 }
 
-fn occupancy_from_capacitance(z: &SensorCapacitanceZones, threshold: u16) -> (bool, bool) {
+fn discovery_payload_calibrate_presence_button(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Calibrate presence",
+        "command_topic": config.calibrate_presence_command_topic(),
+        "payload_press": config.payload_press,
+        "unique_id": format!("{}_calibrate_presence", config.device_identifier),
+        "entity_category": "config",
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+/// opensleep [`PresenceConfig.threshold`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/presence.rs) (`DEFAULT_THRESHOLD`).
+const PRESENCE_BASELINE_DELTA: u16 = 50;
+
+/// opensleep [`PresenceConfig.debounce_count`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/presence.rs) (`DEFAULT_DEBOUNCE`).
+const PRESENCE_DEBOUNCE_FRAMES: u8 = 5;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PresenceInferenceState {
+    baselines: Option<[u16; 6]>,
+    debounce: [u8; 6],
+}
+
+impl PresenceInferenceState {
+    fn set_baselines(&mut self, b: [u16; 6]) {
+        self.baselines = Some(b);
+        self.debounce = [0; 6];
+    }
+}
+
+fn mean_baselines_from_samples(samples: &[[u16; 6]]) -> Option<[u16; 6]> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sums = [0u32; 6];
+    for s in samples {
+        for i in 0..6 {
+            sums[i] += s[i] as u32;
+        }
+    }
+    let n = samples.len() as u32;
+    Some(sums.map(|sum| (sum / n) as u16))
+}
+
+/// Uncalibrated: max-of-three zones vs absolute threshold (`--presence-cap-threshold`).
+fn occupancy_uncalibrated_max(z: &SensorCapacitanceZones, abs_threshold: u16) -> (bool, bool) {
     let left_max = z.zones[..3].iter().copied().max().unwrap_or(0);
     let right_max = z.zones[3..].iter().copied().max().unwrap_or(0);
-    (left_max >= threshold, right_max >= threshold)
+    (left_max >= abs_threshold, right_max >= abs_threshold)
+}
+
+/// Calibrated: opensleep [`PresenseManager::update_presence`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/presence.rs).
+fn occupancy_calibrated(
+    z: &SensorCapacitanceZones,
+    inference: &mut PresenceInferenceState,
+) -> (bool, bool) {
+    let Some(ref baselines) = inference.baselines else {
+        return (false, false);
+    };
+    for (i, &b) in baselines.iter().enumerate() {
+        if z.zones[i] > b.saturating_add(PRESENCE_BASELINE_DELTA) {
+            inference.debounce[i] = inference.debounce[i].saturating_add(1);
+        } else {
+            inference.debounce[i] = 0;
+        }
+    }
+    let left = inference.debounce[..3]
+        .iter()
+        .any(|&c| c >= PRESENCE_DEBOUNCE_FRAMES);
+    let right = inference.debounce[3..]
+        .iter()
+        .any(|&c| c >= PRESENCE_DEBOUNCE_FRAMES);
+    (left, right)
+}
+
+fn inference_occupancy(
+    z: &SensorCapacitanceZones,
+    inference: &mut PresenceInferenceState,
+    fallback_abs_threshold: u16,
+) -> (bool, bool) {
+    if inference.baselines.is_some() {
+        occupancy_calibrated(z, inference)
+    } else {
+        occupancy_uncalibrated_max(z, fallback_abs_threshold)
+    }
+}
+
+async fn handle_presence_calibrate_press(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    notify: Option<&mpsc::Sender<()>>,
+) {
+    let Some(tx) = notify else {
+        tracing::warn!("presence calibration: no Sensor/presence bridge (ignored)");
+        return;
+    };
+    if let Err(e) = tx.try_send(()) {
+        tracing::warn!(?e, "presence calibration notify dropped (MQTT handler lag)");
+        publish_json_result(
+            client,
+            config,
+            "calibrate_presence",
+            "error",
+            &format!("calibration channel saturated: {e:?}"),
+        )
+        .await;
+        return;
+    }
+    tracing::info!(
+        secs = config.presence_calibrate_secs,
+        "presence calibration requested (leave mattress empty until window completes; opensleep-style baseline capture)"
+    );
+    publish_json_result(
+        client,
+        config,
+        "calibrate_presence",
+        "success",
+        "calibration sampling started",
+    )
+    .await;
 }
 
 fn discovery_payload_frozen_temperature(
@@ -736,6 +878,62 @@ struct PublishHandlerState {
     startup_led_broker_retain_seen: Arc<AtomicBool>,
     climate_left: Arc<Mutex<ClimateSideState>>,
     climate_right: Arc<Mutex<ClimateSideState>>,
+    /// Notify presence task to start baseline sampling (MQTT **Calibrate presence**).
+    presence_calibrate_tx: Option<mpsc::Sender<()>>,
+    /// `Some(until)` while MQTT **Priming** should show Frozen **Prime** as active.
+    frozen_prime_shown_until: Arc<Mutex<Option<Instant>>>,
+    /// incremented on each Prime; stale expiry tasks ignore superseded primes.
+    frozen_prime_generation: Arc<AtomicU64>,
+}
+
+async fn priming_binary_sensor_active(
+    sensor_counts: Option<&Arc<PrimingCounts>>,
+    frozen_prime_shown_until: &Mutex<Option<Instant>>,
+) -> bool {
+    if let Some(c) = sensor_counts {
+        if c.mqtt_priming_active() {
+            return true;
+        }
+    }
+    let lock = frozen_prime_shown_until.lock().await;
+    lock.map(|u| Instant::now() < u).unwrap_or(false)
+}
+
+async fn on_frozen_prime_pressed(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    hs: &PublishHandlerState,
+) {
+    let my_gen = hs.frozen_prime_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let until = Instant::now() + FROZEN_PRIME_SHOWN_AFTER_PRESS;
+    {
+        let mut g = hs.frozen_prime_shown_until.lock().await;
+        *g = Some(until);
+    }
+    let active =
+        priming_binary_sensor_active(config.sensor_priming_counts.as_ref(), &hs.frozen_prime_shown_until)
+            .await;
+    publish_priming_state(client, config, active).await;
+
+    let c = client.clone();
+    let cfg = config.clone();
+    let counts = config.sensor_priming_counts.clone();
+    let fz_until = hs.frozen_prime_shown_until.clone();
+    let fz_gen = hs.frozen_prime_generation.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep_until(until).await;
+        if fz_gen.load(Ordering::SeqCst) != my_gen {
+            return;
+        }
+        {
+            let mut g = fz_until.lock().await;
+            if fz_gen.load(Ordering::SeqCst) == my_gen {
+                *g = None;
+            }
+        }
+        let active = priming_binary_sensor_active(counts.as_ref(), &fz_until).await;
+        publish_priming_state(&c, &cfg, active).await;
+    });
 }
 
 async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side: BedSide) {
@@ -1078,7 +1276,11 @@ async fn handle_climate_temperature_command(
     }
 }
 
-async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfig) {
+async fn publish_discovery_and_online(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    hs: &PublishHandlerState,
+) {
     let qos = QoS::AtLeastOnce;
     let disc_btn = discovery_payload_button(config);
     if let Err(e) = client
@@ -1149,7 +1351,7 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             }
         }
     }
-    if let Some(counts) = &config.sensor_priming_counts {
+    {
         let disc_p = discovery_payload_priming(config);
         if let Err(e) = client
             .publish(config.discovery_topic_priming(), qos, true, disc_p)
@@ -1157,7 +1359,10 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         {
             tracing::error!(?e, "publish priming binary_sensor discovery");
         }
-        publish_priming_state(client, config, counts.any_active()).await;
+        let active =
+            priming_binary_sensor_active(config.sensor_priming_counts.as_ref(), &hs.frozen_prime_shown_until)
+                .await;
+        publish_priming_state(client, config, active).await;
     }
     if config.sensor_device.is_some() && config.presence_discovery {
         for side in [BedSide::Left, BedSide::Right] {
@@ -1168,6 +1373,20 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             {
                 tracing::error!(?e, side = ?side, "publish presence discovery");
             }
+        }
+        // HA shows "Unknown" until a retained state arrives; capacitance `0x33` may be rare/absent at boot.
+        publish_presence_readings(client, config, false, false).await;
+        let disc_cal = discovery_payload_calibrate_presence_button(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_calibrate_presence(),
+                qos,
+                true,
+                disc_cal,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish presence calibration button discovery");
         }
     }
     if config.frozen_temperature_discovery {
@@ -1232,7 +1451,11 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     }
 }
 
-async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
+async fn setup_session(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    hs: &PublishHandlerState,
+) {
     let qos = QoS::AtLeastOnce;
     if let Err(e) = client.subscribe(config.command_topic(), qos).await {
         tracing::error!(?e, "subscribe prime command topic");
@@ -1277,11 +1500,19 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
                 tracing::error!(?e, side = ?side, "subscribe vibrate command topic");
             }
         }
+        if config.presence_discovery {
+            if let Err(e) = client
+                .subscribe(config.calibrate_presence_command_topic(), qos)
+                .await
+            {
+                tracing::error!(?e, "subscribe calibrate_presence button topic");
+            }
+        }
     }
     if let Err(e) = client.subscribe(HA_STATUS_TOPIC, qos).await {
         tracing::error!(?e, "subscribe Home Assistant birth topic");
     }
-    publish_discovery_and_online(client, config).await;
+    publish_discovery_and_online(client, config, hs).await;
 }
 
 async fn handle_light_command(
@@ -1371,6 +1602,7 @@ async fn handle_publish(
             match enqueue_frozen_frame(config, prime_frame.to_vec()).await {
                 Ok(()) => {
                     tracing::info!("prime frame queued to Frozen USART task");
+                    on_frozen_prime_pressed(client, config, st).await;
                     publish_json_result(client, config, "prime", "success", "prime frame sent")
                         .await;
                 }
@@ -1380,6 +1612,15 @@ async fn handle_publish(
                 }
             }
         }
+        return;
+    }
+
+    if config.sensor_device.is_some()
+        && config.presence_discovery
+        && p.topic == config.calibrate_presence_command_topic()
+        && p.payload.as_ref() == config.payload_press.as_bytes()
+    {
+        handle_presence_calibrate_press(client, config, st.presence_calibrate_tx.as_ref()).await;
         return;
     }
 
@@ -1458,7 +1699,7 @@ async fn handle_publish(
 
     if p.topic == HA_STATUS_TOPIC && p.payload.as_ref() == b"online" {
         tracing::debug!("Home Assistant online; republishing discovery");
-        publish_discovery_and_online(client, config).await;
+        publish_discovery_and_online(client, config, st).await;
     }
 }
 
@@ -1471,12 +1712,23 @@ pub async fn run(
     frozen_water_tank_rx: Option<mpsc::Receiver<bool>>,
     capacitance_rx: Option<mpsc::Receiver<SensorCapacitanceZones>>,
 ) {
+    let (presence_calibrate_tx, presence_calibrate_rx) =
+        if config.presence_discovery && capacitance_rx.is_some() {
+            let (t, r) = mpsc::channel::<()>(8);
+            (Some(t), Some(r))
+        } else {
+            (None, None)
+        };
+
     let handler_state = PublishHandlerState {
         light_state: Arc::new(Mutex::new(LightStateSnapshot::default())),
         startup_led_on: Arc::new(Mutex::new(false)),
         startup_led_broker_retain_seen: Arc::new(AtomicBool::new(false)),
         climate_left: Arc::new(Mutex::new(ClimateSideState::default())),
         climate_right: Arc::new(Mutex::new(ClimateSideState::default())),
+        presence_calibrate_tx: presence_calibrate_tx.clone(),
+        frozen_prime_shown_until: Arc::new(Mutex::new(None)),
+        frozen_prime_generation: Arc::new(AtomicU64::new(0)),
     };
 
     let startup_led_hw_once_per_process = Arc::new(AtomicBool::new(false));
@@ -1529,39 +1781,102 @@ pub async fn run(
     }
 
     if let Some(mut cap_rx) = capacitance_rx {
-        let c = client.clone();
-        let cfg = config.clone();
-        tokio::spawn(async move {
-            let threshold = cfg.presence_cap_threshold;
-            let mut prev: Option<(bool, bool)> = None;
-            while let Some(z) = cap_rx.recv().await {
-                let (left_on, right_on) = occupancy_from_capacitance(&z, threshold);
-                if prev == Some((left_on, right_on)) {
-                    continue;
+        if let Some(mut cal_rx) = presence_calibrate_rx {
+            let c = client.clone();
+            let cfg = config.clone();
+            let cal_wait = Duration::from_secs(cfg.presence_calibrate_secs.max(3));
+            let fallback_abs_threshold = cfg.presence_cap_threshold;
+            tokio::spawn(async move {
+                let mut inference = PresenceInferenceState::default();
+                // Matches `publish_discovery_and_online` seed (`OFF`/`OFF`).
+                let mut prev_publish = Some((false, false));
+                let mut cal_until: Option<Instant> = None;
+                let mut cal_samples = Vec::<[u16; 6]>::new();
+
+                loop {
+                    tokio::select! {
+                        biased;
+                        cmd = cal_rx.recv() => {
+                            if cmd.is_none() {
+                                tracing::warn!("presence calibrate MQTT channel closed; stopping occupancy task");
+                                return;
+                            }
+                            tracing::info!(
+                                secs = cal_wait.as_secs(),
+                                "presence calibration window started — keep mattress empty (opensleep parity)"
+                            );
+                            cal_until = Some(Instant::now() + cal_wait);
+                            cal_samples.clear();
+                        }
+                        z_opt = cap_rx.recv() => {
+                            let Some(z) = z_opt else {
+                                return;
+                            };
+
+                            if cal_until.is_some() {
+                                cal_samples.push(z.zones);
+                            }
+                            if let Some(end) = cal_until {
+                                if Instant::now() >= end {
+                                    cal_until = None;
+                                    match mean_baselines_from_samples(&cal_samples) {
+                                        Some(nb) => {
+                                            inference.set_baselines(nb);
+                                            tracing::info!(
+                                                baseline = ?nb,
+                                                frames = cal_samples.len(),
+                                                delta = PRESENCE_BASELINE_DELTA,
+                                                debounce_frames = PRESENCE_DEBOUNCE_FRAMES,
+                                                "presence baseline calibrated (sensor/presence parity)"
+                                            );
+                                            prev_publish = None;
+                                        }
+                                        None => {
+                                            tracing::error!(
+                                                "presence calibration window ended without capacitance samples — MCU quiet or wrong baud; baseline unchanged"
+                                            );
+                                        }
+                                    }
+                                    cal_samples.clear();
+                                }
+                            }
+
+                            let (left_on, right_on) =
+                                inference_occupancy(&z, &mut inference, fallback_abs_threshold);
+                            if prev_publish == Some((left_on, right_on)) {
+                                continue;
+                            }
+                            tracing::trace!(
+                                left_on,
+                                right_on,
+                                calibrated = inference.baselines.is_some(),
+                                zones = ?z.zones,
+                                "Sensor presence (capacitance)"
+                            );
+                            prev_publish = Some((left_on, right_on));
+                            publish_presence_readings(&c, &cfg, left_on, right_on).await;
+                        }
+                    }
                 }
-                tracing::trace!(
-                    left_on,
-                    right_on,
-                    threshold,
-                    zones = ?z.zones,
-                    "Sensor presence (capacitance)"
-                );
-                prev = Some((left_on, right_on));
-                publish_presence_readings(&c, &cfg, left_on, right_on).await;
-            }
-        });
+            });
+        } else {
+            tracing::error!("presence_discovery without calibration channel (bridge bug)");
+        }
     }
 
+    let hs_priming = handler_state.clone();
     match (sensor_priming_events, config.sensor_priming_counts.clone()) {
         (Some(mut events_rx), Some(counts)) => {
             let c = client.clone();
             let cfg = config.clone();
             tokio::spawn(async move {
-                // After each event, [`PrimingCounts`] already reflect link state. Publish when
-                // `any_active` changes (opensleep has no HA priming entity; this is a straight mirror).
                 let mut last: Option<bool> = None;
                 while let Some(_ev) = events_rx.recv().await {
-                    let active = counts.any_active();
+                    let active = priming_binary_sensor_active(
+                        Some(&counts),
+                        &hs_priming.frozen_prime_shown_until,
+                    )
+                    .await;
                     if last == Some(active) {
                         continue;
                     }
@@ -1625,7 +1940,7 @@ pub async fn run(
                     tokio::spawn(async move {
                         hs.startup_led_broker_retain_seen
                             .store(false, Ordering::SeqCst);
-                        setup_session(&c, &cfg).await;
+                        setup_session(&c, &cfg, &hs).await;
                         if cfg.i2c_device.is_some() {
                             // Wait for broker-retained state (MQTT retain=1) or assume default OFF.
                             const RETAIN_WAIT: Duration = Duration::from_millis(800);
@@ -1814,5 +2129,46 @@ mod tests {
                 Some(cfg.presence_state_topic(side).as_str()),
             );
         }
+    }
+
+    #[test]
+    fn calibrate_presence_discovery_has_entity_category_config() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let mut cfg = BridgeConfig::from_cli(&cli);
+        cfg.presence_discovery = true;
+        let disc = discovery_payload_calibrate_presence_button(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.calibrate_presence_command_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("config"));
+    }
+
+    #[test]
+    fn presence_mean_baseline_average_per_zone() {
+        let samples = [[10u16, 20, 30, 40, 50, 60], [20, 30, 40, 50, 60, 70]];
+        assert_eq!(
+            mean_baselines_from_samples(&samples).unwrap(),
+            [15, 25, 35, 45, 55, 65]
+        );
+        assert!(mean_baselines_from_samples(&[]).is_none());
+    }
+
+    #[test]
+    fn presence_calibrated_opensleep_five_frame_debounce() {
+        let z = SensorCapacitanceZones {
+            sequence: 1,
+            zones: [200, 100, 100, 200, 100, 100],
+        };
+        let mut inference = PresenceInferenceState::default();
+        inference.set_baselines([100; 6]);
+        for _ in 0..4 {
+            assert_eq!(
+                inference_occupancy(&z, &mut inference, 9999),
+                (false, false)
+            );
+        }
+        assert_eq!(inference_occupancy(&z, &mut inference, 9999), (true, true));
     }
 }
