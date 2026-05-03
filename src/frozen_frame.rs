@@ -58,6 +58,31 @@ pub fn encode_command(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Bed side for [`set_target_temperature_frame`] (opensleep `BedSide`).
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BedSide {
+    Left = 0x00,
+    Right = 0x01,
+}
+
+/// Set target temperature on one side (opensleep `FrozenCommand::SetTargetTemperature`).
+///
+/// `temp_centidegrees` is hundredths of a degree Celsius (e.g. `3600` → 36.00 °C).
+pub fn set_target_temperature_frame(
+    side: BedSide,
+    enabled: bool,
+    temp_centidegrees: u16,
+) -> Vec<u8> {
+    encode_command(&[
+        0x40,
+        side as u8,
+        enabled as u8,
+        (temp_centidegrees >> 8) as u8,
+        temp_centidegrees as u8,
+    ])
+}
+
 /// Prime command: raw payload byte `0x52` (opensleep `FrozenCommand::Prime`).
 pub fn prime_frame() -> Vec<u8> {
     encode_command(&[0x52])
@@ -77,5 +102,14 @@ mod tests {
     #[test]
     fn prime_frame_matches_opensleep_hex() {
         assert_eq!(prime_frame(), vec![0x7E, 0x01, 0x52, 0xB6, 0x2B]);
+    }
+
+    #[test]
+    fn set_target_temperature_matches_opensleep_hex() {
+        let frame = set_target_temperature_frame(BedSide::Left, true, 3600);
+        assert_eq!(
+            frame,
+            vec![0x7E, 0x05, 0x40, 0x00, 0x01, 0x0E, 0x10, 0xE6, 0xA8]
+        );
     }
 }

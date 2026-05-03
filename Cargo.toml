@@ -3,7 +3,7 @@ name = "narcolepsy"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0"
-description = "Local MQTT bridge: Eight Sleep Pod Frozen USART prime + IS31FL3194 LED via I²C, Home Assistant MQTT discovery."
+description = "Local MQTT bridge: Eight Sleep Pod Frozen USART (prime, mattress climate) + IS31FL3194 LED via I²C, Home Assistant MQTT discovery."
 readme = "README.md"
 
 [[bin]]

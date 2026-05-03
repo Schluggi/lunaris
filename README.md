@@ -1,6 +1,6 @@
 # narcolepsy
 
-Single-binary **local-only** bridge: triggers the Eight Sleep Pod **Frozen** subsystem **prime** command over USART using the same framing as [opensleep](https://github.com/LiamSnow/opensleep), and exposes a **Home Assistant MQTT button** via [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery).
+Single-binary **local-only** bridge: talks to the Pod **Frozen** subsystem over USART (opensleep-style framing) for **prime**, **per-side target temperature** (left/right), and (optionally) the **IS31FL3194** bed LED over I²C — exposed to **Home Assistant** via [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) (button, two climates, light).
 
 ## Disclaimer
 
@@ -83,7 +83,7 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--mqtt-username` | *(empty)* | `MQTT_USERNAME` | Broker username (optional). |
 | `--mqtt-password` | *(empty)* | `MQTT_PASSWORD` | Broker password (optional). |
 | `--mqtt-client-id` | `narcolepsy` | — | MQTT client id. |
-| `--topic-prefix` | `narcolepsy/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/light/led/set`, `{prefix}/light/led/state`, `{prefix}/result`, etc. |
+| `--topic-prefix` | `narcolepsy/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/climate/left|right/{mode,temperature}/{set,state}`, `{prefix}/light/led/set`, `{prefix}/light/led/state`, `{prefix}/result`, etc. |
 | `--discovery-prefix` | `homeassistant` | — | Home Assistant [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) prefix. |
 | `--discovery-object-id` | `narcolepsy_prime` | — | `<object_id>` in `homeassistant/button/<object_id>/config`. |
 | `--device-name` | `Eight Sleep` | — | Friendly device name in discovery (`device.name`). |
@@ -94,6 +94,11 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--i2c-device` | `/dev/i2c-1` | — | Linux I²C bus where the IS31FL3194 LED driver sits (address **0x53**). Probed at startup; if it cannot be opened, MQTT **Prime** still runs but no **Light** entity is advertised. |
 | `--no-led` | *(off)* | — | Disables LED/I²C entirely (no probe, no `homeassistant/light/...` discovery). |
 | `--discovery-object-id-led` | `narcolepsy_led` | — | `<object_id>` for `homeassistant/light/<object_id>/config`. |
+| `--discovery-object-id-climate-left` | `narcolepsy_climate_left` | — | `<object_id>` for `homeassistant/climate/<object_id>/config` (left mattress side). |
+| `--discovery-object-id-climate-right` | `narcolepsy_climate_right` | — | Same for the right side. |
+| `--climate-min-temp` | `13` | — | Minimum target temperature (°C) in climate discovery. |
+| `--climate-max-temp` | `47` | — | Maximum target temperature (°C) in climate discovery. |
+| `--climate-temp-step` | `0.5` | — | Slider step (°C) in Home Assistant. |
 | `--log-level` | `info` | — | Default `tracing` filter if `RUST_LOG` is unset (e.g. `debug`, `info,narcolepsy=debug`). |
 
 If **`RUST_LOG`** is set in the environment, it takes precedence over `--log-level` (standard `tracing_subscriber` behaviour).
@@ -101,6 +106,10 @@ If **`RUST_LOG`** is set in the environment, it takes precedence over `--log-lev
 ## USART protocol
 
 See [docs/usart-frozen.md](docs/usart-frozen.md).
+
+## Climate (Home Assistant, left / right)
+
+Two MQTT **[climate](https://www.home-assistant.io/integrations/climate.mqtt/)** entities (**Cover links** / **Cover rechts**) send opensleep-compatible **`SetTargetTemperature`** frames on the Frozen UART (`0x40` + side + enable + target in **centidegree** Celsius). Modes: **`off`** and **`heat_cool`** (active regulation at the setpoint). There is **no** MQTT-published **current** temperature yet (serial RX not implemented).
 
 ## LED (Home Assistant light)
 

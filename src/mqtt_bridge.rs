@@ -1,4 +1,7 @@
-//! MQTT: Home Assistant discovery, prime button, JSON light (IS31FL3194 via I²C).
+//! MQTT: Home Assistant discovery, prime button, mattress climate (left/right), JSON light (IS31FL3194 via I²C).
+//!
+//! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
+//! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,10 +13,14 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 use crate::cli::Cli;
+use crate::frozen_frame::{set_target_temperature_frame, BedSide};
 use crate::is31fl3194::Is31fl3194;
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
+/// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
+const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
+const CLIMATE_MODE_OFF: &str = "off";
 
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -26,6 +33,11 @@ pub struct BridgeConfig {
     pub discovery_prefix: String,
     pub discovery_object_id: String,
     pub discovery_object_id_led: String,
+    pub discovery_object_id_climate_left: String,
+    pub discovery_object_id_climate_right: String,
+    pub climate_min_temp: f64,
+    pub climate_max_temp: f64,
+    pub climate_temp_step: f64,
     pub device_name: String,
     pub device_identifier: String,
     pub sw_version: String,
@@ -48,6 +60,11 @@ impl BridgeConfig {
             discovery_prefix: cli.discovery_prefix.clone(),
             discovery_object_id: cli.discovery_object_id.clone(),
             discovery_object_id_led: cli.discovery_object_id_led.clone(),
+            discovery_object_id_climate_left: cli.discovery_object_id_climate_left.clone(),
+            discovery_object_id_climate_right: cli.discovery_object_id_climate_right.clone(),
+            climate_min_temp: cli.climate_min_temp,
+            climate_max_temp: cli.climate_max_temp,
+            climate_temp_step: cli.climate_temp_step,
             device_name: cli.device_name.clone(),
             device_identifier: cli.device_identifier.clone(),
             sw_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -86,6 +103,46 @@ impl BridgeConfig {
 
     pub fn light_state_topic(&self) -> String {
         format!("{}/light/led/state", self.topic_prefix)
+    }
+
+    pub fn climate_discovery_topic(&self, side: BedSide) -> String {
+        let id = match side {
+            BedSide::Left => &self.discovery_object_id_climate_left,
+            BedSide::Right => &self.discovery_object_id_climate_right,
+        };
+        format!("{}/climate/{}/config", self.discovery_prefix, id)
+    }
+
+    pub fn climate_mode_command_topic(&self, side: BedSide) -> String {
+        let s = match side {
+            BedSide::Left => "left",
+            BedSide::Right => "right",
+        };
+        format!("{}/climate/{}/mode/set", self.topic_prefix, s)
+    }
+
+    pub fn climate_mode_state_topic(&self, side: BedSide) -> String {
+        let s = match side {
+            BedSide::Left => "left",
+            BedSide::Right => "right",
+        };
+        format!("{}/climate/{}/mode/state", self.topic_prefix, s)
+    }
+
+    pub fn climate_temperature_command_topic(&self, side: BedSide) -> String {
+        let s = match side {
+            BedSide::Left => "left",
+            BedSide::Right => "right",
+        };
+        format!("{}/climate/{}/temperature/set", self.topic_prefix, s)
+    }
+
+    pub fn climate_temperature_state_topic(&self, side: BedSide) -> String {
+        let s = match side {
+            BedSide::Left => "left",
+            BedSide::Right => "right",
+        };
+        format!("{}/climate/{}/temperature/state", self.topic_prefix, s)
     }
 
     pub fn result_topic(&self) -> String {
@@ -136,6 +193,38 @@ fn discovery_payload_light(config: &BridgeConfig) -> String {
         "brightness_scale": 255,
         "command_topic": config.light_command_topic(),
         "state_topic": config.light_state_topic(),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_climate(config: &BridgeConfig, side: BedSide) -> String {
+    let name = match side {
+        BedSide::Left => "Cover links",
+        BedSide::Right => "Cover rechts",
+    };
+    let unique_suffix = match side {
+        BedSide::Left => "climate_left",
+        BedSide::Right => "climate_right",
+    };
+    json!({
+        "name": name,
+        "unique_id": format!("{}_{}", config.device_identifier, unique_suffix),
+        "temperature_unit": "C",
+        "min_temp": config.climate_min_temp,
+        "max_temp": config.climate_max_temp,
+        "temp_step": config.climate_temp_step,
+        "precision": 0.1,
+        "modes": [CLIMATE_MODE_OFF, CLIMATE_MODE_HEAT_COOL],
+        "mode_command_topic": config.climate_mode_command_topic(side),
+        "mode_state_topic": config.climate_mode_state_topic(side),
+        "temperature_command_topic": config.climate_temperature_command_topic(side),
+        "temperature_state_topic": config.climate_temperature_state_topic(side),
         "device": config.device_json(),
         "origin": {
             "name": "narcolepsy",
@@ -198,6 +287,29 @@ impl LightStateSnapshot {
             "color_mode": "rgb",
         })
         .to_string()
+    }
+}
+
+/// Target temperature for one mattress side (Frozen `SetTargetTemperature`).
+#[derive(Clone)]
+struct ClimateSideState {
+    enabled: bool,
+    target_centi: u16,
+}
+
+impl Default for ClimateSideState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_centi: 3000,
+        }
+    }
+}
+
+fn climate_action_label(side: BedSide) -> &'static str {
+    match side {
+        BedSide::Left => "climate_left",
+        BedSide::Right => "climate_right",
     }
 }
 
@@ -290,6 +402,159 @@ async fn publish_light_state(
     }
 }
 
+async fn publish_climate_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    side: BedSide,
+    snap: &ClimateSideState,
+) {
+    let mode = if snap.enabled {
+        CLIMATE_MODE_HEAT_COOL
+    } else {
+        CLIMATE_MODE_OFF
+    };
+    let temp_c = snap.target_centi as f64 / 100.0;
+    let qos = QoS::AtLeastOnce;
+    let temp_str = format!("{temp_c:.2}");
+    if let Err(e) = client
+        .publish(config.climate_mode_state_topic(side), qos, true, mode)
+        .await
+    {
+        tracing::error!(?e, "publish climate mode state");
+    }
+    if let Err(e) = client
+        .publish(
+            config.climate_temperature_state_topic(side),
+            qos,
+            true,
+            temp_str,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish climate temperature state");
+    }
+}
+
+async fn handle_climate_mode_command(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    side: BedSide,
+    state: &Arc<Mutex<ClimateSideState>>,
+    payload: &[u8],
+) {
+    let Ok(mode_str) = std::str::from_utf8(payload) else {
+        tracing::warn!("climate mode: invalid UTF-8");
+        return;
+    };
+    let mode_str = mode_str.trim();
+    let enabled = match mode_str {
+        CLIMATE_MODE_OFF => false,
+        CLIMATE_MODE_HEAT_COOL => true,
+        _ => {
+            tracing::warn!(%mode_str, "ignored unknown climate mode");
+            return;
+        }
+    };
+
+    let mut st = state.lock().await;
+    let backup = st.clone();
+    st.enabled = enabled;
+    let frame = set_target_temperature_frame(side, st.enabled, st.target_centi);
+    let snap = st.clone();
+    drop(st);
+
+    match serial_prime::send_frame(&config.serial_device, config.serial_baud, &frame).await {
+        Ok(()) => {
+            tracing::info!(
+                ?side,
+                enabled,
+                target_centi = snap.target_centi,
+                "climate mode"
+            );
+            publish_climate_state(client, config, side, &snap).await;
+            publish_json_result(
+                client,
+                config,
+                climate_action_label(side),
+                "success",
+                "set target temperature",
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::error!(?e, ?side, "climate mode serial write failed");
+            *state.lock().await = backup;
+            publish_json_result(
+                client,
+                config,
+                climate_action_label(side),
+                "error",
+                &e.to_string(),
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_climate_temperature_command(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    side: BedSide,
+    state: &Arc<Mutex<ClimateSideState>>,
+    payload: &[u8],
+) {
+    let Ok(text) = std::str::from_utf8(payload) else {
+        return;
+    };
+    let Ok(temp_c) = text.trim().parse::<f64>() else {
+        tracing::warn!("ignored non-numeric climate temperature");
+        return;
+    };
+    let lo = config.climate_min_temp;
+    let hi = config.climate_max_temp;
+    let clamped = temp_c.clamp(lo, hi);
+    let centi = (clamped * 100.0).round() as u16;
+
+    let mut st = state.lock().await;
+    let backup = st.clone();
+    st.target_centi = centi;
+    if st.enabled {
+        let frame = set_target_temperature_frame(side, true, centi);
+        let snap = st.clone();
+        drop(st);
+        match serial_prime::send_frame(&config.serial_device, config.serial_baud, &frame).await {
+            Ok(()) => {
+                tracing::info!(?side, target_centi = centi, "climate temperature");
+                publish_climate_state(client, config, side, &snap).await;
+                publish_json_result(
+                    client,
+                    config,
+                    climate_action_label(side),
+                    "success",
+                    "set target temperature",
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::error!(?e, ?side, "climate temperature serial write failed");
+                *state.lock().await = backup;
+                publish_json_result(
+                    client,
+                    config,
+                    climate_action_label(side),
+                    "error",
+                    &e.to_string(),
+                )
+                .await;
+            }
+        }
+    } else {
+        let snap = st.clone();
+        drop(st);
+        publish_climate_state(client, config, side, &snap).await;
+    }
+}
+
 async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfig) {
     let qos = QoS::AtLeastOnce;
     let disc_btn = discovery_payload_button(config);
@@ -308,6 +573,20 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             tracing::error!(?e, "publish light discovery");
         }
     }
+    for side in [BedSide::Left, BedSide::Right] {
+        let disc_climate = discovery_payload_climate(config, side);
+        if let Err(e) = client
+            .publish(
+                config.climate_discovery_topic(side),
+                qos,
+                true,
+                disc_climate,
+            )
+            .await
+        {
+            tracing::error!(?e, side = ?side, "publish climate discovery");
+        }
+    }
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
         .await
@@ -324,6 +603,20 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     if config.i2c_device.is_some() {
         if let Err(e) = client.subscribe(config.light_command_topic(), qos).await {
             tracing::error!(?e, "subscribe light command topic");
+        }
+    }
+    for side in [BedSide::Left, BedSide::Right] {
+        if let Err(e) = client
+            .subscribe(config.climate_mode_command_topic(side), qos)
+            .await
+        {
+            tracing::error!(?e, side = ?side, "subscribe climate mode topic");
+        }
+        if let Err(e) = client
+            .subscribe(config.climate_temperature_command_topic(side), qos)
+            .await
+        {
+            tracing::error!(?e, side = ?side, "subscribe climate temperature topic");
         }
     }
     if let Err(e) = client.subscribe(HA_STATUS_TOPIC, qos).await {
@@ -386,6 +679,8 @@ async fn handle_publish(
     config: &BridgeConfig,
     prime_frame: &[u8],
     light_state: &Arc<Mutex<LightStateSnapshot>>,
+    climate_left: &Arc<Mutex<ClimateSideState>>,
+    climate_right: &Arc<Mutex<ClimateSideState>>,
     p: Publish,
 ) {
     if p.topic == config.command_topic() {
@@ -408,6 +703,32 @@ async fn handle_publish(
         return;
     }
 
+    if p.topic == config.climate_mode_command_topic(BedSide::Left) {
+        handle_climate_mode_command(client, config, BedSide::Left, climate_left, &p.payload).await;
+        return;
+    }
+    if p.topic == config.climate_mode_command_topic(BedSide::Right) {
+        handle_climate_mode_command(client, config, BedSide::Right, climate_right, &p.payload)
+            .await;
+        return;
+    }
+    if p.topic == config.climate_temperature_command_topic(BedSide::Left) {
+        handle_climate_temperature_command(client, config, BedSide::Left, climate_left, &p.payload)
+            .await;
+        return;
+    }
+    if p.topic == config.climate_temperature_command_topic(BedSide::Right) {
+        handle_climate_temperature_command(
+            client,
+            config,
+            BedSide::Right,
+            climate_right,
+            &p.payload,
+        )
+        .await;
+        return;
+    }
+
     if config.i2c_device.is_some() && p.topic == config.light_command_topic() {
         handle_light_command(client, config, light_state, &p.payload).await;
         return;
@@ -422,6 +743,8 @@ async fn handle_publish(
 /// Run the MQTT event loop until a fatal error (or process kill).
 pub async fn run(config: BridgeConfig, prime_frame: Arc<[u8]>) {
     let light_state = Arc::new(Mutex::new(LightStateSnapshot::default()));
+    let climate_left = Arc::new(Mutex::new(ClimateSideState::default()));
+    let climate_right = Arc::new(Mutex::new(ClimateSideState::default()));
     let mut opts = MqttOptions::new(
         config.mqtt_client_id.clone(),
         config.mqtt_host.as_str(),
@@ -453,17 +776,39 @@ pub async fn run(config: BridgeConfig, prime_frame: Arc<[u8]>) {
             Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
                 if ack.code == rumqttc::ConnectReturnCode::Success {
                     tracing::info!("MQTT connected");
-                    setup_session(&client, &config).await;
-                    if config.i2c_device.is_some() {
-                        let snap = light_state.lock().await.clone();
-                        publish_light_state(&client, &config, &snap).await;
-                    }
+                    // rumqttc: `AsyncClient` requests are only processed while `eventloop.poll()` runs.
+                    // Awaiting `publish`/`subscribe` on the same task that calls `poll()` deadlocks the
+                    // event loop — spawn so the broker actually receives discovery and availability.
+                    let c = client.clone();
+                    let cfg = config.clone();
+                    let ls = light_state.clone();
+                    let cl = climate_left.clone();
+                    let cr = climate_right.clone();
+                    tokio::spawn(async move {
+                        setup_session(&c, &cfg).await;
+                        if cfg.i2c_device.is_some() {
+                            let snap = ls.lock().await.clone();
+                            publish_light_state(&c, &cfg, &snap).await;
+                        }
+                        let left = cl.lock().await.clone();
+                        publish_climate_state(&c, &cfg, BedSide::Left, &left).await;
+                        let right = cr.lock().await.clone();
+                        publish_climate_state(&c, &cfg, BedSide::Right, &right).await;
+                    });
                 } else {
                     tracing::error!(code = ?ack.code, "MQTT connection refused");
                 }
             }
             Ok(Event::Incoming(Incoming::Publish(p))) => {
-                handle_publish(&client, &config, &prime_frame, &light_state, p).await;
+                let c = client.clone();
+                let cfg = config.clone();
+                let pf = prime_frame.clone();
+                let ls = light_state.clone();
+                let cl = climate_left.clone();
+                let cr = climate_right.clone();
+                tokio::spawn(async move {
+                    handle_publish(&c, &cfg, &pf, &ls, &cl, &cr, p).await;
+                });
             }
             Ok(_) => {}
             Err(ConnectionError::RequestsDone) => {

@@ -33,12 +33,13 @@ CRC algorithm (same as opensleep `checksum::compute`):
 | Name (concept) | Payload bytes (hex) | Full framed example (hex, spaces) | Notes |
 |------------------|----------------------|-------------------------------------|-------|
 | **Prime**        | `52`                 | `7E 01 52 B6 2B`                    | Opensleep `FrozenCommand::Prime`; starts/marks priming on the Frozen subsystem. |
+| **SetTargetTemperature** | `40` *side* *en* *T_hi* *T_lo* | `7E 05 40 00 01 0E 10 E6 A8` (example) | Side `00` = left, `01` = right; *en* `01` = enabled; target `T` is **u16 BE** in **centidegrees** °C (`0x0E10` → 36.00 °C). Opensleep `FrozenCommand::SetTargetTemperature`. |
 
-The example row matches opensleep’s unit test output byte-for-byte (`FrozenCommand::Prime.to_bytes()`).
+The **Prime** example matches opensleep’s unit test output byte-for-byte (`FrozenCommand::Prime.to_bytes()`). The **SetTargetTemperature** example matches opensleep’s `test_temp` (`Left`, 36 °C, enabled).
 
 ## Responses
 
-The Frozen MCU sends frames using the **same** `0x7E` / length / CRC wrapping for outbound packets; parsing is implemented in opensleep’s `PacketCodec` / `FrozenPacket` (`src/frozen/packet.rs`). **This repository (v1)** only **sends** the prime frame and does not decode responses yet.
+The Frozen MCU sends frames using the **same** `0x7E` / length / CRC wrapping for outbound packets; parsing is implemented in opensleep’s `PacketCodec` / `FrozenPacket` (`src/frozen/packet.rs`). **This repository** sends **Prime**, **SetTargetTemperature** (per MQTT climate), and (elsewhere) LED I²C — it **does not decode** inbound Frozen packets yet, so current temperatures are not surfaced over MQTT.
 
 ## Verifying on Pod 4
 

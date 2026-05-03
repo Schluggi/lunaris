@@ -1,4 +1,4 @@
-//! Eight Sleep Pod Frozen **prime** bridge: MQTT (Home Assistant discovery) → USART.
+//! Eight Sleep Pod Frozen bridge: MQTT (Home Assistant discovery: prime, climate left/right, LED) → USART / I²C.
 //!
 //! SPDX-License-Identifier: GPL-3.0-only
 
