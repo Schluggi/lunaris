@@ -30,6 +30,7 @@ Typical MQTT topics: `…/button/prime/set`, `…/button/vibrate_left|vibrate_ri
 
 ## Conventions for changes
 
+- **Language:** User-facing text (Home Assistant discovery names, README, `docs/`, CLI help) is **English only**.
 - **License:** GPL-3.0 ([`LICENSE`](LICENSE)). Code/framing traceable to opensleep → keep attribution/source notices in affected files.
 - **Scope:** Stay focused (no large drive-by refactors). Add new features (TLS, more entities) deliberately and document them.
 - **Tests:** **Unit-test** critical logic (CRC, frame bytes); CI: [`/.github/workflows/ci.yml`](.github/workflows/ci.yml) (`fmt`, `test`, `clippy`, `release` build).

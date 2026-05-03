@@ -240,8 +240,8 @@ fn discovery_payload_light(config: &BridgeConfig) -> String {
 
 fn discovery_payload_climate(config: &BridgeConfig, side: BedSide) -> String {
     let name = match side {
-        BedSide::Left => "Cover links",
-        BedSide::Right => "Cover rechts",
+        BedSide::Left => "Cover left",
+        BedSide::Right => "Cover right",
     };
     let unique_suffix = match side {
         BedSide::Left => "climate_left",
@@ -272,8 +272,8 @@ fn discovery_payload_climate(config: &BridgeConfig, side: BedSide) -> String {
 
 fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> String {
     let name = match side {
-        BedSide::Left => "Matratze vibrieren (links)",
-        BedSide::Right => "Matratze vibrieren (rechts)",
+        BedSide::Left => "Vibrate mattress (left)",
+        BedSide::Right => "Vibrate mattress (right)",
     };
     let unique_suffix = match side {
         BedSide::Left => "vibrate_left",

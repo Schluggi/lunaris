@@ -121,7 +121,7 @@ Two MQTT **[climate](https://www.home-assistant.io/integrations/climate.mqtt/)**
 
 ## Vibration (per side, Sensor UART)
 
-Vibration uses the **Sensor** MCU’s USART (not Frozen): opensleep **`SensorCommand::SetAlarm`** (`0x2C` + side + intensity + pattern + duration). MQTT exposes two **[buttons](https://www.home-assistant.io/integrations/button.mqtt/)** (**Matratze vibrieren (links/rechts)**); each press sends one alarm with **`--vibration-intensity`**, **`--vibration-duration-sec`**, and **`--vibration-pattern`**. Pod 4: Sensor is commonly **`/dev/ttyS2`**.
+Vibration uses the **Sensor** MCU’s USART (not Frozen): opensleep **`SensorCommand::SetAlarm`** (`0x2C` + side + intensity + pattern + duration). MQTT exposes two **[buttons](https://www.home-assistant.io/integrations/button.mqtt/)** (**Vibrate mattress (left)** / **Vibrate mattress (right)**); each press sends one alarm with **`--vibration-intensity`**, **`--vibration-duration-sec`**, and **`--vibration-pattern`**. Pod 4: Sensor is commonly **`/dev/ttyS2`**.
 
 ## LED (Home Assistant light)
 
