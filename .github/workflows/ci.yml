@@ -29,3 +29,19 @@ jobs:
 
       - name: Cargo build (release)
         run: cargo build --release --verbose
+
+  # Same CPU family as Eight Sleep Pod SOM (aarch64); catches missing cross-setup early.
+  build-aarch64-gnu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install AArch64 GNU toolchain (linker)
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cargo build (aarch64 release)
+        run: cargo build --release --verbose --target aarch64-unknown-linux-gnu
