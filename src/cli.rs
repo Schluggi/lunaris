@@ -1,4 +1,6 @@
-//! Command-line interface (MQTT broker + serial port). No config file.
+//! Command-line interface (MQTT broker + serial port). No standalone config **file** —
+//! on Pod OS, Frozen/Sensor **`/dev/tty…`** defaults can be patched from **`/opt/eight/config/machine.json`**
+//! when [`crate::machine_config`] applies (CLI flags still win).
 
 use std::path::PathBuf;
 
@@ -55,9 +57,11 @@ pub struct Cli {
 
     /// Serial device for the **Frozen** subsystem.
     ///
-    /// Pod **4** (reported by frankenfirmware / community): Frozen on **`/dev/ttyS1`**, sensor on `/dev/ttyS2`
-    /// ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)).
-    /// Pod **3** / stock opensleep paths often use **`/dev/ttymxc2`** for Frozen instead.
+    /// Default **`/dev/ttyS1`** is overridden by **`frozenPort`** in **`/opt/eight/config/machine.json`**
+    /// when present and **`--serial-device`** is **not** on the command line.
+    ///
+    /// Pod **4** (community): often **`ttyS1`/`ttyS2`** ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11));
+    /// Pod **3** / opensleep paths often **`/dev/ttymxc2`** for Frozen.
     ///
     /// Must be openable at startup; otherwise the process exits before MQTT connects.
     #[arg(long, default_value = "/dev/ttyS1")]
@@ -106,7 +110,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 0.5)]
     pub climate_temp_step: f64,
 
-    /// Serial device for the **Sensor** subsystem (vibration / piezo). Pod **4**: often **`/dev/ttyS2`** (Frozen is `ttyS1`).
+    /// Serial device for the **Sensor** subsystem (vibration / piezo).
+    ///
+    /// Default **`/dev/ttyS2`** is overridden by **`sensorPort`** in **`/opt/eight/config/machine.json`**
+    /// when present and **`--sensor-device`** is **not** on the command line.
     #[arg(long, default_value = "/dev/ttyS2")]
     pub sensor_device: PathBuf,
 

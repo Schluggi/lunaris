@@ -3,6 +3,7 @@
 //! SPDX-License-Identifier: GPL-3.0-only
 
 mod cli;
+mod machine_config;
 mod frozen_frame;
 mod frozen_link;
 mod frozen_rx;
@@ -16,12 +17,11 @@ mod wire_buffer;
 
 use std::sync::Arc;
 
-use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-    let cli = cli::Cli::parse();
+    let cli = machine_config::parse_cli_overlay_machine_json();
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(cli.log_level.clone()));
     tracing_subscriber::fmt().with_env_filter(filter).init();
