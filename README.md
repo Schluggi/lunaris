@@ -1,6 +1,6 @@
 # narcolepsy
 
-Single-binary **local-only** bridge: talks to the Pod **Frozen** subsystem over USART (opensleep-style framing) for **prime**, **per-side target temperature** (left/right), and (optionally) the **IS31FL3194** bed LED over I²C — exposed to **Home Assistant** via [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) (button, two climates, light).
+Single-binary **local-only** bridge: **Frozen** USART (prime, per-side temperature), optional **Sensor** USART (per-side **vibration** / `SetAlarm`), optional **IS31FL3194** LED on I²C — **Home Assistant** via [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) (buttons, climates, light).
 
 ## Disclaimer
 
@@ -83,7 +83,7 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--mqtt-username` | *(empty)* | `MQTT_USERNAME` | Broker username (optional). |
 | `--mqtt-password` | *(empty)* | `MQTT_PASSWORD` | Broker password (optional). |
 | `--mqtt-client-id` | `narcolepsy` | — | MQTT client id. |
-| `--topic-prefix` | `narcolepsy/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/climate/left|right/{mode,temperature}/{set,state}`, `{prefix}/light/led/set`, `{prefix}/light/led/state`, `{prefix}/result`, etc. |
+| `--topic-prefix` | `narcolepsy/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/button/vibrate_left|vibrate_right/set`, `{prefix}/climate/...`, `{prefix}/light/...`, `{prefix}/result`, etc. |
 | `--discovery-prefix` | `homeassistant` | — | Home Assistant [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) prefix. |
 | `--discovery-object-id` | `narcolepsy_prime` | — | `<object_id>` in `homeassistant/button/<object_id>/config`. |
 | `--device-name` | `Eight Sleep` | — | Friendly device name in discovery (`device.name`). |
@@ -99,6 +99,14 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--climate-min-temp` | `13` | — | Minimum target temperature (°C) in climate discovery. |
 | `--climate-max-temp` | `47` | — | Maximum target temperature (°C) in climate discovery. |
 | `--climate-temp-step` | `0.5` | — | Slider step (°C) in Home Assistant. |
+| `--sensor-device` | `/dev/ttyS2` | — | **Sensor** subsystem UART (vibration / `SetAlarm`). Pod 4: often `ttyS2` while Frozen is `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)). Probed at startup; if it cannot be opened, the bridge continues **without** vibrate buttons. |
+| `--sensor-baud` | `38400` | — | Sensor serial speed (bits/s). |
+| `--no-vibration` | *(off)* | — | Skip Sensor UART: no vibrate button discovery. |
+| `--discovery-object-id-vibrate-left` | `narcolepsy_vibrate_left` | — | `<object_id>` for left vibrate `homeassistant/button/.../config`. |
+| `--discovery-object-id-vibrate-right` | `narcolepsy_vibrate_right` | — | Same for the right side. |
+| `--vibration-intensity` | `64` | — | Default intensity 1–100 for vibrate buttons (Sensor `SetAlarm`). |
+| `--vibration-duration-sec` | `15` | — | Default duration in seconds (clamped 1…600). |
+| `--vibration-pattern` | `single` | — | `single` or `double` (opensleep `AlarmPattern`). |
 | `--log-level` | `info` | — | Default `tracing` filter if `RUST_LOG` is unset (e.g. `debug`, `info,narcolepsy=debug`). |
 
 If **`RUST_LOG`** is set in the environment, it takes precedence over `--log-level` (standard `tracing_subscriber` behaviour).
@@ -109,7 +117,11 @@ See [docs/usart-frozen.md](docs/usart-frozen.md).
 
 ## Climate (Home Assistant, left / right)
 
-Two MQTT **[climate](https://www.home-assistant.io/integrations/climate.mqtt/)** entities (**Cover links** / **Cover rechts**) send opensleep-compatible **`SetTargetTemperature`** frames on the Frozen UART (`0x40` + side + enable + target in **centidegree** Celsius). Modes: **`off`** and **`heat_cool`** (active regulation at the setpoint). There is **no** MQTT-published **current** temperature yet (serial RX not implemented).
+Two MQTT **[climate](https://www.home-assistant.io/integrations/climate.mqtt/)** entities send opensleep-compatible **`SetTargetTemperature`** frames on the Frozen UART (`0x40` + side + enable + target in **centidegree** Celsius). Modes: **`off`** and **`heat_cool`**. There is **no** MQTT-published **current** temperature yet (serial RX not implemented).
+
+## Vibration (per side, Sensor UART)
+
+Vibration uses the **Sensor** MCU’s USART (not Frozen): opensleep **`SensorCommand::SetAlarm`** (`0x2C` + side + intensity + pattern + duration). MQTT exposes two **[buttons](https://www.home-assistant.io/integrations/button.mqtt/)** (**Matratze vibrieren (links/rechts)**); each press sends one alarm with **`--vibration-intensity`**, **`--vibration-duration-sec`**, and **`--vibration-pattern`**. Pod 4: Sensor is commonly **`/dev/ttyS2`**.
 
 ## LED (Home Assistant light)
 

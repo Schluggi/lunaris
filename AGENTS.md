@@ -1,61 +1,62 @@
-# AGENTS.md — Kontext für Bearbeitung dieses Repos
+# AGENTS.md — Context for working on this repo
 
-Diese Datei ist für **KI- und Human-Agenten** gedacht, die am Projekt arbeiten. **Bitte bei relevanten Änderungen am Verhalten, der Architektur oder den Konventionen diesen Abschnitt aktualisieren**, damit der Kontext für spätere Sessions stimmt.
+This file is for **AI and human agents** working on the project. **Please update this section when behavior, architecture, or conventions change materially**, so context stays accurate for later sessions.
 
-## Zweck
+## Purpose
 
-**narcolepsy** ist eine **einzige Rust-Binary**, die lokal (ohne Eight-Sleep-Cloud) **Frozen**-USART-Befehle sendet (**Prime**, **SetTargetTemperature** links/rechts). Das Wire-Format ist **opensleep-kompatibel** ([LiamSnow/opensleep](https://github.com/LiamSnow/opensleep): CRC + `0x7E`-Rahmen).
+**narcolepsy** is a **single Rust binary** that sends **Frozen** USART commands locally (without the Eight Sleep cloud): **Prime**, **SetTargetTemperature** left/right, and optionally **Vibration** on the **Sensor** UART (**SetAlarm** per side). Wire format **opensleep** ([LiamSnow/opensleep](https://github.com/LiamSnow/opensleep): CRC + `0x7E` framing).
 
-Zielhardware des Nutzers: **Eight Sleep Pod 4** — das Protokoll ist im Code/Repositories nach **Pod 3 / opensleep** modelliert und **auf Pod 4 experimentell**; Abweichungen (TTY, Baud, Befehl) sind möglich ([`docs/usart-frozen.md`](docs/usart-frozen.md)).
+Target hardware: **Eight Sleep Pod 4** — the protocol is modeled in code/repos after **Pod 3 / opensleep** and is **experimental on Pod 4**; differences (TTY, baud, commands) are possible ([`docs/usart-frozen.md`](docs/usart-frozen.md)).
 
-**Deploy-Ziel:** Das Pod-OS ist **Linux aarch64** (z. B. „Eight Layer“, `uname -m` → `aarch64`). Releases müssen mit **`--target aarch64-unknown-linux-gnu`** (o. ä.) gebaut werden; siehe **README** und [`.cargo/config.toml`](.cargo/config.toml). Native `x86_64`-Builds auf dem Pod ausführen → `Exec format error`.
+**Deploy target:** Pod OS is **Linux aarch64** (e.g. “Eight Layer”, `uname -m` → `aarch64`). Releases must be built with **`--target aarch64-unknown-linux-gnu`** (or similar); see **README** and [`.cargo/config.toml`](.cargo/config.toml). Running native `x86_64` builds on the Pod → `Exec format error`.
 
-## Architektur (kurz)
+## Architecture (brief)
 
-| Modul / Pfad | Rolle |
-|--------------|--------|
-| [`src/main.rs`](src/main.rs) | Einstieg: CLI parsen, Logging, **Serial-Port-Startup-Check** (`check_device_accessible`); bei Fehler **sofort `exit(1)`**, kein MQTT. Danach `mqtt_bridge::run`. |
-| [`src/cli.rs`](src/cli.rs) | **clap**: MQTT-Broker, Topic-Prefix, Discovery-IDs, Serielle Parameter (`--serial-device`, `--serial-baud`). **Kein Config-File** in v1. |
-| [`src/frozen_frame.rs`](src/frozen_frame.rs) | CRC-CCITT + Frame-Encoding; `prime_frame()`, `set_target_temperature_frame()` — Tests mit festem Hex (opensleep). |
-| [`src/serial_prime.rs`](src/serial_prime.rs) | `check_device_accessible` (Start), `send_frame` beim Button (`tokio-serial`). |
-| [`src/is31fl3194.rs`](src/is31fl3194.rs) | IS31FL3194 über Linux **I²C** (`i2cdev`), solid RGB — Logik aus opensleep `led/controller.rs` (GPL). |
-| [`src/mqtt_bridge.rs`](src/mqtt_bridge.rs) | **rumqttc**: LWT/Availability, Discovery **Button** + **Climate** (links/rechts) + optional **Light** (JSON), Prime-/Climate-/LED-Commands, `homeassistant/status`, `{prefix}/result`. |
+| Module / path | Role |
+|---------------|------|
+| [`src/main.rs`](src/main.rs) | CLI, logging; **Frozen serial required** (`exit(1)` if not open); **Sensor serial optional** (vibration — warning if not open); LED I²C optional. Then `mqtt_bridge::run`. |
+| [`src/cli.rs`](src/cli.rs) | **clap**: MQTT, discovery IDs, Frozen + Sensor + I²C. **No config file** in v1. |
+| [`src/frozen_frame.rs`](src/frozen_frame.rs) | CRC + framing; Frozen: `prime_frame()`, `set_target_temperature_frame()`. |
+| [`src/sensor_frame.rs`](src/sensor_frame.rs) | Sensor: `set_alarm_frame()` (= opensleep `SetAlarm` / vibration). |
+| [`src/serial_prime.rs`](src/serial_prime.rs) | `check_device_accessible` (startup), `send_frame` on button press (`tokio-serial`). |
+| [`src/is31fl3194.rs`](src/is31fl3194.rs) | IS31FL3194 over Linux **I²C** (`i2cdev`), solid RGB — logic from opensleep `led/controller.rs` (GPL). |
+| [`src/mqtt_bridge.rs`](src/mqtt_bridge.rs) | **rumqttc**: discovery Prime + optional **Vibrate** (left/right) + climate + optional light; outbound in **`tokio::spawn`** (avoid deadlock with `poll()`). |
 
-Typische MQTT-Topics (Default-Präfix `narcolepsy/pod4` in CLI): `…/availability`, `…/button/prime/set`, `…/climate/left|right/…`, `…/result`; Discovery unter `homeassistant/button|climate|light/<object_id>/config`.
+Typical MQTT topics: `…/button/prime/set`, `…/button/vibrate_left|vibrate_right/set`, `…/climate/…`, `…/result`.
 
-**Frozen-Seriell:** Default **`/dev/ttyS1`** (Pod 4 laut [opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)). Pod 3: meist **`/dev/ttymxc2`**.
+**Frozen serial:** default **`/dev/ttyS1`** (Pod 4). **Sensor (vibration):** default **`/dev/ttyS2`** — `--no-vibration` or open failure → no vibration buttons.
 
-**LED:** I²C default **`/dev/i2c-1`**, Chip **0x53**; bei Problemen nur Warnung, dann ohne Light-Entity. `--no-led` schaltet LED komplett ab.
+**LED:** I²C **`/dev/i2c-1`**; `--no-led` or error → no light.
 
-## Konventionen für Änderungen
+## Conventions for changes
 
-- **Lizenz:** GPL-3.0 ([`LICENSE`](LICENSE)). Code/Framing aus opensleep ableitbar → Urheber-/Herkunftshinweise in betroffenen Dateien wahren.
-- **Scope:** Fokussiert bleiben (keine großen Refactors „nebenbei“). Neue Features (TLS, weitere Entities) gezielt und dokumentiert ergänzen.
-- **Tests:** Kritische Logik (CRC, Frame-Bytes) **unit-testen**; CI: [`/.github/workflows/ci.yml`](.github/workflows/ci.yml) (`fmt`, `test`, `clippy`, `release` build).
-- **Toolchain:** [`rust-toolchain.toml`](rust-toolchain.toml) — **clap** ist auf `=4.5.27` gepinnt (Kompatibilität mit Rust 1.84; neuere clap-Versionen können Rust 1.85+/Edition 2024 verlangen).
+- **License:** GPL-3.0 ([`LICENSE`](LICENSE)). Code/framing traceable to opensleep → keep attribution/source notices in affected files.
+- **Scope:** Stay focused (no large drive-by refactors). Add new features (TLS, more entities) deliberately and document them.
+- **Tests:** **Unit-test** critical logic (CRC, frame bytes); CI: [`/.github/workflows/ci.yml`](.github/workflows/ci.yml) (`fmt`, `test`, `clippy`, `release` build).
+- **Toolchain:** [`rust-toolchain.toml`](rust-toolchain.toml) — **clap** is pinned to `=4.5.27` (compatibility with Rust 1.84; newer clap may require Rust 1.85+/Edition 2024).
 
-## Befehle
+## Commands
 
 ```bash
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
 # Pod / aarch64:
-# rustup target add aarch64-unknown-linux-gnu  # + Kreuz-Linker-Paket des Host-OS
+# rustup target add aarch64-unknown-linux-gnu  # + cross-linker package for the host OS
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
-Logging: `RUST_LOG`, zusätzlich `--log-level` (siehe `--help`).
+Logging: `RUST_LOG`, plus `--log-level` (see `--help`).
 
-## Pflege dieser Datei
+## Maintaining this file
 
-Wenn du folgendes änderst, **AGENTS.md hier anpassen**:
+When you change any of the following, **update AGENTS.md here**:
 
-- Neue CLI-Flags, Default-Topics oder Discovery-Felder.
-- Serielle Parameter, Protokollbytes oder Pod-spezifische Annahmen.
-- Neue Abhängigkeiten oder bewusste Pins (z. B. clap).
-- Neue öffentliche Doku-Pfade oder CI-Schritte.
+- New CLI flags, default topics, or discovery fields.
+- Serial parameters, protocol bytes, or Pod-specific assumptions.
+- New dependencies or intentional pins (e.g. clap).
+- New public doc paths or CI steps.
 
 ---
 
-*Cursor erkennt üblicherweise `AGENTS.md` im Repo-Root; Inhalt gilt für alle automatisierten Agenten.*
+*Cursor typically picks up `AGENTS.md` at the repo root; the contents apply to all automated agents.*

@@ -6,6 +6,7 @@ mod cli;
 mod frozen_frame;
 mod is31fl3194;
 mod mqtt_bridge;
+mod sensor_frame;
 mod serial_prime;
 
 use std::sync::Arc;
@@ -57,6 +58,25 @@ async fn main() {
                 );
             }
         }
+    }
+
+    if cli.no_vibration {
+        tracing::info!("Vibration / Sensor UART disabled (--no-vibration)");
+    } else if let Err(e) =
+        serial_prime::check_device_accessible(&cli.sensor_device, cli.sensor_baud).await
+    {
+        tracing::warn!(
+            device = %cli.sensor_device.display(),
+            error = %e,
+            "cannot open Sensor serial for vibration; continuing without vibrate buttons"
+        );
+    } else {
+        tracing::info!(
+            device = %cli.sensor_device.display(),
+            baud = cli.sensor_baud,
+            "Sensor serial opened (vibration / SetAlarm)"
+        );
+        config.sensor_device = Some(cli.sensor_device.clone());
     }
 
     let frame = frozen_frame::prime_frame();

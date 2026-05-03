@@ -2,12 +2,20 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+/// Vibration pattern for [`Cli::vibration_pattern`] (Sensor `SetAlarm` / opensleep `AlarmPattern`).
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum VibrationPatternArg {
+    #[default]
+    Single,
+    Double,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "narcolepsy")]
 #[command(
-    about = "Local MQTT bridge: Frozen USART (prime, mattress climate left/right) + Pod LED (IS31FL3194 I²C), Home Assistant MQTT discovery."
+    about = "Local MQTT bridge: Frozen USART (prime, climate) + Sensor vibration (per side) + Pod LED (I²C), Home Assistant MQTT discovery."
 )]
 pub struct Cli {
     /// MQTT broker hostname or IP.
@@ -93,6 +101,37 @@ pub struct Cli {
     /// Step between temperature adjustments in Home Assistant (°C).
     #[arg(long, default_value_t = 0.5)]
     pub climate_temp_step: f64,
+
+    /// Serial device for the **Sensor** subsystem (vibration / piezo). Pod **4**: often **`/dev/ttyS2`** (Frozen is `ttyS1`).
+    #[arg(long, default_value = "/dev/ttyS2")]
+    pub sensor_device: PathBuf,
+
+    #[arg(long, default_value_t = 38400)]
+    pub sensor_baud: u32,
+
+    /// Do not open the Sensor UART — no vibration MQTT buttons.
+    #[arg(long, default_value_t = false)]
+    pub no_vibration: bool,
+
+    /// `<object_id>` for `homeassistant/button/<object_id>/config` (vibrate left).
+    #[arg(long, default_value = "narcolepsy_vibrate_left")]
+    pub discovery_object_id_vibrate_left: String,
+
+    /// `<object_id>` for `homeassistant/button/<object_id>/config` (vibrate right).
+    #[arg(long, default_value = "narcolepsy_vibrate_right")]
+    pub discovery_object_id_vibrate_right: String,
+
+    /// Default vibration intensity (1–100) for MQTT vibrate buttons.
+    #[arg(long, default_value_t = 64)]
+    pub vibration_intensity: u8,
+
+    /// Default duration (seconds) for MQTT vibrate buttons.
+    #[arg(long, default_value_t = 15)]
+    pub vibration_duration_sec: u32,
+
+    /// Default vibration pattern for MQTT vibrate buttons.
+    #[arg(long, value_enum, default_value_t = VibrationPatternArg::Single)]
+    pub vibration_pattern: VibrationPatternArg,
 
     /// `tracing` filter (e.g. `debug`, `info,narcolepsy=debug`).
     #[arg(long, default_value = "info")]

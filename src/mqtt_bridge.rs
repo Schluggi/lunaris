@@ -1,4 +1,4 @@
-//! MQTT: Home Assistant discovery, prime button, mattress climate (left/right), JSON light (IS31FL3194 via I²C).
+//! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor), mattress climate, JSON light (I²C).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
 //! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
@@ -15,6 +15,7 @@ use tokio::time::{sleep, Duration};
 use crate::cli::Cli;
 use crate::frozen_frame::{set_target_temperature_frame, BedSide};
 use crate::is31fl3194::Is31fl3194;
+use crate::sensor_frame::{set_alarm_frame, AlarmPattern};
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
@@ -46,6 +47,14 @@ pub struct BridgeConfig {
     pub serial_baud: u32,
     /// `None` → LED feature disabled (`--no-led` or I²C probe failed).
     pub i2c_device: Option<PathBuf>,
+    /// `None` → vibration MQTT buttons disabled (`--no-vibration` or Sensor UART probe failed).
+    pub sensor_device: Option<PathBuf>,
+    pub sensor_baud: u32,
+    pub discovery_object_id_vibrate_left: String,
+    pub discovery_object_id_vibrate_right: String,
+    pub vibration_intensity: u8,
+    pub vibration_duration_sec: u32,
+    pub vibration_pattern: AlarmPattern,
 }
 
 impl BridgeConfig {
@@ -72,6 +81,16 @@ impl BridgeConfig {
             serial_device: cli.serial_device.clone(),
             serial_baud: cli.serial_baud,
             i2c_device: None,
+            sensor_device: None,
+            sensor_baud: cli.sensor_baud,
+            discovery_object_id_vibrate_left: cli.discovery_object_id_vibrate_left.clone(),
+            discovery_object_id_vibrate_right: cli.discovery_object_id_vibrate_right.clone(),
+            vibration_intensity: cli.vibration_intensity.clamp(1, 100),
+            vibration_duration_sec: cli.vibration_duration_sec.clamp(1, 600),
+            vibration_pattern: match cli.vibration_pattern {
+                crate::cli::VibrationPatternArg::Single => AlarmPattern::Single,
+                crate::cli::VibrationPatternArg::Double => AlarmPattern::Double,
+            },
         }
     }
 
@@ -143,6 +162,22 @@ impl BridgeConfig {
             BedSide::Right => "right",
         };
         format!("{}/climate/{}/temperature/state", self.topic_prefix, s)
+    }
+
+    pub fn vibrate_discovery_topic(&self, side: BedSide) -> String {
+        let id = match side {
+            BedSide::Left => &self.discovery_object_id_vibrate_left,
+            BedSide::Right => &self.discovery_object_id_vibrate_right,
+        };
+        format!("{}/button/{}/config", self.discovery_prefix, id)
+    }
+
+    pub fn vibrate_command_topic(&self, side: BedSide) -> String {
+        let suffix = match side {
+            BedSide::Left => "vibrate_left",
+            BedSide::Right => "vibrate_right",
+        };
+        format!("{}/button/{}/set", self.topic_prefix, suffix)
     }
 
     pub fn result_topic(&self) -> String {
@@ -235,6 +270,30 @@ fn discovery_payload_climate(config: &BridgeConfig, side: BedSide) -> String {
     .to_string()
 }
 
+fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> String {
+    let name = match side {
+        BedSide::Left => "Matratze vibrieren (links)",
+        BedSide::Right => "Matratze vibrieren (rechts)",
+    };
+    let unique_suffix = match side {
+        BedSide::Left => "vibrate_left",
+        BedSide::Right => "vibrate_right",
+    };
+    json!({
+        "name": name,
+        "command_topic": config.vibrate_command_topic(side),
+        "payload_press": config.payload_press,
+        "unique_id": format!("{}_{}", config.device_identifier, unique_suffix),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 #[derive(Deserialize, Default)]
 struct HaLightCommand {
     state: Option<String>,
@@ -310,6 +369,52 @@ fn climate_action_label(side: BedSide) -> &'static str {
     match side {
         BedSide::Left => "climate_left",
         BedSide::Right => "climate_right",
+    }
+}
+
+fn vibrate_action_label(side: BedSide) -> &'static str {
+    match side {
+        BedSide::Left => "vibrate_left",
+        BedSide::Right => "vibrate_right",
+    }
+}
+
+async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side: BedSide) {
+    let Some(ref sensor_path) = config.sensor_device else {
+        return;
+    };
+    let intensity = config.vibration_intensity.clamp(1, 100);
+    let duration = config.vibration_duration_sec.clamp(1, 600);
+    let frame = set_alarm_frame(side, intensity, config.vibration_pattern, duration);
+    match serial_prime::send_frame(sensor_path, config.sensor_baud, &frame).await {
+        Ok(()) => {
+            tracing::info!(
+                ?side,
+                intensity,
+                duration,
+                pattern = ?config.vibration_pattern,
+                "Sensor SetAlarm (vibration) sent"
+            );
+            publish_json_result(
+                client,
+                config,
+                vibrate_action_label(side),
+                "success",
+                "set alarm / vibration",
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::error!(?e, ?side, "Sensor serial write failed (vibration)");
+            publish_json_result(
+                client,
+                config,
+                vibrate_action_label(side),
+                "error",
+                &e.to_string(),
+            )
+            .await;
+        }
     }
 }
 
@@ -587,6 +692,17 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             tracing::error!(?e, side = ?side, "publish climate discovery");
         }
     }
+    if config.sensor_device.is_some() {
+        for side in [BedSide::Left, BedSide::Right] {
+            let disc_v = discovery_payload_vibrate_button(config, side);
+            if let Err(e) = client
+                .publish(config.vibrate_discovery_topic(side), qos, true, disc_v)
+                .await
+            {
+                tracing::error!(?e, side = ?side, "publish vibrate discovery");
+            }
+        }
+    }
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
         .await
@@ -617,6 +733,16 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
             .await
         {
             tracing::error!(?e, side = ?side, "subscribe climate temperature topic");
+        }
+    }
+    if config.sensor_device.is_some() {
+        for side in [BedSide::Left, BedSide::Right] {
+            if let Err(e) = client
+                .subscribe(config.vibrate_command_topic(side), qos)
+                .await
+            {
+                tracing::error!(?e, side = ?side, "subscribe vibrate command topic");
+            }
         }
     }
     if let Err(e) = client.subscribe(HA_STATUS_TOPIC, qos).await {
@@ -703,6 +829,20 @@ async fn handle_publish(
         return;
     }
 
+    if config.sensor_device.is_some() {
+        let expected = config.payload_press.as_bytes();
+        if p.topic == config.vibrate_command_topic(BedSide::Left) && p.payload.as_ref() == expected
+        {
+            handle_vibrate_press(client, config, BedSide::Left).await;
+            return;
+        }
+        if p.topic == config.vibrate_command_topic(BedSide::Right) && p.payload.as_ref() == expected
+        {
+            handle_vibrate_press(client, config, BedSide::Right).await;
+            return;
+        }
+    }
+
     if p.topic == config.climate_mode_command_topic(BedSide::Left) {
         handle_climate_mode_command(client, config, BedSide::Left, climate_left, &p.payload).await;
         return;
@@ -767,6 +907,7 @@ pub async fn run(config: BridgeConfig, prime_frame: Arc<[u8]>) {
         host = %config.mqtt_host,
         port = config.mqtt_port,
         led = config.i2c_device.is_some(),
+        vibrate = config.sensor_device.is_some(),
         "MQTT client created; polling event loop"
     );
 
