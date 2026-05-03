@@ -45,7 +45,9 @@ async fn main() {
 
     let mut config = mqtt_bridge::BridgeConfig::from_cli(&cli);
 
-    config.frozen_tx = Some(frozen_link::spawn(cli.serial_device.clone(), cli.serial_baud).tx);
+    let frozen_link = frozen_link::spawn(cli.serial_device.clone(), cli.serial_baud);
+    config.frozen_tx = Some(frozen_link.tx);
+    config.frozen_temperature_discovery = true;
 
     if cli.no_led {
         tracing::info!("LED control disabled (--no-led)");
@@ -67,6 +69,9 @@ async fn main() {
             }
         }
     }
+
+    let mut sensor_priming_events: Option<tokio::sync::mpsc::Receiver<sensor_link::PrimingEvent>> =
+        None;
 
     if cli.no_vibration {
         tracing::info!("Vibration / Sensor UART disabled (--no-vibration)");
@@ -92,9 +97,17 @@ async fn main() {
             cli.sensor_vibrate_no_ack_wait,
         );
         config.sensor_tx = Some(sensor.tx.clone());
+        config.sensor_priming_counts = Some(sensor.priming_counts.clone());
+        sensor_priming_events = Some(sensor.priming_events_rx);
     }
 
     let frame = frozen_frame::prime_frame();
     let arc = Arc::from(frame.into_boxed_slice());
-    mqtt_bridge::run(config, arc).await;
+    mqtt_bridge::run(
+        config,
+        arc,
+        sensor_priming_events,
+        Some(frozen_link.temperature_rx),
+    )
+    .await;
 }

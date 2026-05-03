@@ -30,7 +30,11 @@ pub async fn send_frame(device: &Path, baud: u32, frame: &[u8]) -> Result<(), Se
 }
 
 /// Writes several frames on one open handle (Sensor vibration sequence).
-pub async fn send_frames(device: &Path, baud: u32, frames: &[Vec<u8>]) -> Result<(), SerialPrimeError> {
+pub async fn send_frames(
+    device: &Path,
+    baud: u32,
+    frames: &[Vec<u8>],
+) -> Result<(), SerialPrimeError> {
     let path = device.to_string_lossy().to_string();
     let mut port = tokio_serial::new(path, baud).open_native_async()?;
     for frame in frames {

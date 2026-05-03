@@ -82,6 +82,10 @@ pub struct Cli {
     #[arg(long, default_value = "narcolepsy_led")]
     pub discovery_object_id_led: String,
 
+    /// `<object_id>` for `homeassistant/switch/<object_id>/config` (startup LED on/off preference).
+    #[arg(long, default_value = "narcolepsy_startup_led")]
+    pub discovery_object_id_startup_led: String,
+
     /// `<object_id>` for `homeassistant/climate/<object_id>/config` (left mattress side).
     #[arg(long, default_value = "narcolepsy_climate_left")]
     pub discovery_object_id_climate_left: String,
@@ -133,6 +137,22 @@ pub struct Cli {
     /// `<object_id>` for `homeassistant/button/<object_id>/config` (vibrate right).
     #[arg(long, default_value = "narcolepsy_vibrate_right")]
     pub discovery_object_id_vibrate_right: String,
+
+    /// `<object_id>` for `homeassistant/binary_sensor/<object_id>/config` (Sensor piezo priming active).
+    #[arg(long, default_value = "narcolepsy_priming")]
+    pub discovery_object_id_priming: String,
+
+    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (Frozen current temperature, left).
+    #[arg(long, default_value = "narcolepsy_temp_left")]
+    pub discovery_object_id_temp_left: String,
+
+    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (Frozen current temperature, right).
+    #[arg(long, default_value = "narcolepsy_temp_right")]
+    pub discovery_object_id_temp_right: String,
+
+    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (Frozen heatsink temperature).
+    #[arg(long, default_value = "narcolepsy_heatsink_temp")]
+    pub discovery_object_id_heatsink_temp: String,
 
     /// Default vibration intensity (1–100) for MQTT vibrate buttons.
     #[arg(long, default_value_t = 64)]

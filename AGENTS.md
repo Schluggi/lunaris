@@ -17,23 +17,23 @@ Target hardware: **Eight Sleep Pod 4** — the protocol is modeled in code/repos
 | [`src/main.rs`](src/main.rs) | CLI, logging; **Frozen serial required** (`exit(1)` if not open); **Sensor serial optional** (vibration — warning if not open); LED I²C optional. Spawns **`frozen_link`** + optional **`sensor_link`** (long-lived USART owners), then `mqtt_bridge::run`. |
 | [`src/cli.rs`](src/cli.rs) | **clap**: MQTT, discovery IDs, Frozen + Sensor + I²C. **No config file** in v1. |
 | [`src/frozen_frame.rs`](src/frozen_frame.rs) | CRC + framing; Frozen: `prime_frame()`, `ping_frame()`, `jump_to_firmware_frame()`, `set_target_temperature_frame()`, … |
-| [`src/frozen_rx.rs`](src/frozen_rx.rs) | Parses inbound Frozen payloads (`0x81` pong, `0x90` jump ack) so wake state tracks firmware vs bootloader. |
-| [`src/frozen_link.rs`](src/frozen_link.rs) | **Opens Frozen UART once** — opensleep-style **wake** (`Ping` + `JumpToFirmware` every 2s until pong shows firmware), **keepalive** ping ~15s, queues MQTT frames (`mpsc`). |
+| [`src/frozen_rx.rs`](src/frozen_rx.rs) | Parses inbound Frozen payloads: `0x81` pong, `0x90` jump ack (wake state); **`0x41` TemperatureUpdate**, **`0xC1` GetTemperature** → MQTT current temps + heatsink (opensleep `frozen/packet.rs`). |
+| [`src/frozen_link.rs`](src/frozen_link.rs) | **Opens Frozen UART once** — opensleep-style **wake** (`Ping` + `JumpToFirmware` every 2s until pong shows firmware), **keepalive** ping ~15s, queues MQTT frames (`mpsc`); forwards decoded temperatures to **`mqtt_bridge`**. |
 | [`src/sensor_frame.rs`](src/sensor_frame.rs) | Sensor: `vibration_sequence_frames`, `piezo_priming_frames`, `set_alarm_frame()` (= opensleep `SetAlarm`). |
 | [`src/sensor_rx.rs`](src/sensor_rx.rs) | Parses inbound **`0xAE` VibrationEnabled** (and related acks); required before `SetAlarm` works like opensleep’s state machine. |
 | [`src/wire_buffer.rs`](src/wire_buffer.rs) | If no `0x7E` yet, **retain** RX tail (do not `clear()`); avoids losing frames split across `read()` calls. |
-| [`src/sensor_link.rs`](src/sensor_link.rs) | **Opens Sensor UART once** — RX decode, periodic **piezo priming**, queues vibration: **priming → wait for `0xAE` → SetAlarm**. |
+| [`src/sensor_link.rs`](src/sensor_link.rs) | **Opens Sensor UART once** — RX decode, periodic **piezo priming**, queues vibration: **priming → wait for `0xAE` → SetAlarm**. MQTT **Priming** binary_sensor mirrors [`PrimingCounts`] (opensleep has no equivalent HA entity). Piezo setup follows opensleep-style staggering (`CONFIG_RES_TIME`–style gaps in [`sensor_link`](src/sensor_link.rs)); upstream schedules individual commands instead of bulk periodic batches. |
 | [`src/serial_prime.rs`](src/serial_prime.rs) | `check_device_accessible` at startup; **`send_frame` / `send_frames`** only as **fallback** when link queues are unset (tests). |
 | [`src/is31fl3194.rs`](src/is31fl3194.rs) | IS31FL3194 over Linux **I²C** (`i2cdev`), solid RGB — logic from opensleep `led/controller.rs` (GPL). |
-| [`src/mqtt_bridge.rs`](src/mqtt_bridge.rs) | **rumqttc**: discovery Prime + optional **Vibrate** + climate + optional light; enqueues bytes to **`frozen_tx` / `sensor_tx`**; outbound in **`tokio::spawn`** (avoid deadlock with `poll()`). |
+| [`src/mqtt_bridge.rs`](src/mqtt_bridge.rs) | **rumqttc**: discovery Prime + optional **Vibrate** + optional **Priming** binary_sensor + **three Frozen temperature sensors** (HA names **Current Temperature Left/Right**, heatsink °C; state topics still `cover_temperature_*`) + **climate left/right** (MQTT **`current_temperature_topic`** = same as each side’s `cover_temperature_*` state, see [climate.mqtt](https://www.home-assistant.io/integrations/climate.mqtt/)) + optional light + optional **Startup LED** switch (retained preference; green LED only when narcolepsy **starts** if ON); enqueues bytes to **`frozen_tx` / `sensor_tx`**; outbound in **`tokio::spawn`** (avoid deadlock with `poll()`). |
 
-Typical MQTT topics: `…/button/prime/set`, `…/button/vibrate_left|vibrate_right/set`, `…/climate/…`, `…/result`.
+Typical MQTT topics: `…/button/prime/set`, `…/button/vibrate_left|vibrate_right/set`, `…/binary_sensor/priming/state`, `…/sensor/cover_temperature_left|right/state`, `…/sensor/heatsink_temp/state`, `…/climate/…`, `…/switch/startup_led/set|state`, `…/result`.
 
 **Standalone operation:** **`frozen_link`** / **`sensor_link`** replicate opensleep’s continuous MCU handshake and priming so Prime/climate/vibration work **without** another service (e.g. frankenfirmware) on the same TTY — **only one process may own each UART**.
 
 **Frozen serial:** default **`/dev/ttyS1`** @ 38400 (Pod 4). **Sensor (vibration):** default **`/dev/ttyS2`** @ **`38400`** (Pod 4 RX framing; use **`115200`** for opensleep Pod 3–style firmware) — `--no-vibration` or open failure → no vibration buttons. On startup, **`sensor_link`** runs an opensleep-style **bootloader handshake** (38400 Ping + JumpToFirmware, then opens firmware baud) unless **`--no-sensor-bootloader-handshake`**. **`--sensor-vibrate-no-ack-wait`** skips waiting for inbound **`0xAE`** (for Pods where RX is not opensleep-framed at the chosen baud). Each vibrate sends EnableVibration + piezo setup + SetAlarm (matches opensleep sensor manager ordering).
 
-**LED:** I²C **`/dev/i2c-1`**; `--no-led` or error → no light.
+**LED:** I²C **`/dev/i2c-1`**; `--no-led` or error → no light. With LED enabled, HA discovers a **Startup LED** switch: retained preference **`…/switch/startup_led/state`**. Turning it **ON/OFF does not change the hardware immediately**; if **ON** is stored at the broker, narcolepsy sets the LED **solid green once per process start** (after subscribing, using broker-retained state). MQTT **reconnect** in the same run does **not** re-apply startup green (one-shot hardware apply per narcolepsy process). On exit (**SIGINT** / **SIGTERM** / MQTT loop stop), the LED is turned **off**.
 
 ## Conventions for changes
 

@@ -122,10 +122,7 @@ mod tests {
     #[test]
     fn ping_jump_hwinfo_match_opensleep_hex() {
         assert_eq!(ping_frame(), vec![0x7E, 0x01, 0x01, 0xDC, 0xBD]);
-        assert_eq!(
-            jump_to_firmware_frame(),
-            vec![0x7E, 0x01, 0x10, 0xDE, 0xAD]
-        );
+        assert_eq!(jump_to_firmware_frame(), vec![0x7E, 0x01, 0x10, 0xDE, 0xAD]);
         assert_eq!(
             get_hardware_info_frame(),
             vec![0x7E, 0x01, 0x02, 0xEC, 0xDE]
