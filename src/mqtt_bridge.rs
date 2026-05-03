@@ -61,6 +61,8 @@ pub struct BridgeConfig {
     pub discovery_object_id_temp_left: String,
     pub discovery_object_id_temp_right: String,
     pub discovery_object_id_heatsink_temp: String,
+    pub discovery_object_id_target_temp_left: String,
+    pub discovery_object_id_target_temp_right: String,
     pub vibration_intensity: u8,
     pub vibration_duration_sec: u32,
     pub vibration_pattern: AlarmPattern,
@@ -109,6 +111,8 @@ impl BridgeConfig {
             discovery_object_id_temp_left: cli.discovery_object_id_temp_left.clone(),
             discovery_object_id_temp_right: cli.discovery_object_id_temp_right.clone(),
             discovery_object_id_heatsink_temp: cli.discovery_object_id_heatsink_temp.clone(),
+            discovery_object_id_target_temp_left: cli.discovery_object_id_target_temp_left.clone(),
+            discovery_object_id_target_temp_right: cli.discovery_object_id_target_temp_right.clone(),
             vibration_intensity: cli.vibration_intensity.clamp(1, 100),
             vibration_duration_sec: cli.vibration_duration_sec.clamp(1, 600),
             vibration_pattern: match cli.vibration_pattern {
@@ -262,6 +266,23 @@ impl BridgeConfig {
             "{}/sensor/{}/config",
             self.discovery_prefix, self.discovery_object_id_heatsink_temp
         )
+    }
+
+    /// MQTT bridge climate target (°C), mirrors `temperature_state_topic` for dashboards.
+    pub fn target_temperature_state_topic(&self, side: BedSide) -> String {
+        let s = match side {
+            BedSide::Left => "left",
+            BedSide::Right => "right",
+        };
+        format!("{}/sensor/target_temperature_{}/state", self.topic_prefix, s)
+    }
+
+    pub fn discovery_topic_target_temperature(&self, side: BedSide) -> String {
+        let id = match side {
+            BedSide::Left => &self.discovery_object_id_target_temp_left,
+            BedSide::Right => &self.discovery_object_id_target_temp_right,
+        };
+        format!("{}/sensor/{}/config", self.discovery_prefix, id)
     }
 
     pub fn result_topic(&self) -> String {
@@ -800,11 +821,22 @@ async fn publish_climate_state(
             config.climate_temperature_state_topic(side),
             qos,
             true,
-            temp_str,
+            temp_str.as_str(),
         )
         .await
     {
         tracing::error!(?e, "publish climate temperature state");
+    }
+    if let Err(e) = client
+        .publish(
+            config.target_temperature_state_topic(side),
+            qos,
+            true,
+            temp_str.as_str(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish target temperature sensor state");
     }
 }
 
@@ -951,6 +983,27 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             .await
         {
             tracing::error!(?e, side = ?side, "publish climate discovery");
+        }
+        let (name, suffix) = match side {
+            BedSide::Left => ("Target Temperature Left", "target_temp_left"),
+            BedSide::Right => ("Target Temperature Right", "target_temp_right"),
+        };
+        let disc_target = discovery_payload_frozen_temperature(
+            config,
+            name,
+            suffix,
+            config.target_temperature_state_topic(side),
+        );
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_target_temperature(side),
+                qos,
+                true,
+                disc_target,
+            )
+            .await
+        {
+            tracing::error!(?e, side = ?side, "publish target temperature sensor discovery");
         }
     }
     if config.sensor_device.is_some() {
@@ -1527,5 +1580,28 @@ mod tests {
             right["current_temperature_topic"].as_str(),
             Some(cfg.frozen_current_temp_state_topic(BedSide::Right).as_str()),
         );
+    }
+
+    #[test]
+    fn target_temperature_sensor_discovery_matches_state_topic() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        for side in [BedSide::Left, BedSide::Right] {
+            let (name, suffix) = match side {
+                BedSide::Left => ("Target Temperature Left", "target_temp_left"),
+                BedSide::Right => ("Target Temperature Right", "target_temp_right"),
+            };
+            let disc = discovery_payload_frozen_temperature(
+                &cfg,
+                name,
+                suffix,
+                cfg.target_temperature_state_topic(side),
+            );
+            let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+            assert_eq!(
+                v["state_topic"].as_str(),
+                Some(cfg.target_temperature_state_topic(side).as_str()),
+            );
+        }
     }
 }

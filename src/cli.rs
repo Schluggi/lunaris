@@ -154,6 +154,14 @@ pub struct Cli {
     #[arg(long, default_value = "narcolepsy_heatsink_temp")]
     pub discovery_object_id_heatsink_temp: String,
 
+    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (climate target temperature, left).
+    #[arg(long, default_value = "narcolepsy_target_temp_left")]
+    pub discovery_object_id_target_temp_left: String,
+
+    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (climate target temperature, right).
+    #[arg(long, default_value = "narcolepsy_target_temp_right")]
+    pub discovery_object_id_target_temp_right: String,
+
     /// Default vibration intensity (1–100) for MQTT vibrate buttons.
     #[arg(long, default_value_t = 64)]
     pub vibration_intensity: u8,
