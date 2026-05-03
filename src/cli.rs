@@ -27,7 +27,7 @@ pub struct Cli {
     pub mqtt_client_id: String,
 
     /// Prefix for device topics (`{prefix}/availability`, `{prefix}/button/prime/set`, …).
-    #[arg(long, default_value = "eight/pod4")]
+    #[arg(long, default_value = "narcolepsy/pod4")]
     pub topic_prefix: String,
 
     /// Home Assistant MQTT discovery prefix (usually `homeassistant`).
@@ -38,15 +38,21 @@ pub struct Cli {
     #[arg(long, default_value = "narcolepsy_prime")]
     pub discovery_object_id: String,
 
-    #[arg(long, default_value = "Eight Pod")]
+    #[arg(long, default_value = "Eight Sleep")]
     pub device_name: String,
 
     /// Stable ID for Home Assistant device registry (`device.identifiers`).
     #[arg(long, default_value = "narcolepsy_pod")]
     pub device_identifier: String,
 
-    /// Serial device for the Frozen subsystem (Pod 3 opensleep default).
-    #[arg(long, default_value = "/dev/ttymxc2")]
+    /// Serial device for the **Frozen** subsystem.
+    ///
+    /// Pod **4** (reported by frankenfirmware / community): Frozen on **`/dev/ttyS1`**, sensor on `/dev/ttyS2`
+    /// ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)).
+    /// Pod **3** / stock opensleep paths often use **`/dev/ttymxc2`** for Frozen instead.
+    ///
+    /// Must be openable at startup; otherwise the process exits before MQTT connects.
+    #[arg(long, default_value = "/dev/ttyS1")]
     pub serial_device: PathBuf,
 
     #[arg(long, default_value_t = 38400)]
