@@ -3,6 +3,10 @@
 //! Temperature telemetry follows opensleep `FrozenPacket::TemperatureUpdate` (`0x41`) and
 //! `GetTemperature` (`0xC1`) — see `src/frozen/packet.rs` in [opensleep](https://github.com/LiamSnow/opensleep).
 //!
+//! Water-reservoir presence follows opensleep `FrozenPacket::Message` (`0x07`) strings in
+//! [`FrozenState::handle_packet`](https://github.com/LiamSnow/opensleep/blob/main/src/frozen/state.rs):
+//! `FW: water full -> empty` (tank removed) vs `FW: water empty -> full` (tank reinserted).
+//!
 //! SPDX-License-Identifier: GPL-3.0-only
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +17,10 @@ use crate::frozen_frame::crc_ccitt;
 use crate::wire_buffer::trim_when_no_sync_byte;
 
 const MAX_INCOMPLETE_HOLD: usize = 4096;
+
+/// opensleep `frozen/state.rs`: firmware text when the reservoir is removed vs reinserted.
+const MSG_WATER_FULL_TO_EMPTY: &str = "FW: water full -> empty";
+const MSG_WATER_EMPTY_TO_FULL: &str = "FW: water empty -> full";
 
 /// Latest water-loop temperatures from Frozen `TemperatureUpdate` / `GetTemperature` (centidegrees °C).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +34,7 @@ pub fn drain_inbound(
     buffer: &mut Vec<u8>,
     awake: &AtomicBool,
     temp_tx: Option<&mpsc::Sender<FrozenTemperatureUpdate>>,
+    water_tank_present_tx: Option<&mpsc::Sender<bool>>,
 ) {
     loop {
         let start = match buffer.iter().position(|&b| b == 0x7E) {
@@ -61,7 +70,7 @@ pub fn drain_inbound(
             buffer.remove(0);
             continue;
         }
-        handle_payload(payload, awake, temp_tx);
+        handle_payload(payload, awake, temp_tx, water_tank_present_tx);
         buffer.drain(..frame_len);
     }
 }
@@ -81,15 +90,45 @@ fn send_temperature_update(
     }
 }
 
+fn send_water_tank_present(tx: Option<&mpsc::Sender<bool>>, present: bool) {
+    let Some(tx) = tx else {
+        return;
+    };
+    if let Err(e) = tx.try_send(present) {
+        tracing::trace!(
+            ?e,
+            present,
+            "Frozen water tank update dropped (channel closed or full)"
+        );
+    }
+}
+
+fn handle_water_tank_message(tx: Option<&mpsc::Sender<bool>>, text: &str) {
+    if text == MSG_WATER_FULL_TO_EMPTY {
+        tracing::warn!("Frozen: water tank removed");
+        send_water_tank_present(tx, false);
+    } else if text == MSG_WATER_EMPTY_TO_FULL {
+        tracing::info!("Frozen: water tank reinserted");
+        send_water_tank_present(tx, true);
+    }
+}
+
 fn handle_payload(
     payload: &[u8],
     awake: &AtomicBool,
     temp_tx: Option<&mpsc::Sender<FrozenTemperatureUpdate>>,
+    water_tank_present_tx: Option<&mpsc::Sender<bool>>,
 ) {
     if payload.is_empty() {
         return;
     }
     match payload[0] {
+        // opensleep `FrozenPacket::Message` — `parse_message`: cmd 0x07, byte[1] reserved 0x00, then UTF-8.
+        0x07 if payload.len() >= 3 => {
+            if let Ok(text) = std::str::from_utf8(&payload[2..]) {
+                handle_water_tank_message(water_tank_present_tx, text);
+            }
+        }
         0x41 if payload.len() == 9 => {
             // opensleep `FrozenPacket::TemperatureUpdate`
             send_temperature_update(
@@ -157,11 +196,51 @@ mod tests {
         buf.extend_from_slice(&payload);
         buf.extend_from_slice(&crc.to_be_bytes());
 
-        drain_inbound(&mut buf, &awake, Some(&tx));
+        drain_inbound(&mut buf, &awake, Some(&tx), None);
         let u = rx.recv().await.unwrap();
         assert_eq!(u.left_centi, 2550);
         assert_eq!(u.right_centi, 2675);
         assert_eq!(u.heatsink_centi, 2300);
         assert!(buf.is_empty());
+    }
+
+    fn framed(payload: &[u8]) -> Vec<u8> {
+        let crc = crc_ccitt(payload);
+        let mut buf = Vec::new();
+        buf.push(0x7E);
+        buf.push(payload.len() as u8);
+        buf.extend_from_slice(payload);
+        buf.extend_from_slice(&crc.to_be_bytes());
+        buf
+    }
+
+    #[tokio::test]
+    async fn water_tank_message_removed_then_present() {
+        let (tx_w, mut rx_w) = mpsc::channel(4);
+        let awake = AtomicBool::new(false);
+
+        let mut msg_removed = vec![0x07u8, 0x00];
+        msg_removed.extend_from_slice(MSG_WATER_FULL_TO_EMPTY.as_bytes());
+        let mut buf = framed(&msg_removed);
+        drain_inbound(&mut buf, &awake, None, Some(&tx_w));
+        assert!(buf.is_empty());
+        assert_eq!(rx_w.recv().await, Some(false));
+
+        let mut msg_present = vec![0x07u8, 0x00];
+        msg_present.extend_from_slice(MSG_WATER_EMPTY_TO_FULL.as_bytes());
+        buf.extend_from_slice(&framed(&msg_present));
+        drain_inbound(&mut buf, &awake, None, Some(&tx_w));
+        assert_eq!(rx_w.recv().await, Some(true));
+    }
+
+    #[tokio::test]
+    async fn message_non_water_does_not_publish_tank() {
+        let (tx_w, mut rx_w) = mpsc::channel(4);
+        let awake = AtomicBool::new(false);
+        let mut payload = vec![0x07u8, 0x00];
+        payload.extend_from_slice(b"Hello");
+        let mut buf = framed(&payload);
+        drain_inbound(&mut buf, &awake, None, Some(&tx_w));
+        assert!(rx_w.try_recv().is_err());
     }
 }

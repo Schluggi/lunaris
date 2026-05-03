@@ -122,6 +122,10 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub no_presence_detection: bool,
 
+    /// Do not publish MQTT **Water Tank** from Frozen `0x07` messages (`FW: water …`, opensleep parity).
+    #[arg(long, default_value_t = false)]
+    pub no_water_tank_sensor: bool,
+
     /// Minimum **maximum** raw capacitance among the three Sensor zones on one mattress side to report that side as **occupied**. Lower if presence never triggers; raise if it sticks ON when empty (`RUST_LOG` `trace` shows zone values).
     #[arg(long, default_value_t = 800)]
     pub presence_cap_threshold: u16,
@@ -157,6 +161,10 @@ pub struct Cli {
     /// `<object_id>` for occupancy (right side), from Sensor capacitance zones 3–5.
     #[arg(long, default_value = "narcolepsy_presence_right")]
     pub discovery_object_id_presence_right: String,
+
+    /// `<object_id>` for `homeassistant/binary_sensor/.../config` (Frozen reservoir present).
+    #[arg(long, default_value = "narcolepsy_water_tank")]
+    pub discovery_object_id_water_tank: String,
 
     /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (Frozen current temperature, left).
     #[arg(long, default_value = "narcolepsy_temp_left")]

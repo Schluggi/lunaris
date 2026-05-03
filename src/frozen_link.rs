@@ -29,21 +29,30 @@ pub struct FrozenLinkHandle {
     pub tx: mpsc::Sender<Vec<u8>>,
     /// Current water-side and heatsink temperatures from inbound Frozen frames (`0x41` / `0xC1`).
     pub temperature_rx: mpsc::Receiver<FrozenTemperatureUpdate>,
+    /// `Some` when [`crate::cli::Cli::no_water_tank_sensor`] is false — Frozen `0x07` water messages.
+    pub water_tank_rx: Option<mpsc::Receiver<bool>>,
 }
 
-pub fn spawn(device: PathBuf, baud: u32) -> FrozenLinkHandle {
+pub fn spawn(device: PathBuf, baud: u32, forward_water_tank: bool) -> FrozenLinkHandle {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
     let (temp_tx, temp_rx) = mpsc::channel::<FrozenTemperatureUpdate>(64);
+    let (water_tx, water_rx) = if forward_water_tank {
+        let (wtx, wrx) = mpsc::channel::<bool>(16);
+        (Some(wtx), Some(wrx))
+    } else {
+        (None, None)
+    };
     let awake = Arc::new(AtomicBool::new(false));
     let awake_clone = awake.clone();
     tokio::spawn(async move {
-        if let Err(e) = run(device, baud, rx, awake_clone, temp_tx).await {
+        if let Err(e) = run(device, baud, rx, awake_clone, temp_tx, water_tx).await {
             tracing::error!(error = %e, "Frozen USART task ended");
         }
     });
     FrozenLinkHandle {
         tx,
         temperature_rx: temp_rx,
+        water_tank_rx: water_rx,
     }
 }
 
@@ -53,12 +62,14 @@ async fn run(
     mut cmd_rx: mpsc::Receiver<Vec<u8>>,
     awake: Arc<AtomicBool>,
     temp_tx: mpsc::Sender<FrozenTemperatureUpdate>,
+    water_tank_tx: Option<mpsc::Sender<bool>>,
 ) -> Result<(), FrozenLinkError> {
     let path = device.to_string_lossy().to_string();
     let port = tokio_serial::new(path, baud).open_native_async()?;
     let (mut read_half, mut write_half) = tokio::io::split(port);
 
     let awake_reader = awake.clone();
+    let water_tank_for_reader = water_tank_tx.clone();
     tokio::spawn(async move {
         let mut buf = Vec::with_capacity(4096);
         let mut chunk = [0u8; 512];
@@ -70,7 +81,12 @@ async fn run(
                 }
                 Ok(n) => {
                     buf.extend_from_slice(&chunk[..n]);
-                    frozen_rx::drain_inbound(&mut buf, &awake_reader, Some(&temp_tx));
+                    frozen_rx::drain_inbound(
+                        &mut buf,
+                        &awake_reader,
+                        Some(&temp_tx),
+                        water_tank_for_reader.as_ref(),
+                    );
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Frozen serial read failed");

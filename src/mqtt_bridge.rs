@@ -1,4 +1,5 @@
-//! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor), mattress climate, JSON light (I²C).
+//! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor), optional capacitance **presence**,
+//! optional Frozen **water tank** status, mattress climate, JSON light (I²C).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
 //! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
@@ -66,6 +67,7 @@ pub struct BridgeConfig {
     pub discovery_object_id_target_temp_right: String,
     pub discovery_object_id_presence_left: String,
     pub discovery_object_id_presence_right: String,
+    pub discovery_object_id_water_tank: String,
     /// Raw capacitance: side **occupied** if `max(zone on side) >= threshold` (opensleep `0x33` zones).
     pub presence_cap_threshold: u16,
     /// MQTT occupancy from Sensor capacitance (needs open Sensor UART; see [`crate::main`]).
@@ -83,6 +85,8 @@ pub struct BridgeConfig {
     pub sensor_priming_counts: Option<Arc<PrimingCounts>>,
     /// Publish MQTT sensors for Frozen inbound temperatures (`0x41` / `0xC1`); set by [`crate::main`] with [`crate::frozen_link`].
     pub frozen_temperature_discovery: bool,
+    /// MQTT **Water Tank** binary_sensor from Frozen `0x07` messages ([`crate::frozen_rx`]).
+    pub frozen_water_tank_discovery: bool,
 }
 
 impl BridgeConfig {
@@ -124,6 +128,7 @@ impl BridgeConfig {
                 .clone(),
             discovery_object_id_presence_left: cli.discovery_object_id_presence_left.clone(),
             discovery_object_id_presence_right: cli.discovery_object_id_presence_right.clone(),
+            discovery_object_id_water_tank: cli.discovery_object_id_water_tank.clone(),
             presence_cap_threshold: cli.presence_cap_threshold,
             presence_discovery: false,
             vibration_intensity: cli.vibration_intensity.clamp(1, 100),
@@ -137,6 +142,7 @@ impl BridgeConfig {
             sensor_tx: None,
             sensor_priming_counts: None,
             frozen_temperature_discovery: false,
+            frozen_water_tank_discovery: false,
         }
     }
 
@@ -315,6 +321,17 @@ impl BridgeConfig {
             BedSide::Right => &self.discovery_object_id_presence_right,
         };
         format!("{}/binary_sensor/{}/config", self.discovery_prefix, id)
+    }
+
+    pub fn water_tank_state_topic(&self) -> String {
+        format!("{}/binary_sensor/water_tank/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_water_tank(&self) -> String {
+        format!(
+            "{}/binary_sensor/{}/config",
+            self.discovery_prefix, self.discovery_object_id_water_tank
+        )
     }
 
     pub fn result_topic(&self) -> String {
@@ -496,6 +513,26 @@ fn discovery_payload_priming(config: &BridgeConfig) -> String {
     .to_string()
 }
 
+fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Water Tank",
+        "state_topic": config.water_tank_state_topic(),
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device_class": "plug",
+        "icon": "mdi:water",
+        "entity_category": "diagnostic",
+        "unique_id": format!("{}_water_tank", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 fn discovery_payload_presence(config: &BridgeConfig, side: BedSide) -> String {
     let (name, unique_suffix) = match side {
         BedSide::Left => ("Presence Left", "presence_left"),
@@ -568,6 +605,17 @@ async fn publish_presence_readings(
         if let Err(e) = client.publish(topic, qos, true, payload).await {
             tracing::error!(?e, "publish presence occupancy state");
         }
+    }
+}
+
+async fn publish_water_tank_state(client: &AsyncClient, config: &BridgeConfig, present: bool) {
+    let qos = QoS::AtLeastOnce;
+    let payload = if present { "ON" } else { "OFF" };
+    if let Err(e) = client
+        .publish(config.water_tank_state_topic(), qos, true, payload)
+        .await
+    {
+        tracing::error!(?e, "publish Frozen water tank binary_sensor state");
     }
 }
 
@@ -1167,6 +1215,15 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             tracing::error!(?e, "publish Frozen heatsink temperature discovery");
         }
     }
+    if config.frozen_water_tank_discovery {
+        let disc = discovery_payload_water_tank(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_water_tank(), qos, true, disc)
+            .await
+        {
+            tracing::error!(?e, "publish Frozen water tank discovery");
+        }
+    }
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
         .await
@@ -1411,6 +1468,7 @@ pub async fn run(
     prime_frame: Arc<[u8]>,
     sensor_priming_events: Option<mpsc::Receiver<PrimingEvent>>,
     frozen_temperature_rx: Option<mpsc::Receiver<FrozenTemperatureUpdate>>,
+    frozen_water_tank_rx: Option<mpsc::Receiver<bool>>,
     capacitance_rx: Option<mpsc::Receiver<SensorCapacitanceZones>>,
 ) {
     let handler_state = PublishHandlerState {
@@ -1447,6 +1505,25 @@ pub async fn run(
         tokio::spawn(async move {
             while let Some(u) = frozen_temp_rx.recv().await {
                 publish_frozen_temperature_readings(&c, &cfg, u).await;
+            }
+        });
+    }
+
+    if let Some(mut water_rx) = frozen_water_tank_rx {
+        let c = client.clone();
+        let cfg = config.clone();
+        let enabled = config.frozen_water_tank_discovery;
+        tokio::spawn(async move {
+            if !enabled {
+                return;
+            }
+            let mut last: Option<bool> = None;
+            while let Some(present) = water_rx.recv().await {
+                if last == Some(present) {
+                    continue;
+                }
+                last = Some(present);
+                publish_water_tank_state(&c, &cfg, present).await;
             }
         });
     }

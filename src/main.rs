@@ -45,9 +45,14 @@ async fn main() {
 
     let mut config = mqtt_bridge::BridgeConfig::from_cli(&cli);
 
-    let frozen_link = frozen_link::spawn(cli.serial_device.clone(), cli.serial_baud);
+    let frozen_link = frozen_link::spawn(
+        cli.serial_device.clone(),
+        cli.serial_baud,
+        !cli.no_water_tank_sensor,
+    );
     config.frozen_tx = Some(frozen_link.tx);
     config.frozen_temperature_discovery = true;
+    config.frozen_water_tank_discovery = !cli.no_water_tank_sensor;
 
     if cli.no_led {
         tracing::info!("LED control disabled (--no-led)");
@@ -119,6 +124,7 @@ async fn main() {
         arc,
         sensor_priming_events,
         Some(frozen_link.temperature_rx),
+        frozen_link.water_tank_rx,
         presence_cap_rx,
     )
     .await;
