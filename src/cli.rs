@@ -121,7 +121,7 @@ pub struct Cli {
     #[arg(long, default_value = "/dev/ttyS2")]
     pub sensor_device: PathBuf,
 
-    /// Sensor line speed. Opensleep Pod **3** firmware uses **115200**; Pod **4** often matches **38400** on `ttyS2` for coherent `0x7E` RX — override if needed (`115200`, etc.).
+    /// Sensor line speed. Opensleep Pod **3**: **115200**. Pod **4** default **38400**; **Frankenfirmware** (and matching strace on `ttyS2`) uses **921600** after the bootloader jump — use **`--sensor-baud 921600`** if framed `0x7E` RX or vibration fails at 38400.
     #[arg(long, default_value_t = 38400)]
     pub sensor_baud: u32,
 

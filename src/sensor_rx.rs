@@ -151,6 +151,19 @@ fn parse_capacitance(payload: &[u8]) -> Option<SensorCapacitanceZones> {
     })
 }
 
+/// `0x07` MCU strings: routine `FW:` status (sampling, therm, …) is noisy at WARN — reserve WARN for
+/// lines that plausibly explain alarm / vibration behaviour.
+fn mcu_text_is_vibration_hint(t: &str) -> bool {
+    let s = t.to_ascii_lowercase();
+    s.contains("alarm")
+        || s.contains("vibrat")
+        || s.contains("setalarm")
+        || s.contains(" piezo ") // word-ish; avoids matching unrelated tokens
+        || s.contains("piezo:")
+        || (s.contains("error") && s.contains("fw:"))
+        || (s.contains("fail") && s.contains("fw:"))
+}
+
 fn handle_payload(
     payload: &[u8],
     vibration_enabled: &AtomicBool,
@@ -186,8 +199,10 @@ fn handle_payload(
         0x07 if payload.len() >= 3 => match std::str::from_utf8(&payload[2..]) {
             Ok(text) => {
                 let t = text.trim_end_matches('\0');
-                if t.contains("alarm") || t.contains("FW:") {
-                    tracing::warn!(msg = %t, "Sensor: MCU text (alarm / firmware — primary hint why vibration may not run)");
+                if mcu_text_is_vibration_hint(t) {
+                    tracing::warn!(msg = %t, "Sensor: MCU text (alarm / vibration hint)");
+                } else if t.contains("FW:") {
+                    tracing::debug!(msg = %t, "Sensor: MCU firmware line");
                 } else {
                     tracing::info!(msg = %t, "Sensor: MCU text");
                 }
@@ -215,6 +230,25 @@ fn handle_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcu_text_routine_fw_lines_not_vibration_hints() {
+        assert!(!mcu_text_is_vibration_hint(
+            "FW: 321519 [sampling] starting (flushed 3 samples)"
+        ));
+        assert!(!mcu_text_is_vibration_hint("FW: 321519 [sampling] sync"));
+        assert!(!mcu_text_is_vibration_hint("FW: 325660 [therm] Tref=24.91"));
+        assert!(!mcu_text_is_vibration_hint(
+            "FW: 326217 [sampling] req gain 400 400"
+        ));
+    }
+
+    #[test]
+    fn mcu_text_alarm_and_vibrate_are_hints() {
+        assert!(mcu_text_is_vibration_hint("FW: alarm [left] off"));
+        assert!(mcu_text_is_vibration_hint("something vibration disabled"));
+        assert!(mcu_text_is_vibration_hint("SetAlarm rejected"));
+    }
 
     #[test]
     fn vibration_enabled_sets_atomic() {
