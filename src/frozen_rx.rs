@@ -17,6 +17,36 @@ use crate::frozen_frame::crc_ccitt;
 use crate::wire_buffer::trim_when_no_sync_byte;
 
 const MAX_INCOMPLETE_HOLD: usize = 4096;
+/// MQTT text sensor truncation (MCU lines can be long; broker/HA still have practical limits).
+const MAX_FIRMWARE_MESSAGE_BYTES: usize = 2048;
+
+fn truncate_utf8_to_max(s: &str) -> String {
+    if s.len() <= MAX_FIRMWARE_MESSAGE_BYTES {
+        return s.to_string();
+    }
+    let mut n = MAX_FIRMWARE_MESSAGE_BYTES;
+    while n > 0 && !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    format!("{}…", &s[..n])
+}
+
+fn maybe_send_firmware_message(tx: Option<&mpsc::Sender<String>>, text: &str) {
+    let Some(t) = tx else {
+        return;
+    };
+    let text = text.trim_end_matches('\0').trim_end();
+    if text.is_empty() {
+        return;
+    }
+    let body = truncate_utf8_to_max(text);
+    if let Err(e) = t.try_send(body) {
+        tracing::trace!(
+            ?e,
+            "Frozen firmware Message (0x07) dropped (MQTT firmware-message channel lag)"
+        );
+    }
+}
 
 /// opensleep `frozen/state.rs`: firmware text when the reservoir is removed vs reinserted.
 const MSG_WATER_FULL_TO_EMPTY: &str = "FW: water full -> empty";
@@ -35,6 +65,7 @@ pub fn drain_inbound(
     awake: &AtomicBool,
     temp_tx: Option<&mpsc::Sender<FrozenTemperatureUpdate>>,
     water_tank_present_tx: Option<&mpsc::Sender<bool>>,
+    firmware_message_tx: Option<&mpsc::Sender<String>>,
 ) {
     loop {
         let start = match buffer.iter().position(|&b| b == 0x7E) {
@@ -70,7 +101,13 @@ pub fn drain_inbound(
             buffer.remove(0);
             continue;
         }
-        handle_payload(payload, awake, temp_tx, water_tank_present_tx);
+        handle_payload(
+            payload,
+            awake,
+            temp_tx,
+            water_tank_present_tx,
+            firmware_message_tx,
+        );
         buffer.drain(..frame_len);
     }
 }
@@ -118,6 +155,7 @@ fn handle_payload(
     awake: &AtomicBool,
     temp_tx: Option<&mpsc::Sender<FrozenTemperatureUpdate>>,
     water_tank_present_tx: Option<&mpsc::Sender<bool>>,
+    firmware_message_tx: Option<&mpsc::Sender<String>>,
 ) {
     if payload.is_empty() {
         return;
@@ -127,6 +165,7 @@ fn handle_payload(
         0x07 if payload.len() >= 3 => {
             if let Ok(text) = std::str::from_utf8(&payload[2..]) {
                 handle_water_tank_message(water_tank_present_tx, text);
+                maybe_send_firmware_message(firmware_message_tx, text);
             }
         }
         0x41 if payload.len() == 9 => {
@@ -196,7 +235,7 @@ mod tests {
         buf.extend_from_slice(&payload);
         buf.extend_from_slice(&crc.to_be_bytes());
 
-        drain_inbound(&mut buf, &awake, Some(&tx), None);
+        drain_inbound(&mut buf, &awake, Some(&tx), None, None);
         let u = rx.recv().await.unwrap();
         assert_eq!(u.left_centi, 2550);
         assert_eq!(u.right_centi, 2675);
@@ -222,14 +261,14 @@ mod tests {
         let mut msg_removed = vec![0x07u8, 0x00];
         msg_removed.extend_from_slice(MSG_WATER_FULL_TO_EMPTY.as_bytes());
         let mut buf = framed(&msg_removed);
-        drain_inbound(&mut buf, &awake, None, Some(&tx_w));
+        drain_inbound(&mut buf, &awake, None, Some(&tx_w), None);
         assert!(buf.is_empty());
         assert_eq!(rx_w.recv().await, Some(false));
 
         let mut msg_present = vec![0x07u8, 0x00];
         msg_present.extend_from_slice(MSG_WATER_EMPTY_TO_FULL.as_bytes());
         buf.extend_from_slice(&framed(&msg_present));
-        drain_inbound(&mut buf, &awake, None, Some(&tx_w));
+        drain_inbound(&mut buf, &awake, None, Some(&tx_w), None);
         assert_eq!(rx_w.recv().await, Some(true));
     }
 
@@ -240,7 +279,18 @@ mod tests {
         let mut payload = vec![0x07u8, 0x00];
         payload.extend_from_slice(b"Hello");
         let mut buf = framed(&payload);
-        drain_inbound(&mut buf, &awake, None, Some(&tx_w));
+        drain_inbound(&mut buf, &awake, None, Some(&tx_w), None);
         assert!(rx_w.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn firmware_message_forwards_utf8_payload() {
+        let (tx_m, mut rx_m) = mpsc::channel(4);
+        let awake = AtomicBool::new(false);
+        let mut payload = vec![0x07u8, 0x00];
+        payload.extend_from_slice(b"FW: pump[left] test");
+        let mut buf = framed(&payload);
+        drain_inbound(&mut buf, &awake, None, None, Some(&tx_m));
+        assert_eq!(rx_m.recv().await.as_deref(), Some("FW: pump[left] test"));
     }
 }

@@ -25,8 +25,8 @@ use crate::sensor_rx::SensorCapacitanceZones;
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
-/// After HA **Prime**, MQTT **Priming** stays **ON** this long (Frozen has no priming-complete frame here).
-const FROZEN_PRIME_SHOWN_AFTER_PRESS: Duration = Duration::from_secs(120);
+/// After HA **Prime**, MQTT **Priming** stays **ON** this long (no priming-complete frame on USART; aligns with ~8 min 30 s hub prime).
+const FROZEN_PRIME_SHOWN_AFTER_PRESS: Duration = Duration::from_secs(8 * 60 + 30);
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
@@ -71,6 +71,7 @@ pub struct BridgeConfig {
     pub discovery_object_id_presence_right: String,
     pub discovery_object_id_calibrate_presence: String,
     pub discovery_object_id_water_tank: String,
+    pub discovery_object_id_firmware_message: String,
     /// Uncalibrated: side occupied if **`max`** of three zones `>= threshold`. After MQTT calibration: opensleep baseline + Δ + debounce.
     pub presence_cap_threshold: u16,
     /// Window for MQTT **Calibrate presence** (average samples → baseline per zone; opensleep default 10.).
@@ -92,6 +93,8 @@ pub struct BridgeConfig {
     pub frozen_temperature_discovery: bool,
     /// MQTT **Water Tank** binary_sensor from Frozen `0x07` messages ([`crate::frozen_rx`]).
     pub frozen_water_tank_discovery: bool,
+    /// MQTT text **sensor** from Frozen `0x07` UTF‑8 message bodies (all lines, not only tank).
+    pub frozen_firmware_message_discovery: bool,
 }
 
 impl BridgeConfig {
@@ -137,6 +140,7 @@ impl BridgeConfig {
                 .discovery_object_id_calibrate_presence
                 .clone(),
             discovery_object_id_water_tank: cli.discovery_object_id_water_tank.clone(),
+            discovery_object_id_firmware_message: cli.discovery_object_id_firmware_message.clone(),
             presence_cap_threshold: cli.presence_cap_threshold,
             presence_calibrate_secs: cli.presence_calibrate_secs.max(3),
             presence_discovery: false,
@@ -152,6 +156,7 @@ impl BridgeConfig {
             sensor_priming_counts: None,
             frozen_temperature_discovery: false,
             frozen_water_tank_discovery: false,
+            frozen_firmware_message_discovery: false,
         }
     }
 
@@ -354,6 +359,17 @@ impl BridgeConfig {
         )
     }
 
+    pub fn firmware_message_state_topic(&self) -> String {
+        format!("{}/sensor/firmware_message/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_firmware_message(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, self.discovery_object_id_firmware_message
+        )
+    }
+
     pub fn result_topic(&self) -> String {
         format!("{}/result", self.topic_prefix)
     }
@@ -543,6 +559,24 @@ fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
         "icon": "mdi:water",
         "entity_category": "diagnostic",
         "unique_id": format!("{}_water_tank", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_firmware_message(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Firmware message",
+        "state_topic": config.firmware_message_state_topic(),
+        "icon": "mdi:message-text",
+        "entity_category": "diagnostic",
+        "enabled_by_default": false,
+        "unique_id": format!("{}_firmware_message", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "narcolepsy",
@@ -758,6 +792,25 @@ async fn publish_water_tank_state(client: &AsyncClient, config: &BridgeConfig, p
         .await
     {
         tracing::error!(?e, "publish Frozen water tank binary_sensor state");
+    }
+}
+
+async fn publish_firmware_message_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    msg: &str,
+) {
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(
+            config.firmware_message_state_topic(),
+            qos,
+            false,
+            msg.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Frozen firmware message sensor state");
     }
 }
 
@@ -1443,6 +1496,15 @@ async fn publish_discovery_and_online(
             tracing::error!(?e, "publish Frozen water tank discovery");
         }
     }
+    if config.frozen_firmware_message_discovery {
+        let disc = discovery_payload_firmware_message(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_firmware_message(), qos, true, disc)
+            .await
+        {
+            tracing::error!(?e, "publish Frozen firmware message discovery");
+        }
+    }
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
         .await
@@ -1710,6 +1772,7 @@ pub async fn run(
     sensor_priming_events: Option<mpsc::Receiver<PrimingEvent>>,
     frozen_temperature_rx: Option<mpsc::Receiver<FrozenTemperatureUpdate>>,
     frozen_water_tank_rx: Option<mpsc::Receiver<bool>>,
+    frozen_firmware_message_rx: Option<mpsc::Receiver<String>>,
     capacitance_rx: Option<mpsc::Receiver<SensorCapacitanceZones>>,
 ) {
     let (presence_calibrate_tx, presence_calibrate_rx) =
@@ -1776,6 +1839,20 @@ pub async fn run(
                 }
                 last = Some(present);
                 publish_water_tank_state(&c, &cfg, present).await;
+            }
+        });
+    }
+
+    if let Some(mut fw_rx) = frozen_firmware_message_rx {
+        let c = client.clone();
+        let cfg = config.clone();
+        let enabled = config.frozen_firmware_message_discovery;
+        tokio::spawn(async move {
+            if !enabled {
+                return;
+            }
+            while let Some(msg) = fw_rx.recv().await {
+                publish_firmware_message_state(&c, &cfg, &msg).await;
             }
         });
     }
@@ -2129,6 +2206,24 @@ mod tests {
                 Some(cfg.presence_state_topic(side).as_str()),
             );
         }
+    }
+
+    #[test]
+    fn firmware_message_discovery_matches_state_topic() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_firmware_message(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.firmware_message_state_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+        assert_eq!(
+            v["enabled_by_default"].as_bool(),
+            Some(false),
+            "disabled in HA registry by default — enable under device entities if desired"
+        );
     }
 
     #[test]

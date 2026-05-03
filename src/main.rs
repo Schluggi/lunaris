@@ -49,10 +49,12 @@ async fn main() {
         cli.serial_device.clone(),
         cli.serial_baud,
         !cli.no_water_tank_sensor,
+        !cli.no_firmware_message_sensor,
     );
     config.frozen_tx = Some(frozen_link.tx);
     config.frozen_temperature_discovery = true;
     config.frozen_water_tank_discovery = !cli.no_water_tank_sensor;
+    config.frozen_firmware_message_discovery = !cli.no_firmware_message_sensor;
 
     if cli.no_led {
         tracing::info!("LED control disabled (--no-led)");
@@ -125,6 +127,7 @@ async fn main() {
         sensor_priming_events,
         Some(frozen_link.temperature_rx),
         frozen_link.water_tank_rx,
+        frozen_link.firmware_message_rx,
         presence_cap_rx,
     )
     .await;

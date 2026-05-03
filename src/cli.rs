@@ -126,6 +126,10 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub no_water_tank_sensor: bool,
 
+    /// Do not publish MQTT **Firmware message** text sensor (Frozen `0x07` UTF‑8 lines — can be noisy).
+    #[arg(long, default_value_t = false)]
+    pub no_firmware_message_sensor: bool,
+
     /// Minimum **maximum** raw capacitance among the three Sensor zones on one mattress side to report that side as **occupied**. Lower if presence never triggers; raise if it sticks ON when empty (`RUST_LOG` `trace` shows zone values). Unused after successful **MQTT calibrate presence** (opensleep baseline + Δ + debounce applies).
     #[arg(long, default_value_t = 800)]
     pub presence_cap_threshold: u16,
@@ -173,6 +177,10 @@ pub struct Cli {
     /// `<object_id>` for `homeassistant/binary_sensor/.../config` (Frozen reservoir present).
     #[arg(long, default_value = "narcolepsy_water_tank")]
     pub discovery_object_id_water_tank: String,
+
+    /// `<object_id>` for `homeassistant/sensor/.../config` (Frozen `0x07` firmware UTF‑8 messages).
+    #[arg(long, default_value = "narcolepsy_firmware_message")]
+    pub discovery_object_id_firmware_message: String,
 
     /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (Frozen current temperature, left).
     #[arg(long, default_value = "narcolepsy_temp_left")]

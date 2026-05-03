@@ -39,7 +39,7 @@ The **Prime** example matches opensleep’s unit test output byte-for-byte (`Fro
 
 ## Responses
 
-The Frozen MCU sends frames using the **same** `0x7E` / length / CRC wrapping for outbound packets; parsing is implemented in opensleep’s `PacketCodec` / `FrozenPacket` (`src/frozen/packet.rs`). **This repository** sends **Prime**, **SetTargetTemperature** (per MQTT climate), and (elsewhere) LED I²C — it **does not decode** inbound Frozen packets yet, so current temperatures are not surfaced over MQTT.
+The Frozen MCU sends frames using the **same** `0x7E` / length / CRC wrapping for outbound packets; opensleep models these in `FrozenPacket` (`src/frozen/packet.rs`). **narcolepsy** decodes a **subset** inbound in [`src/frozen_rx.rs`](../src/frozen_rx.rs): **temperature** (`0x41` / `0xC1`), MCU **text messages** (`0x07` UTF‑8 → MQTT **Firmware message** sensor + optional **Water Tank** binary_sensor for two reservoir strings), pong **0x81**, and jump ack **0x90** (wake state). Other opcodes are ignored for MQTT (trace logging only).
 
 ## Verifying on Pod 4
 
