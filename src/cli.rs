@@ -149,6 +149,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 10)]
     pub presence_calibrate_secs: u64,
 
+    /// Log every capacitance sample used for occupancy at **INFO** (zones, threshold / baselines, debounce, computed side occupancy). Implies noise if many `0x33` frames; disable after debugging.
+    #[arg(long, default_value_t = false)]
+    pub presence_debug: bool,
+
     /// `<object_id>` for `homeassistant/button/...` (presence baseline calibration — empty bed during the calibration window).
     #[arg(long, default_value = "narcolepsy_calibrate_presence")]
     pub discovery_object_id_calibrate_presence: String,

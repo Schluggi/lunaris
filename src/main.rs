@@ -3,6 +3,7 @@
 //! SPDX-License-Identifier: GPL-3.0-only
 
 mod cli;
+mod deviceinfo;
 mod frozen_frame;
 mod frozen_link;
 mod frozen_rx;
@@ -107,12 +108,15 @@ async fn main() {
             presence_cap_rx = Some(rx);
             Some(tx)
         };
+        let presence_cap_parse_diag =
+            (cap_tx.is_some() && cli.presence_debug).then(sensor_rx::PresenceCapDiag::new_arc);
         let sensor = sensor_link::spawn(
             cli.sensor_device.clone(),
             cli.sensor_baud,
             !cli.no_sensor_bootloader_handshake,
             cli.sensor_vibrate_no_ack_wait,
             cap_tx,
+            presence_cap_parse_diag,
         );
         config.sensor_tx = Some(sensor.tx.clone());
         config.sensor_priming_counts = Some(sensor.priming_counts.clone());

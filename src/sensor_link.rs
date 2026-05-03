@@ -15,7 +15,7 @@ use tokio_serial::SerialPortBuilderExt;
 
 use crate::frozen_frame::jump_to_firmware_frame;
 use crate::sensor_frame::{piezo_priming_frames, ping_frame};
-use crate::sensor_rx;
+use crate::sensor_rx::{self, PresenceCapDiag};
 
 /// Bootloader serial speed — opensleep `BOOTLOADER_BAUD` (`src/sensor/manager.rs`).
 const BOOTLOADER_BAUD: u32 = 38400;
@@ -98,6 +98,7 @@ pub fn spawn(
     bootloader_handshake: bool,
     vibrate_no_ack_wait: bool,
     capacitance_tx: Option<mpsc::Sender<crate::sensor_rx::SensorCapacitanceZones>>,
+    capacitance_parse_diag: Option<std::sync::Arc<PresenceCapDiag>>,
 ) -> SensorLinkHandle {
     let (tx, rx) = mpsc::channel::<Vec<Vec<u8>>>(16);
     let priming_counts = Arc::new(PrimingCounts {
@@ -116,6 +117,7 @@ pub fn spawn(
             pe,
             rx,
             capacitance_tx,
+            capacitance_parse_diag,
         )
         .await
         {
@@ -270,6 +272,7 @@ async fn run(
     priming_edge: mpsc::Sender<PrimingEvent>,
     mut rx: mpsc::Receiver<Vec<Vec<u8>>>,
     capacitance_tx: Option<mpsc::Sender<crate::sensor_rx::SensorCapacitanceZones>>,
+    capacitance_parse_diag: Option<std::sync::Arc<PresenceCapDiag>>,
 ) -> Result<(), SensorLinkError> {
     let path = device.to_string_lossy().to_string();
     let port = open_sensor_port(&path, baud, bootloader_handshake).await?;
@@ -278,6 +281,7 @@ async fn run(
     let vibration_enabled = Arc::new(AtomicBool::new(false));
     let vib_flag = vibration_enabled.clone();
     let cap_flag = capacitance_tx;
+    let parse_diag_for_rx = capacitance_parse_diag;
     tokio::spawn(async move {
         let mut buf = Vec::with_capacity(4096);
         let mut chunk = [0u8; 512];
@@ -307,7 +311,13 @@ async fn run(
                         }
                     }
                     buf.extend_from_slice(&chunk[..n]);
-                    sensor_rx::drain_inbound(&mut buf, &vib_flag, cap_flag.as_ref());
+                    let diag = parse_diag_for_rx.as_ref().map(|a| a.as_ref());
+                    sensor_rx::drain_inbound(
+                        &mut buf,
+                        &vib_flag,
+                        cap_flag.as_ref(),
+                        diag,
+                    );
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Sensor serial read failed");

@@ -8,6 +8,7 @@
 //! SPDX-License-Identifier: GPL-3.0-only
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
@@ -22,6 +23,40 @@ const MAX_INCOMPLETE_HOLD: usize = 4096;
 pub struct SensorCapacitanceZones {
     pub sequence: u32,
     pub zones: [u16; 6],
+}
+
+fn hex_preview(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(48)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// With [`Cli::presence_debug`](crate::cli::Cli): log first CRC-valid **`0x33`** payload rejected by opensleep layout checks ([`parse_capacitance`] strict indices).
+#[derive(Default)]
+pub struct PresenceCapDiag {
+    malformed_logged: AtomicBool,
+}
+
+impl PresenceCapDiag {
+    #[must_use]
+    pub fn new_arc() -> Arc<Self> {
+        Arc::new(Self {
+            malformed_logged: AtomicBool::new(false),
+        })
+    }
+
+    pub fn malformed_once(&self, payload: &[u8]) {
+        if !self.malformed_logged.swap(true, Ordering::SeqCst) {
+            tracing::warn!(
+                len = payload.len(),
+                hex = %hex_preview(payload),
+                "Sensor: `0x33` payload failed opensleep capacitance parse (--presence-debug) — MCU layout may differ from Pod 3; presence MQTT will stay unsupported until Parser matches firmware"
+            );
+        }
+    }
 }
 
 fn send_cap_update(
@@ -43,6 +78,7 @@ pub fn drain_inbound(
     buffer: &mut Vec<u8>,
     vibration_enabled: &AtomicBool,
     capacitance_tx: Option<&mpsc::Sender<SensorCapacitanceZones>>,
+    capacitance_diag: Option<&PresenceCapDiag>,
 ) {
     loop {
         let start = match buffer.iter().position(|&b| b == 0x7E) {
@@ -78,7 +114,12 @@ pub fn drain_inbound(
             buffer.remove(0);
             continue;
         }
-        handle_payload(payload, vibration_enabled, capacitance_tx);
+        handle_payload(
+            payload,
+            vibration_enabled,
+            capacitance_tx,
+            capacitance_diag,
+        );
         buffer.drain(..frame_len);
     }
 }
@@ -114,6 +155,7 @@ fn handle_payload(
     payload: &[u8],
     vibration_enabled: &AtomicBool,
     capacitance_tx: Option<&mpsc::Sender<SensorCapacitanceZones>>,
+    capacitance_diag: Option<&PresenceCapDiag>,
 ) {
     if payload.is_empty() {
         return;
@@ -161,6 +203,9 @@ fn handle_payload(
                 send_cap_update(capacitance_tx, cap);
             } else {
                 tracing::trace!(len = payload.len(), "Sensor: capacitance 0x33 parse skip");
+                if let Some(d) = capacitance_diag {
+                    d.malformed_once(payload);
+                }
             }
         }
         _ => tracing::trace!(len = payload.len(), head = payload[0], "Sensor RX"),
@@ -182,7 +227,7 @@ mod tests {
         frame.push(crc as u8);
 
         let mut buf = frame.clone();
-        drain_inbound(&mut buf, &flag, None);
+        drain_inbound(&mut buf, &flag, None, None);
         assert!(flag.load(Ordering::SeqCst));
         assert!(buf.is_empty());
     }
@@ -193,7 +238,7 @@ mod tests {
     fn vibration_enabled_two_byte_payload_matches_pod4_rx() {
         let flag = AtomicBool::new(false);
         let mut buf = vec![0x7Eu8, 0x02, 0xAE, 0x02, 0x9A, 0xF3];
-        drain_inbound(&mut buf, &flag, None);
+        drain_inbound(&mut buf, &flag, None, None);
         assert!(flag.load(Ordering::SeqCst));
         assert!(buf.is_empty());
     }
@@ -210,7 +255,7 @@ mod tests {
         frame.push((crc >> 8) as u8);
         frame.push(crc as u8);
         let mut buf = frame;
-        drain_inbound(&mut buf, &flag, None);
+        drain_inbound(&mut buf, &flag, None, None);
         assert!(buf.is_empty());
     }
 
@@ -225,10 +270,10 @@ mod tests {
         frame.push(crc as u8);
 
         let mut buf = vec![0xE0, 0x1C, 0xE0, 0xFE, 0x00];
-        drain_inbound(&mut buf, &flag, None);
+        drain_inbound(&mut buf, &flag, None, None);
         assert!(!flag.load(Ordering::SeqCst));
         buf.extend_from_slice(&frame);
-        drain_inbound(&mut buf, &flag, None);
+        drain_inbound(&mut buf, &flag, None, None);
         assert!(
             flag.load(Ordering::SeqCst),
             "0xAE frame after leading noise"
@@ -252,7 +297,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<SensorCapacitanceZones>(4);
         let mut buf = frame;
-        drain_inbound(&mut buf, &flag, Some(&tx));
+        drain_inbound(&mut buf, &flag, Some(&tx), None);
         let c = rx.recv().await.unwrap();
         assert_eq!(c.sequence, 0x01020304);
         assert_eq!(c.zones, [0x0102, 0x0304, 0x0506, 0x0708, 0x090A, 0x0B0C]);

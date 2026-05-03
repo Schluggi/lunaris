@@ -13,9 +13,10 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{interval, sleep, Duration, Instant};
 
 use crate::cli::Cli;
+use crate::deviceinfo;
 use crate::frozen_frame::{get_temperatures_frame, set_target_temperature_frame, BedSide};
 use crate::frozen_rx::FrozenTemperatureUpdate;
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
@@ -25,6 +26,11 @@ use crate::sensor_rx::SensorCapacitanceZones;
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
+/// MQTT text sensor state topics (leading `/` — not under [`BridgeConfig::topic_prefix`]).
+const DEVICEINFO_DEVICE_LABEL_STATE_TOPIC: &str = "/deviceinfo/device-label";
+const DEVICEINFO_DEVICE_ID_STATE_TOPIC: &str = "/deviceinfo/device-id";
+const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "narcolepsy_deviceinfo_device_label";
+const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "narcolepsy_deviceinfo_device_id";
 /// After HA **Prime**, MQTT **Priming** stays **ON** this long (no priming-complete frame on USART; aligns with ~8 min 30 s hub prime).
 const FROZEN_PRIME_SHOWN_AFTER_PRESS: Duration = Duration::from_secs(8 * 60 + 30);
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
@@ -79,6 +85,8 @@ pub struct BridgeConfig {
     pub presence_calibrate_secs: u64,
     /// MQTT occupancy from Sensor capacitance (needs open Sensor UART; see [`crate::main`]).
     pub presence_discovery: bool,
+    /// Log each `0x33` presence inference step at INFO ([`Cli::presence_debug`](crate::cli::Cli::presence_debug)).
+    pub presence_debug: bool,
     pub vibration_intensity: u8,
     pub vibration_duration_sec: u32,
     pub vibration_pattern: AlarmPattern,
@@ -148,6 +156,7 @@ impl BridgeConfig {
             presence_cap_threshold: cli.presence_cap_threshold,
             presence_calibrate_secs: cli.presence_calibrate_secs.max(3),
             presence_discovery: false,
+            presence_debug: cli.presence_debug,
             vibration_intensity: cli.vibration_intensity.clamp(1, 100),
             vibration_duration_sec: cli.vibration_duration_sec.clamp(1, 600),
             vibration_pattern: match cli.vibration_pattern {
@@ -385,6 +394,20 @@ impl BridgeConfig {
         )
     }
 
+    pub fn discovery_topic_deviceinfo_device_label(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL
+        )
+    }
+
+    pub fn discovery_topic_deviceinfo_device_id(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_DEVICEINFO_ID
+        )
+    }
+
     pub fn result_topic(&self) -> String {
         format!("{}/result", self.topic_prefix)
     }
@@ -619,6 +642,42 @@ fn discovery_payload_firmware_message(config: &BridgeConfig) -> String {
     .to_string()
 }
 
+fn discovery_payload_deviceinfo_device_label(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Device Label",
+        "state_topic": DEVICEINFO_DEVICE_LABEL_STATE_TOPIC,
+        "icon": "mdi:label",
+        "entity_category": "diagnostic",
+        "enabled_by_default": false,
+        "unique_id": format!("{}_deviceinfo_device_label", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_deviceinfo_device_id(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Device ID",
+        "state_topic": DEVICEINFO_DEVICE_ID_STATE_TOPIC,
+        "icon": "mdi:identifier",
+        "entity_category": "diagnostic",
+        "enabled_by_default": false,
+        "unique_id": format!("{}_deviceinfo_device_id", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 fn discovery_payload_presence(config: &BridgeConfig, side: BedSide) -> String {
     let (name, unique_suffix) = match side {
         BedSide::Left => ("Presence Left", "presence_left"),
@@ -731,6 +790,48 @@ fn inference_occupancy(
         occupancy_calibrated(z, inference)
     } else {
         occupancy_uncalibrated_max(z, fallback_abs_threshold)
+    }
+}
+
+/// Per-sample diagnostic for [`BridgeConfig::presence_debug`].
+fn log_presence_debug(
+    z: &SensorCapacitanceZones,
+    inference: &PresenceInferenceState,
+    fallback_abs_threshold: u16,
+    left_on: bool,
+    right_on: bool,
+    calibrating: bool,
+) {
+    let left_max = z.zones[..3].iter().copied().max().unwrap_or(0);
+    let right_max = z.zones[3..].iter().copied().max().unwrap_or(0);
+    match &inference.baselines {
+        None => {
+            tracing::info!(
+                seq = z.sequence,
+                zones = ?z.zones,
+                left_max,
+                right_max,
+                threshold = fallback_abs_threshold,
+                occupied_left = left_on,
+                occupied_right = right_on,
+                calibrating,
+                "presence debug (uncalibrated: left_max/right_max vs threshold — use MQTT Calibrate presence or lower --presence-cap-threshold)"
+            );
+        }
+        Some(b) => {
+            tracing::info!(
+                seq = z.sequence,
+                zones = ?z.zones,
+                baseline = ?b,
+                debounce_per_zone = ?inference.debounce,
+                delta = PRESENCE_BASELINE_DELTA,
+                debounce_need = PRESENCE_DEBOUNCE_FRAMES,
+                occupied_left = left_on,
+                occupied_right = right_on,
+                calibrating,
+                "presence debug (calibrated: side ON when any zone on that side exceeds baseline+Δ for debounce_need consecutive frames)"
+            );
+        }
     }
 }
 
@@ -1384,6 +1485,55 @@ async fn publish_discovery_and_online(
     {
         tracing::error!(?e, "publish request GetTemperatures button discovery");
     }
+    {
+        let disc = discovery_payload_deviceinfo_device_label(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_deviceinfo_device_label(),
+                qos,
+                true,
+                disc,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish deviceinfo device label discovery");
+        }
+        let disc = discovery_payload_deviceinfo_device_id(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_deviceinfo_device_id(),
+                qos,
+                true,
+                disc,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish deviceinfo device id discovery");
+        }
+        let (label_payload, id_payload) = deviceinfo::device_label_and_id_payloads();
+        if let Err(e) = client
+            .publish(
+                DEVICEINFO_DEVICE_LABEL_STATE_TOPIC,
+                qos,
+                true,
+                label_payload,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish deviceinfo device-label state");
+        }
+        if let Err(e) = client
+            .publish(
+                DEVICEINFO_DEVICE_ID_STATE_TOPIC,
+                qos,
+                true,
+                id_payload,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish deviceinfo device-id state");
+        }
+    }
     if config.i2c_device.is_some() {
         let disc_led = discovery_payload_light(config);
         if let Err(e) = client
@@ -1934,12 +2084,28 @@ pub async fn run(
             let cfg = config.clone();
             let cal_wait = Duration::from_secs(cfg.presence_calibrate_secs.max(3));
             let fallback_abs_threshold = cfg.presence_cap_threshold;
+            let presence_debug = cfg.presence_debug;
             tokio::spawn(async move {
                 let mut inference = PresenceInferenceState::default();
                 // Matches `publish_discovery_and_online` seed (`OFF`/`OFF`).
                 let mut prev_publish = Some((false, false));
                 let mut cal_until: Option<Instant> = None;
                 let mut cal_samples = Vec::<[u16; 6]>::new();
+
+                let mut saw_cap_sample = false;
+                let mut cap_stall_check = if presence_debug {
+                    let mut i = interval(Duration::from_secs(60));
+                    i.tick().await;
+                    Some(i)
+                } else {
+                    None
+                };
+
+                if presence_debug {
+                    tracing::info!(
+                        "presence debug: enabled — each Sensor capacitance `0x33` frame will log zones and inference; if MCU sends none or parse fails, WARN every 60s here and once from Sensor on bad `0x33` payload"
+                    );
+                }
 
                 loop {
                     tokio::select! {
@@ -1960,6 +2126,8 @@ pub async fn run(
                             let Some(z) = z_opt else {
                                 return;
                             };
+
+                            saw_cap_sample = true;
 
                             if cal_until.is_some() {
                                 cal_samples.push(z.zones);
@@ -1991,6 +2159,17 @@ pub async fn run(
 
                             let (left_on, right_on) =
                                 inference_occupancy(&z, &mut inference, fallback_abs_threshold);
+                            let calibrating = cal_until.is_some();
+                            if presence_debug {
+                                log_presence_debug(
+                                    &z,
+                                    &inference,
+                                    fallback_abs_threshold,
+                                    left_on,
+                                    right_on,
+                                    calibrating,
+                                );
+                            }
                             if prev_publish == Some((left_on, right_on)) {
                                 continue;
                             }
@@ -2003,6 +2182,20 @@ pub async fn run(
                             );
                             prev_publish = Some((left_on, right_on));
                             publish_presence_readings(&c, &cfg, left_on, right_on).await;
+                        }
+
+                        _ = async {
+                            if let Some(i) = cap_stall_check.as_mut() {
+                                i.tick().await;
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        }, if presence_debug && cap_stall_check.is_some() => {
+                            if !saw_cap_sample {
+                                tracing::warn!(
+                                    "presence debug: no capacitance `0x33` occupancy sample in 60s — MCU likely not sending usable `0x33`, or narcolepsy rejected layout (Sensor logs first bad `0x33` WARNING once)"
+                                );
+                            }
                         }
                     }
                 }
@@ -2295,6 +2488,32 @@ mod tests {
             Some(false),
             "disabled in HA registry by default — enable under device entities if desired"
         );
+    }
+
+    #[test]
+    fn deviceinfo_discovery_matches_state_topics() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc_l = discovery_payload_deviceinfo_device_label(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc_l).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(DEVICEINFO_DEVICE_LABEL_STATE_TOPIC),
+        );
+        let disc_i = discovery_payload_deviceinfo_device_id(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc_i).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(DEVICEINFO_DEVICE_ID_STATE_TOPIC),
+        );
+        for disc in [disc_l, disc_i] {
+            let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+            assert_eq!(
+                v["enabled_by_default"].as_bool(),
+                Some(false),
+                "disabled in HA by default — enable under device entities if desired"
+            );
+        }
     }
 
     #[test]
