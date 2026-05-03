@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rumqttc::{AsyncClient, ConnectionError, Event, Incoming, LastWill, MqttOptions, Publish, QoS};
+use tokio::sync::mpsc;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -15,7 +16,7 @@ use tokio::time::{sleep, Duration};
 use crate::cli::Cli;
 use crate::frozen_frame::{set_target_temperature_frame, BedSide};
 use crate::is31fl3194::Is31fl3194;
-use crate::sensor_frame::{set_alarm_frame, AlarmPattern};
+use crate::sensor_frame::{vibration_sequence_frames, AlarmPattern};
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
@@ -55,6 +56,12 @@ pub struct BridgeConfig {
     pub vibration_intensity: u8,
     pub vibration_duration_sec: u32,
     pub vibration_pattern: AlarmPattern,
+    /// Prepends cancel `SetAlarm` before piezo + alarm (`--sensor-vibrate-cancel-preamble`).
+    pub sensor_vibrate_cancel_preamble: bool,
+    /// When set, Frozen frames are queued to [`crate::frozen_link`] instead of opening the port per command.
+    pub frozen_tx: Option<mpsc::Sender<Vec<u8>>>,
+    /// When set, vibration batches go to [`crate::sensor_link`].
+    pub sensor_tx: Option<mpsc::Sender<Vec<Vec<u8>>>>,
 }
 
 impl BridgeConfig {
@@ -91,6 +98,9 @@ impl BridgeConfig {
                 crate::cli::VibrationPatternArg::Single => AlarmPattern::Single,
                 crate::cli::VibrationPatternArg::Double => AlarmPattern::Double,
             },
+            sensor_vibrate_cancel_preamble: cli.sensor_vibrate_cancel_preamble,
+            frozen_tx: None,
+            sensor_tx: None,
         }
     }
 
@@ -199,6 +209,32 @@ impl BridgeConfig {
             "payload_available": "online",
             "payload_not_available": "offline",
         }])
+    }
+}
+
+async fn enqueue_frozen_frame(config: &BridgeConfig, frame: Vec<u8>) -> Result<(), String> {
+    if let Some(tx) = &config.frozen_tx {
+        tx.send(frame)
+            .await
+            .map_err(|e| format!("frozen UART task disconnected: {e:?}"))
+    } else {
+        serial_prime::send_frame(&config.serial_device, config.serial_baud, &frame)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+async fn enqueue_sensor_vibration(config: &BridgeConfig, frames: Vec<Vec<u8>>) -> Result<(), String> {
+    if let Some(tx) = &config.sensor_tx {
+        tx.send(frames)
+            .await
+            .map_err(|e| format!("sensor UART task disconnected: {e:?}"))
+    } else if let Some(ref path) = config.sensor_device {
+        serial_prime::send_frames(path, config.sensor_baud, &frames)
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err("sensor UART disabled".into())
     }
 }
 
@@ -380,40 +416,41 @@ fn vibrate_action_label(side: BedSide) -> &'static str {
 }
 
 async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side: BedSide) {
-    let Some(ref sensor_path) = config.sensor_device else {
+    if config.sensor_device.is_none() {
         return;
-    };
+    }
     let intensity = config.vibration_intensity.clamp(1, 100);
     let duration = config.vibration_duration_sec.clamp(1, 600);
-    let frame = set_alarm_frame(side, intensity, config.vibration_pattern, duration);
-    match serial_prime::send_frame(sensor_path, config.sensor_baud, &frame).await {
+    let frames = vibration_sequence_frames(
+        side,
+        intensity,
+        config.vibration_pattern,
+        duration,
+        config.sensor_vibrate_cancel_preamble,
+    );
+    let frame_count = frames.len();
+    match enqueue_sensor_vibration(config, frames).await {
         Ok(()) => {
             tracing::info!(
                 ?side,
                 intensity,
                 duration,
                 pattern = ?config.vibration_pattern,
-                "Sensor SetAlarm (vibration) sent"
+                frame_count,
+                "Sensor vibration sequence sent (opensleep: optional cancel + EnableVibration + piezo + SetAlarm)"
             );
             publish_json_result(
                 client,
                 config,
                 vibrate_action_label(side),
                 "success",
-                "set alarm / vibration",
+                "vibration sequence",
             )
             .await;
         }
         Err(e) => {
-            tracing::error!(?e, ?side, "Sensor serial write failed (vibration)");
-            publish_json_result(
-                client,
-                config,
-                vibrate_action_label(side),
-                "error",
-                &e.to_string(),
-            )
-            .await;
+            tracing::error!(%e, ?side, "Sensor vibration enqueue failed");
+            publish_json_result(client, config, vibrate_action_label(side), "error", &e).await;
         }
     }
 }
@@ -568,7 +605,7 @@ async fn handle_climate_mode_command(
     let snap = st.clone();
     drop(st);
 
-    match serial_prime::send_frame(&config.serial_device, config.serial_baud, &frame).await {
+    match enqueue_frozen_frame(config, frame).await {
         Ok(()) => {
             tracing::info!(
                 ?side,
@@ -587,16 +624,9 @@ async fn handle_climate_mode_command(
             .await;
         }
         Err(e) => {
-            tracing::error!(?e, ?side, "climate mode serial write failed");
+            tracing::error!(%e, ?side, "climate mode Frozen UART enqueue failed");
             *state.lock().await = backup;
-            publish_json_result(
-                client,
-                config,
-                climate_action_label(side),
-                "error",
-                &e.to_string(),
-            )
-            .await;
+            publish_json_result(client, config, climate_action_label(side), "error", &e).await;
         }
     }
 }
@@ -627,7 +657,7 @@ async fn handle_climate_temperature_command(
         let frame = set_target_temperature_frame(side, true, centi);
         let snap = st.clone();
         drop(st);
-        match serial_prime::send_frame(&config.serial_device, config.serial_baud, &frame).await {
+        match enqueue_frozen_frame(config, frame).await {
             Ok(()) => {
                 tracing::info!(?side, target_centi = centi, "climate temperature");
                 publish_climate_state(client, config, side, &snap).await;
@@ -641,16 +671,9 @@ async fn handle_climate_temperature_command(
                 .await;
             }
             Err(e) => {
-                tracing::error!(?e, ?side, "climate temperature serial write failed");
+                tracing::error!(%e, ?side, "climate temperature Frozen UART enqueue failed");
                 *state.lock().await = backup;
-                publish_json_result(
-                    client,
-                    config,
-                    climate_action_label(side),
-                    "error",
-                    &e.to_string(),
-                )
-                .await;
+                publish_json_result(client, config, climate_action_label(side), "error", &e).await;
             }
         }
     } else {
@@ -812,17 +835,15 @@ async fn handle_publish(
     if p.topic == config.command_topic() {
         let expected = config.payload_press.as_bytes();
         if p.payload.as_ref() == expected {
-            match serial_prime::send_frame(&config.serial_device, config.serial_baud, prime_frame)
-                .await
-            {
+            match enqueue_frozen_frame(config, prime_frame.to_vec()).await {
                 Ok(()) => {
-                    tracing::info!("prime frame sent to Frozen serial port");
+                    tracing::info!("prime frame queued to Frozen USART task");
                     publish_json_result(client, config, "prime", "success", "prime frame sent")
                         .await;
                 }
                 Err(e) => {
-                    tracing::error!(?e, "serial write failed");
-                    publish_json_result(client, config, "prime", "error", &e.to_string()).await;
+                    tracing::error!(%e, "Frozen UART enqueue failed");
+                    publish_json_result(client, config, "prime", "error", &e).await;
                 }
             }
         }

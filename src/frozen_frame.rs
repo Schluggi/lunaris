@@ -88,6 +88,21 @@ pub fn prime_frame() -> Vec<u8> {
     encode_command(&[0x52])
 }
 
+/// `FrozenCommand::Ping` — opensleep uses this for wake / keepalive.
+pub fn ping_frame() -> Vec<u8> {
+    encode_command(&[0x01])
+}
+
+/// `FrozenCommand::JumpToFirmware` — wake sequence after Ping when MCU is in bootloader.
+pub fn jump_to_firmware_frame() -> Vec<u8> {
+    encode_command(&[0x10])
+}
+
+/// `FrozenCommand::GetHardwareInfo`.
+pub fn get_hardware_info_frame() -> Vec<u8> {
+    encode_command(&[0x02])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +117,19 @@ mod tests {
     #[test]
     fn prime_frame_matches_opensleep_hex() {
         assert_eq!(prime_frame(), vec![0x7E, 0x01, 0x52, 0xB6, 0x2B]);
+    }
+
+    #[test]
+    fn ping_jump_hwinfo_match_opensleep_hex() {
+        assert_eq!(ping_frame(), vec![0x7E, 0x01, 0x01, 0xDC, 0xBD]);
+        assert_eq!(
+            jump_to_firmware_frame(),
+            vec![0x7E, 0x01, 0x10, 0xDE, 0xAD]
+        );
+        assert_eq!(
+            get_hardware_info_frame(),
+            vec![0x7E, 0x01, 0x02, 0xEC, 0xDE]
+        );
     }
 
     #[test]

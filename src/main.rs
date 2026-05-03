@@ -4,10 +4,15 @@
 
 mod cli;
 mod frozen_frame;
+mod frozen_link;
+mod frozen_rx;
 mod is31fl3194;
 mod mqtt_bridge;
 mod sensor_frame;
+mod sensor_link;
+mod sensor_rx;
 mod serial_prime;
+mod wire_buffer;
 
 use std::sync::Arc;
 
@@ -39,6 +44,9 @@ async fn main() {
     );
 
     let mut config = mqtt_bridge::BridgeConfig::from_cli(&cli);
+
+    config.frozen_tx = Some(frozen_link::spawn(cli.serial_device.clone(), cli.serial_baud).tx);
+
     if cli.no_led {
         tracing::info!("LED control disabled (--no-led)");
     } else {
@@ -77,6 +85,13 @@ async fn main() {
             "Sensor serial opened (vibration / SetAlarm)"
         );
         config.sensor_device = Some(cli.sensor_device.clone());
+        let sensor = sensor_link::spawn(
+            cli.sensor_device.clone(),
+            cli.sensor_baud,
+            !cli.no_sensor_bootloader_handshake,
+            cli.sensor_vibrate_no_ack_wait,
+        );
+        config.sensor_tx = Some(sensor.tx.clone());
     }
 
     let frame = frozen_frame::prime_frame();

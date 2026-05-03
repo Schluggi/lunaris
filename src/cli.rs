@@ -106,12 +106,25 @@ pub struct Cli {
     #[arg(long, default_value = "/dev/ttyS2")]
     pub sensor_device: PathBuf,
 
+    /// Sensor line speed. Opensleep Pod **3** firmware uses **115200**; Pod **4** often matches **38400** on `ttyS2` for coherent `0x7E` RX — override if needed (`115200`, etc.).
     #[arg(long, default_value_t = 38400)]
     pub sensor_baud: u32,
 
     /// Do not open the Sensor UART — no vibration MQTT buttons.
     #[arg(long, default_value_t = false)]
     pub no_vibration: bool,
+
+    /// Skip Sensor **bootloader handshake** (38400: Ping + JumpToFirmware, then `--sensor-baud`). Opensleep does this before firmware traffic; disable only if your MCU is already in firmware-only mode and the handshake causes trouble.
+    #[arg(long, default_value_t = false)]
+    pub no_sensor_bootloader_handshake: bool,
+
+    /// Do **not** wait for `0xAE` VibrationEnabled between piezo priming and SetAlarm — send all five frames back-to-back. Use when Sensor RX never shows opensleep `0x7E` framing (wrong baud / Pod 4 differences) but TX might still drive the piezo.
+    #[arg(long, default_value_t = false)]
+    pub sensor_vibrate_no_ack_wait: bool,
+
+    /// Prepend opensleep-style **alarm cancel** (`SetAlarm` intensity/duration 0) before piezo priming. Try **`false`** (default) when debugging **`AlarmSet` status 2** — the first `0xAC` line in logs may be the cancel frame’s ack, not the real alarm.
+    #[arg(long, default_value_t = false)]
+    pub sensor_vibrate_cancel_preamble: bool,
 
     /// `<object_id>` for `homeassistant/button/<object_id>/config` (vibrate left).
     #[arg(long, default_value = "narcolepsy_vibrate_left")]

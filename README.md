@@ -100,8 +100,10 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--climate-max-temp` | `47` | — | Maximum target temperature (°C) in climate discovery. |
 | `--climate-temp-step` | `0.5` | — | Slider step (°C) in Home Assistant. |
 | `--sensor-device` | `/dev/ttyS2` | — | **Sensor** subsystem UART (vibration / `SetAlarm`). Pod 4: often `ttyS2` while Frozen is `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)). Probed at startup; if it cannot be opened, the bridge continues **without** vibrate buttons. |
-| `--sensor-baud` | `38400` | — | Sensor serial speed (bits/s). |
+| `--sensor-baud` | `38400` | — | Sensor serial speed (bits/s). Default targets Pod **4** (`ttyS2`) where RX often lines up with **`0x7E`** framing at **38400**. Opensleep Pod **3** firmware commonly uses **`115200`** — pass **`--sensor-baud 115200`** if your Sensor MCU matches that. |
 | `--no-vibration` | *(off)* | — | Skip Sensor UART: no vibrate button discovery. |
+| `--no-sensor-bootloader-handshake` | *(off)* | — | Skip Sensor boot sequence at **38400** (Ping + JumpToFirmware) before opening **`--sensor-baud`**. Default follows opensleep; try this only if the handshake breaks an already‑running firmware link. |
+| `--sensor-vibrate-no-ack-wait` | *(off)* | — | Send vibration frames **without** waiting for `0xAE` between priming and SetAlarm. For Pods where Sensor RX is not opensleep-shaped at your baud but TX may still work. |
 | `--discovery-object-id-vibrate-left` | `narcolepsy_vibrate_left` | — | `<object_id>` for left vibrate `homeassistant/button/.../config`. |
 | `--discovery-object-id-vibrate-right` | `narcolepsy_vibrate_right` | — | Same for the right side. |
 | `--vibration-intensity` | `64` | — | Default intensity 1–100 for vibrate buttons (Sensor `SetAlarm`). |
@@ -121,7 +123,7 @@ Two MQTT **[climate](https://www.home-assistant.io/integrations/climate.mqtt/)**
 
 ## Vibration (per side, Sensor UART)
 
-Vibration uses the **Sensor** MCU’s USART (not Frozen): opensleep **`SensorCommand::SetAlarm`** (`0x2C` + side + intensity + pattern + duration). MQTT exposes two **[buttons](https://www.home-assistant.io/integrations/button.mqtt/)** (**Vibrate mattress (left)** / **Vibrate mattress (right)**); each press sends one alarm with **`--vibration-intensity`**, **`--vibration-duration-sec`**, and **`--vibration-pattern`**. Pod 4: Sensor is commonly **`/dev/ttyS2`**.
+Vibration uses the **Sensor** MCU’s USART (not Frozen). Each button press sends the same **primed sequence** as opensleep’s sensor scheduler — **`EnableVibration`**, **`SetPiezoGain`**, **`SetPiezoFreq`**, **`EnablePiezo`**, then **`SetAlarm`** (`0x2C` + side + intensity + pattern + duration) — so the piezo path is enabled before the alarm. MQTT exposes two **[buttons](https://www.home-assistant.io/integrations/button.mqtt/)** (**Vibrate mattress (left)** / **Vibrate mattress (right)**); parameters come from **`--vibration-intensity`**, **`--vibration-duration-sec`**, and **`--vibration-pattern`**. Pod **4**: Sensor is commonly **`/dev/ttyS2`**; **`--sensor-baud`** defaults to **`38400`** here (opensleep Pod **3** often **`115200`**).
 
 ## LED (Home Assistant light)
 
