@@ -1,0 +1,11 @@
+# Cross-compile for Eight Sleep Pod SOM (aarch64 Linux). Host packages vary by distro:
+# Debian/Ubuntu: sudo apt install gcc-aarch64-linux-gnu
+# Fedora: sudo dnf install gcc-aarch64-linux-gnu
+#
+# Then: rustup target add aarch64-unknown-linux-gnu
+#      cargo build --release --target aarch64-unknown-linux-gnu
+#
+# Binary path: target/aarch64-unknown-linux-gnu/release/narcolepsy
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
