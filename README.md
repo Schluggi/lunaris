@@ -18,7 +18,47 @@ Protocol details for **Pod 4** are **not** officially documented here and are **
 
 No cloud services are required.
 
+On startup, `narcolepsy` **opens `--serial-device` once** to verify it exists and is accessible. If that fails (missing path, permission, busy port), the process **exits before** connecting to MQTT.
+
 ## Quick start
+
+### Run on the Pod (aarch64) — cross-compile on your PC
+
+The Pod OS (**Eight Layer**, Yocto Kirkstone) reports **`aarch64`** (`uname -m`). A binary built on a typical PC is **`x86_64`** — copying it to the Pod yields:
+
+`cannot execute binary file: Exec format error`
+
+Build for ARM64 on your dev machine:
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+# Debian/Ubuntu — provides linker aarch64-linux-gnu-gcc (see [.cargo/config.toml](.cargo/config.toml))
+sudo apt install gcc-aarch64-linux-gnu
+
+cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+Deploy:
+
+```bash
+scp target/aarch64-unknown-linux-gnu/release/narcolepsy eight-pod:/tmp/
+```
+
+Then on the Pod (example):
+
+```bash
+chmod +x /tmp/narcolepsy
+/tmp/narcolepsy \
+  --mqtt-host 192.168.1.10 \
+  --mqtt-port 1883 \
+  --mqtt-username ha \
+  --mqtt-password secret \
+  --serial-device /dev/ttyS1
+```
+
+If the binary fails with **GLIBC / version `GLIBC_x.y` not found**, your linker used a **newer** glibc than the Pod’s rootfs. Options: build on an older distro/container closer to Kirkstone, use a **[musl](https://musl.cc/) static** target (e.g. `aarch64-unknown-linux-musl` with a suitable toolchain), or tools like [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) / [cross](https://github.com/cross-rs/cross).
+
+### Run on the same machine as `cargo build` (native)
 
 ```bash
 cargo build --release
@@ -27,14 +67,33 @@ cargo build --release
   --mqtt-port 1883 \
   --mqtt-username ha \
   --mqtt-password secret \
-  --serial-device /dev/ttymxc2
+  --serial-device /dev/ttyS1
 ```
 
-Defaults match opensleep’s Pod 3 reference: **`/dev/ttymxc2`** @ **38400** baud. Override if your Pod 4 differs.
+Default **`/dev/ttyS1`** matches Pod **4** Frozen paths from [opensleep#11](https://github.com/LiamSnow/opensleep/issues/11). Pod **3** often needs **`--serial-device /dev/ttymxc2`**. Baud **38400** unless you prove otherwise.
 
-## CLI overview
+## CLI arguments
 
-Run `narcolepsy --help` for full options. MQTT connection parameters and serial device settings are **CLI-only** (no config file in v1).
+All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists the same flags. Optional environment variables override only the marked options when set.
+
+| Option | Default | Environment | Description |
+|--------|---------|-------------|-------------|
+| `--mqtt-host` | `localhost` | — | MQTT broker hostname or IP. |
+| `--mqtt-port` | `1883` | — | MQTT broker TCP port. |
+| `--mqtt-username` | *(empty)* | `MQTT_USERNAME` | Broker username (optional). |
+| `--mqtt-password` | *(empty)* | `MQTT_PASSWORD` | Broker password (optional). |
+| `--mqtt-client-id` | `narcolepsy` | — | MQTT client id. |
+| `--topic-prefix` | `narcolepsy/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/result`, etc. |
+| `--discovery-prefix` | `homeassistant` | — | Home Assistant [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) prefix. |
+| `--discovery-object-id` | `narcolepsy_prime` | — | `<object_id>` in `homeassistant/button/<object_id>/config`. |
+| `--device-name` | `Eight Sleep` | — | Friendly device name in discovery (`device.name`). |
+| `--device-identifier` | `narcolepsy_pod` | — | Stable id for the HA device registry (`device.identifiers`). |
+| `--serial-device` | `/dev/ttyS1` | — | Frozen subsystem UART. Pod 4: often `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)); Pod 3: often `ttymxc2`. Must open at startup or the process exits. |
+| `--serial-baud` | `38400` | — | Serial line speed (bits/s). |
+| `--payload-press` | `PRESS` | — | Payload Home Assistant publishes when the button is pressed (must match discovery `payload_press`). |
+| `--log-level` | `info` | — | Default `tracing` filter if `RUST_LOG` is unset (e.g. `debug`, `info,narcolepsy=debug`). |
+
+If **`RUST_LOG`** is set in the environment, it takes precedence over `--log-level` (standard `tracing_subscriber` behaviour).
 
 ## USART protocol
 

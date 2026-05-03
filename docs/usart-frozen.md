@@ -4,12 +4,14 @@ This document describes the **wire format** used by `narcolepsy` for the **prime
 
 **Pod 4 warning:** opensleep is validated on **Pod 3** only. Eight Sleep does not publish this protocol. **Baud rate, device node (`/dev/tty…`), and command bytes may differ on Pod 4.** Treat the values below as a **working hypothesis** until confirmed with a capture from your hardware.
 
-## Electrical / serial parameters (reference: Pod 3)
+## Electrical / serial parameters
 
-| Parameter   | opensleep reference |
-|------------|---------------------|
-| Baud       | 38400               |
-| Port on SOM| `/dev/ttymxc2`      |
+| Variant | Frozen UART (`narcolepsy --serial-device`) | Notes |
+|--------|---------------------------------------------|--------|
+| Pod 3 (opensleep tested) | `/dev/ttymxc2` @ 38400 | opensleep `src/frozen/manager.rs` (`PORT`) |
+| Pod 4 (community) | **`/dev/ttyS1`** @ 38400 | frankenfirmware: Frozen=`ttyS1`, Sensor=`ttyS2` — [opensleep#11](https://github.com/LiamSnow/opensleep/issues/11) |
+
+Same framing is being tried on Pod 4; the MCU may emit extra/different packets compared to Pod 3 — see the issue log.
 
 ## Frame format (host → Frozen MCU)
 
