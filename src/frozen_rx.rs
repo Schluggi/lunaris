@@ -2,6 +2,7 @@
 //!
 //! Temperature telemetry follows opensleep `FrozenPacket::TemperatureUpdate` (`0x41`) and
 //! `GetTemperature` (`0xC1`) — see `src/frozen/packet.rs` in [opensleep](https://github.com/LiamSnow/opensleep).
+//! The same **`0x41`** opcode is used outbound as opensleep **`GetTemperatures`** (single-byte request; [`crate::frozen_frame::get_temperatures_frame`]).
 //!
 //! Water-reservoir presence follows opensleep `FrozenPacket::Message` (`0x07`) strings in
 //! [`FrozenState::handle_packet`](https://github.com/LiamSnow/opensleep/blob/main/src/frozen/state.rs):

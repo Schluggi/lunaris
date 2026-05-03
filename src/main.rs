@@ -3,11 +3,11 @@
 //! SPDX-License-Identifier: GPL-3.0-only
 
 mod cli;
-mod machine_config;
 mod frozen_frame;
 mod frozen_link;
 mod frozen_rx;
 mod is31fl3194;
+mod machine_config;
 mod mqtt_bridge;
 mod sensor_frame;
 mod sensor_link;

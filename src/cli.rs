@@ -48,6 +48,10 @@ pub struct Cli {
     #[arg(long, default_value = "narcolepsy_prime")]
     pub discovery_object_id: String,
 
+    /// `<object_id>` for `homeassistant/button/.../config` (Frozen **GetTemperatures** `0x41` request).
+    #[arg(long, default_value = "narcolepsy_request_temperatures")]
+    pub discovery_object_id_request_temperatures: String,
+
     #[arg(long, default_value = "Eight Sleep")]
     pub device_name: String,
 

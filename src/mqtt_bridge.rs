@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration, Instant};
 
 use crate::cli::Cli;
-use crate::frozen_frame::{set_target_temperature_frame, BedSide};
+use crate::frozen_frame::{get_temperatures_frame, set_target_temperature_frame, BedSide};
 use crate::frozen_rx::FrozenTemperatureUpdate;
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
 use crate::sensor_frame::{vibration_sequence_frames, AlarmPattern};
@@ -41,6 +41,7 @@ pub struct BridgeConfig {
     pub topic_prefix: String,
     pub discovery_prefix: String,
     pub discovery_object_id: String,
+    pub discovery_object_id_request_temperatures: String,
     pub discovery_object_id_led: String,
     pub discovery_object_id_startup_led: String,
     pub discovery_object_id_climate_left: String,
@@ -108,6 +109,9 @@ impl BridgeConfig {
             topic_prefix: cli.topic_prefix.clone(),
             discovery_prefix: cli.discovery_prefix.clone(),
             discovery_object_id: cli.discovery_object_id.clone(),
+            discovery_object_id_request_temperatures: cli
+                .discovery_object_id_request_temperatures
+                .clone(),
             discovery_object_id_led: cli.discovery_object_id_led.clone(),
             discovery_object_id_startup_led: cli.discovery_object_id_startup_led.clone(),
             discovery_object_id_climate_left: cli.discovery_object_id_climate_left.clone(),
@@ -172,6 +176,17 @@ impl BridgeConfig {
         format!(
             "{}/button/{}/config",
             self.discovery_prefix, self.discovery_object_id
+        )
+    }
+
+    pub fn request_get_temperatures_command_topic(&self) -> String {
+        format!("{}/button/request_get_temperatures/set", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_request_get_temperatures(&self) -> String {
+        format!(
+            "{}/button/{}/config",
+            self.discovery_prefix, self.discovery_object_id_request_temperatures
         )
     }
 
@@ -437,6 +452,23 @@ fn discovery_payload_button(config: &BridgeConfig) -> String {
     .to_string()
 }
 
+fn discovery_payload_request_get_temperatures_button(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Request Temperatures",
+        "command_topic": config.request_get_temperatures_command_topic(),
+        "payload_press": config.payload_press,
+        "entity_category": "diagnostic",
+        "unique_id": format!("{}_request_get_temperatures", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 fn discovery_payload_startup_led_switch(config: &BridgeConfig) -> String {
     json!({
         "name": "Startup LED",
@@ -571,7 +603,7 @@ fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
 
 fn discovery_payload_firmware_message(config: &BridgeConfig) -> String {
     json!({
-        "name": "Firmware message",
+        "name": "Firmware Message",
         "state_topic": config.firmware_message_state_topic(),
         "icon": "mdi:message-text",
         "entity_category": "diagnostic",
@@ -795,11 +827,7 @@ async fn publish_water_tank_state(client: &AsyncClient, config: &BridgeConfig, p
     }
 }
 
-async fn publish_firmware_message_state(
-    client: &AsyncClient,
-    config: &BridgeConfig,
-    msg: &str,
-) {
+async fn publish_firmware_message_state(client: &AsyncClient, config: &BridgeConfig, msg: &str) {
     let qos = QoS::AtLeastOnce;
     if let Err(e) = client
         .publish(
@@ -963,9 +991,11 @@ async fn on_frozen_prime_pressed(
         let mut g = hs.frozen_prime_shown_until.lock().await;
         *g = Some(until);
     }
-    let active =
-        priming_binary_sensor_active(config.sensor_priming_counts.as_ref(), &hs.frozen_prime_shown_until)
-            .await;
+    let active = priming_binary_sensor_active(
+        config.sensor_priming_counts.as_ref(),
+        &hs.frozen_prime_shown_until,
+    )
+    .await;
     publish_priming_state(client, config, active).await;
 
     let c = client.clone();
@@ -1342,6 +1372,18 @@ async fn publish_discovery_and_online(
     {
         tracing::error!(?e, "publish button discovery");
     }
+    let disc_req_temp = discovery_payload_request_get_temperatures_button(config);
+    if let Err(e) = client
+        .publish(
+            config.discovery_topic_request_get_temperatures(),
+            qos,
+            true,
+            disc_req_temp,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish request GetTemperatures button discovery");
+    }
     if config.i2c_device.is_some() {
         let disc_led = discovery_payload_light(config);
         if let Err(e) = client
@@ -1412,9 +1454,11 @@ async fn publish_discovery_and_online(
         {
             tracing::error!(?e, "publish priming binary_sensor discovery");
         }
-        let active =
-            priming_binary_sensor_active(config.sensor_priming_counts.as_ref(), &hs.frozen_prime_shown_until)
-                .await;
+        let active = priming_binary_sensor_active(
+            config.sensor_priming_counts.as_ref(),
+            &hs.frozen_prime_shown_until,
+        )
+        .await;
         publish_priming_state(client, config, active).await;
     }
     if config.sensor_device.is_some() && config.presence_discovery {
@@ -1513,14 +1557,16 @@ async fn publish_discovery_and_online(
     }
 }
 
-async fn setup_session(
-    client: &AsyncClient,
-    config: &BridgeConfig,
-    hs: &PublishHandlerState,
-) {
+async fn setup_session(client: &AsyncClient, config: &BridgeConfig, hs: &PublishHandlerState) {
     let qos = QoS::AtLeastOnce;
     if let Err(e) = client.subscribe(config.command_topic(), qos).await {
         tracing::error!(?e, "subscribe prime command topic");
+    }
+    if let Err(e) = client
+        .subscribe(config.request_get_temperatures_command_topic(), qos)
+        .await
+    {
+        tracing::error!(?e, "subscribe request_get_temperatures command topic");
     }
     if config.i2c_device.is_some() {
         if let Err(e) = client.subscribe(config.light_command_topic(), qos).await {
@@ -1671,6 +1717,31 @@ async fn handle_publish(
                 Err(e) => {
                     tracing::error!(%e, "Frozen UART enqueue failed");
                     publish_json_result(client, config, "prime", "error", &e).await;
+                }
+            }
+        }
+        return;
+    }
+
+    if p.topic == config.request_get_temperatures_command_topic() {
+        let expected = config.payload_press.as_bytes();
+        if p.payload.as_ref() == expected {
+            match enqueue_frozen_frame(config, get_temperatures_frame()).await {
+                Ok(()) => {
+                    tracing::info!("GetTemperatures frame queued to Frozen USART task");
+                    publish_json_result(
+                        client,
+                        config,
+                        "request_get_temperatures",
+                        "success",
+                        "get_temperatures frame sent",
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tracing::error!(%e, "Frozen UART enqueue failed (GetTemperatures)");
+                    publish_json_result(client, config, "request_get_temperatures", "error", &e)
+                        .await;
                 }
             }
         }
@@ -2224,6 +2295,19 @@ mod tests {
             Some(false),
             "disabled in HA registry by default — enable under device entities if desired"
         );
+    }
+
+    #[test]
+    fn request_get_temperatures_button_discovery_matches_command_topic() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_request_get_temperatures_button(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.request_get_temperatures_command_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
     }
 
     #[test]

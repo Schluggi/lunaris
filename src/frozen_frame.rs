@@ -103,6 +103,11 @@ pub fn get_hardware_info_frame() -> Vec<u8> {
     encode_command(&[0x02])
 }
 
+/// `FrozenCommand::GetTemperatures` — payload `0x41` (same opcode as inbound [`TemperatureUpdate`](crate::frozen_rx::FrozenTemperatureUpdate) in [`crate::frozen_rx`]).
+pub fn get_temperatures_frame() -> Vec<u8> {
+    encode_command(&[0x41])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +132,15 @@ mod tests {
             get_hardware_info_frame(),
             vec![0x7E, 0x01, 0x02, 0xEC, 0xDE]
         );
+    }
+
+    #[test]
+    fn get_temperatures_frame_crc_wrapped() {
+        let p = [0x41u8];
+        let crc = crc_ccitt(&p);
+        let mut expected = vec![0x7E, 0x01, 0x41];
+        expected.extend_from_slice(&crc.to_be_bytes());
+        assert_eq!(get_temperatures_frame(), expected);
     }
 
     #[test]
