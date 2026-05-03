@@ -1,0 +1,24 @@
+[package]
+name = "narcolepsy"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0"
+description = "Local MQTT bridge for Eight Sleep Pod Frozen USART prime command (opensleep-compatible framing)."
+readme = "README.md"
+
+[[bin]]
+name = "narcolepsy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+rumqttc = "0.24"
+clap = { version = "=4.5.27", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-serial = "5.4"
+
+[dev-dependencies]
