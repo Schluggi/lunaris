@@ -3,7 +3,7 @@ name = "narcolepsy"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0"
-description = "Local MQTT bridge for Eight Sleep Pod Frozen USART prime command (opensleep-compatible framing)."
+description = "Local MQTT bridge: Eight Sleep Pod Frozen USART prime + IS31FL3194 LED via I²C, Home Assistant MQTT discovery."
 readme = "README.md"
 
 [[bin]]
@@ -20,5 +20,6 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-serial = "5.4"
+i2cdev = "0.6"
 
 [dev-dependencies]

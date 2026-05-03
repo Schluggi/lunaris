@@ -4,6 +4,7 @@
 
 mod cli;
 mod frozen_frame;
+mod is31fl3194;
 mod mqtt_bridge;
 mod serial_prime;
 
@@ -36,7 +37,28 @@ async fn main() {
         "serial device opened successfully (startup check)"
     );
 
-    let config = mqtt_bridge::BridgeConfig::from_cli(&cli);
+    let mut config = mqtt_bridge::BridgeConfig::from_cli(&cli);
+    if cli.no_led {
+        tracing::info!("LED control disabled (--no-led)");
+    } else {
+        match crate::is31fl3194::probe(&cli.i2c_device) {
+            Ok(()) => {
+                tracing::info!(
+                    device = %cli.i2c_device.display(),
+                    "I²C LED bus opened (IS31FL3194 @ 0x53)"
+                );
+                config.i2c_device = Some(cli.i2c_device.clone());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    device = %cli.i2c_device.display(),
+                    error = %e,
+                    "cannot open I²C for LED; continuing without MQTT light entity"
+                );
+            }
+        }
+    }
+
     let frame = frozen_frame::prime_frame();
     let arc = Arc::from(frame.into_boxed_slice());
     mqtt_bridge::run(config, arc).await;

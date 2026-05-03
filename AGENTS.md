@@ -18,11 +18,14 @@ Zielhardware des Nutzers: **Eight Sleep Pod 4** — das Protokoll ist im Code/Re
 | [`src/cli.rs`](src/cli.rs) | **clap**: MQTT-Broker, Topic-Prefix, Discovery-IDs, Serielle Parameter (`--serial-device`, `--serial-baud`). **Kein Config-File** in v1. |
 | [`src/frozen_frame.rs`](src/frozen_frame.rs) | CRC-CCITT + Frame-Encoding; `prime_frame()` muss mit opensleep übereinstimmen (Tests mit festem Hex). |
 | [`src/serial_prime.rs`](src/serial_prime.rs) | `check_device_accessible` (Start), `send_frame` beim Button (`tokio-serial`). |
-| [`src/mqtt_bridge.rs`](src/mqtt_bridge.rs) | **rumqttc**: LWT/Availability, **MQTT Discovery** für Home-Assistant-**Button**, Subscribe auf Command + optional `homeassistant/status`, Ergebnis auf `{prefix}/result`. |
+| [`src/is31fl3194.rs`](src/is31fl3194.rs) | IS31FL3194 über Linux **I²C** (`i2cdev`), solid RGB — Logik aus opensleep `led/controller.rs` (GPL). |
+| [`src/mqtt_bridge.rs`](src/mqtt_bridge.rs) | **rumqttc**: LWT/Availability, Discovery **Button** + optional **Light** (JSON), Prime- und LED-Commands, `homeassistant/status`, `{prefix}/result`. |
 
 Typische MQTT-Topics (Default-Präfix `narcolepsy/pod4` in CLI): `…/availability`, `…/button/prime/set`, `…/result`; Discovery unter `homeassistant/button/<object_id>/config`.
 
 **Frozen-Seriell:** Default **`/dev/ttyS1`** (Pod 4 laut [opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)). Pod 3: meist **`/dev/ttymxc2`**.
+
+**LED:** I²C default **`/dev/i2c-1`**, Chip **0x53**; bei Problemen nur Warnung, dann ohne Light-Entity. `--no-led` schaltet LED komplett ab.
 
 ## Konventionen für Änderungen
 

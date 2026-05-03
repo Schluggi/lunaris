@@ -83,7 +83,7 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--mqtt-username` | *(empty)* | `MQTT_USERNAME` | Broker username (optional). |
 | `--mqtt-password` | *(empty)* | `MQTT_PASSWORD` | Broker password (optional). |
 | `--mqtt-client-id` | `narcolepsy` | — | MQTT client id. |
-| `--topic-prefix` | `narcolepsy/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/result`, etc. |
+| `--topic-prefix` | `narcolepsy/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/light/led/set`, `{prefix}/light/led/state`, `{prefix}/result`, etc. |
 | `--discovery-prefix` | `homeassistant` | — | Home Assistant [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) prefix. |
 | `--discovery-object-id` | `narcolepsy_prime` | — | `<object_id>` in `homeassistant/button/<object_id>/config`. |
 | `--device-name` | `Eight Sleep` | — | Friendly device name in discovery (`device.name`). |
@@ -91,6 +91,9 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--serial-device` | `/dev/ttyS1` | — | Frozen subsystem UART. Pod 4: often `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)); Pod 3: often `ttymxc2`. Must open at startup or the process exits. |
 | `--serial-baud` | `38400` | — | Serial line speed (bits/s). |
 | `--payload-press` | `PRESS` | — | Payload Home Assistant publishes when the button is pressed (must match discovery `payload_press`). |
+| `--i2c-device` | `/dev/i2c-1` | — | Linux I²C bus where the IS31FL3194 LED driver sits (address **0x53**). Probed at startup; if it cannot be opened, MQTT **Prime** still runs but no **Light** entity is advertised. |
+| `--no-led` | *(off)* | — | Disables LED/I²C entirely (no probe, no `homeassistant/light/...` discovery). |
+| `--discovery-object-id-led` | `narcolepsy_led` | — | `<object_id>` for `homeassistant/light/<object_id>/config`. |
 | `--log-level` | `info` | — | Default `tracing` filter if `RUST_LOG` is unset (e.g. `debug`, `info,narcolepsy=debug`). |
 
 If **`RUST_LOG`** is set in the environment, it takes precedence over `--log-level` (standard `tracing_subscriber` behaviour).
@@ -98,6 +101,10 @@ If **`RUST_LOG`** is set in the environment, it takes precedence over `--log-lev
 ## USART protocol
 
 See [docs/usart-frozen.md](docs/usart-frozen.md).
+
+## LED (Home Assistant light)
+
+See [docs/led-is31fl3194.md](docs/led-is31fl3194.md).
 
 ## License
 

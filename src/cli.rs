@@ -7,7 +7,7 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "narcolepsy")]
 #[command(
-    about = "Local MQTT bridge: Home Assistant button → Frozen USART prime (opensleep-compatible)."
+    about = "Local MQTT bridge: Frozen USART prime + Pod LED (IS31FL3194 I²C), Home Assistant MQTT discovery."
 )]
 pub struct Cli {
     /// MQTT broker hostname or IP.
@@ -61,6 +61,18 @@ pub struct Cli {
     /// Payload Home Assistant sends when the button is pressed (see discovery `payload_press`).
     #[arg(long, default_value = "PRESS")]
     pub payload_press: String,
+
+    /// Linux I²C bus device for the IS31FL3194 LED controller (address `0x53`).
+    #[arg(long, default_value = "/dev/i2c-1")]
+    pub i2c_device: PathBuf,
+
+    /// Skip LED support: no I²C open at startup, no MQTT light discovery.
+    #[arg(long, default_value_t = false)]
+    pub no_led: bool,
+
+    /// `<object_id>` for `homeassistant/light/<object_id>/config`.
+    #[arg(long, default_value = "narcolepsy_led")]
+    pub discovery_object_id_led: String,
 
     /// `tracing` filter (e.g. `debug`, `info,narcolepsy=debug`).
     #[arg(long, default_value = "info")]
