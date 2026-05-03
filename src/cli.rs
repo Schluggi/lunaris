@@ -114,9 +114,17 @@ pub struct Cli {
     #[arg(long, default_value_t = 38400)]
     pub sensor_baud: u32,
 
-    /// Do not open the Sensor UART — no vibration MQTT buttons.
+    /// Do not open the Sensor UART — no vibration MQTT buttons, no capacitance presence.
     #[arg(long, default_value_t = false)]
     pub no_vibration: bool,
+
+    /// Do not publish MQTT **occupancy** from Sensor capacitance (`0x33`). Vibration is unchanged.
+    #[arg(long, default_value_t = false)]
+    pub no_presence_detection: bool,
+
+    /// Minimum **maximum** raw capacitance among the three Sensor zones on one mattress side to report that side as **occupied**. Lower if presence never triggers; raise if it sticks ON when empty (`RUST_LOG` `trace` shows zone values).
+    #[arg(long, default_value_t = 800)]
+    pub presence_cap_threshold: u16,
 
     /// Skip Sensor **bootloader handshake** (38400: Ping + JumpToFirmware, then `--sensor-baud`). Opensleep does this before firmware traffic; disable only if your MCU is already in firmware-only mode and the handshake causes trouble.
     #[arg(long, default_value_t = false)]
@@ -141,6 +149,14 @@ pub struct Cli {
     /// `<object_id>` for `homeassistant/binary_sensor/<object_id>/config` (Sensor piezo priming active).
     #[arg(long, default_value = "narcolepsy_priming")]
     pub discovery_object_id_priming: String,
+
+    /// `<object_id>` for occupancy (left side), from Sensor capacitance zones 0–2.
+    #[arg(long, default_value = "narcolepsy_presence_left")]
+    pub discovery_object_id_presence_left: String,
+
+    /// `<object_id>` for occupancy (right side), from Sensor capacitance zones 3–5.
+    #[arg(long, default_value = "narcolepsy_presence_right")]
+    pub discovery_object_id_presence_right: String,
 
     /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (Frozen current temperature, left).
     #[arg(long, default_value = "narcolepsy_temp_left")]

@@ -20,6 +20,7 @@ use crate::frozen_rx::FrozenTemperatureUpdate;
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
 use crate::sensor_frame::{vibration_sequence_frames, AlarmPattern};
 use crate::sensor_link::{PrimingCounts, PrimingEvent};
+use crate::sensor_rx::SensorCapacitanceZones;
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
@@ -63,6 +64,12 @@ pub struct BridgeConfig {
     pub discovery_object_id_heatsink_temp: String,
     pub discovery_object_id_target_temp_left: String,
     pub discovery_object_id_target_temp_right: String,
+    pub discovery_object_id_presence_left: String,
+    pub discovery_object_id_presence_right: String,
+    /// Raw capacitance: side **occupied** if `max(zone on side) >= threshold` (opensleep `0x33` zones).
+    pub presence_cap_threshold: u16,
+    /// MQTT occupancy from Sensor capacitance (needs open Sensor UART; see [`crate::main`]).
+    pub presence_discovery: bool,
     pub vibration_intensity: u8,
     pub vibration_duration_sec: u32,
     pub vibration_pattern: AlarmPattern,
@@ -112,7 +119,13 @@ impl BridgeConfig {
             discovery_object_id_temp_right: cli.discovery_object_id_temp_right.clone(),
             discovery_object_id_heatsink_temp: cli.discovery_object_id_heatsink_temp.clone(),
             discovery_object_id_target_temp_left: cli.discovery_object_id_target_temp_left.clone(),
-            discovery_object_id_target_temp_right: cli.discovery_object_id_target_temp_right.clone(),
+            discovery_object_id_target_temp_right: cli
+                .discovery_object_id_target_temp_right
+                .clone(),
+            discovery_object_id_presence_left: cli.discovery_object_id_presence_left.clone(),
+            discovery_object_id_presence_right: cli.discovery_object_id_presence_right.clone(),
+            presence_cap_threshold: cli.presence_cap_threshold,
+            presence_discovery: false,
             vibration_intensity: cli.vibration_intensity.clamp(1, 100),
             vibration_duration_sec: cli.vibration_duration_sec.clamp(1, 600),
             vibration_pattern: match cli.vibration_pattern {
@@ -274,7 +287,10 @@ impl BridgeConfig {
             BedSide::Left => "left",
             BedSide::Right => "right",
         };
-        format!("{}/sensor/target_temperature_{}/state", self.topic_prefix, s)
+        format!(
+            "{}/sensor/target_temperature_{}/state",
+            self.topic_prefix, s
+        )
     }
 
     pub fn discovery_topic_target_temperature(&self, side: BedSide) -> String {
@@ -283,6 +299,22 @@ impl BridgeConfig {
             BedSide::Right => &self.discovery_object_id_target_temp_right,
         };
         format!("{}/sensor/{}/config", self.discovery_prefix, id)
+    }
+
+    pub fn presence_state_topic(&self, side: BedSide) -> String {
+        let s = match side {
+            BedSide::Left => "left",
+            BedSide::Right => "right",
+        };
+        format!("{}/binary_sensor/presence_{}/state", self.topic_prefix, s)
+    }
+
+    pub fn discovery_topic_presence(&self, side: BedSide) -> String {
+        let id = match side {
+            BedSide::Left => &self.discovery_object_id_presence_left,
+            BedSide::Right => &self.discovery_object_id_presence_right,
+        };
+        format!("{}/binary_sensor/{}/config", self.discovery_prefix, id)
     }
 
     pub fn result_topic(&self) -> String {
@@ -464,6 +496,34 @@ fn discovery_payload_priming(config: &BridgeConfig) -> String {
     .to_string()
 }
 
+fn discovery_payload_presence(config: &BridgeConfig, side: BedSide) -> String {
+    let (name, unique_suffix) = match side {
+        BedSide::Left => ("Presence Left", "presence_left"),
+        BedSide::Right => ("Presence Right", "presence_right"),
+    };
+    json!({
+        "name": name,
+        "state_topic": config.presence_state_topic(side),
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device_class": "occupancy",
+        "unique_id": format!("{}_{}", config.device_identifier, unique_suffix),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn occupancy_from_capacitance(z: &SensorCapacitanceZones, threshold: u16) -> (bool, bool) {
+    let left_max = z.zones[..3].iter().copied().max().unwrap_or(0);
+    let right_max = z.zones[3..].iter().copied().max().unwrap_or(0);
+    (left_max >= threshold, right_max >= threshold)
+}
+
 fn discovery_payload_frozen_temperature(
     config: &BridgeConfig,
     name: &str,
@@ -485,6 +545,30 @@ fn discovery_payload_frozen_temperature(
         "availability": config.availability_json(),
     })
     .to_string()
+}
+
+async fn publish_presence_readings(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    left_on: bool,
+    right_on: bool,
+) {
+    let qos = QoS::AtLeastOnce;
+    let publishes = [
+        (
+            config.presence_state_topic(BedSide::Left),
+            if left_on { "ON" } else { "OFF" },
+        ),
+        (
+            config.presence_state_topic(BedSide::Right),
+            if right_on { "ON" } else { "OFF" },
+        ),
+    ];
+    for (topic, payload) in publishes {
+        if let Err(e) = client.publish(topic, qos, true, payload).await {
+            tracing::error!(?e, "publish presence occupancy state");
+        }
+    }
 }
 
 async fn publish_frozen_temperature_readings(
@@ -1027,10 +1111,25 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         }
         publish_priming_state(client, config, counts.any_active()).await;
     }
+    if config.sensor_device.is_some() && config.presence_discovery {
+        for side in [BedSide::Left, BedSide::Right] {
+            let disc = discovery_payload_presence(config, side);
+            if let Err(e) = client
+                .publish(config.discovery_topic_presence(side), qos, true, disc)
+                .await
+            {
+                tracing::error!(?e, side = ?side, "publish presence discovery");
+            }
+        }
+    }
     if config.frozen_temperature_discovery {
         for (side, name, suffix) in [
             (BedSide::Left, "Current Temperature Left", "cover_temp_left"),
-            (BedSide::Right, "Current Temperature Right", "cover_temp_right"),
+            (
+                BedSide::Right,
+                "Current Temperature Right",
+                "cover_temp_right",
+            ),
         ] {
             let disc = discovery_payload_frozen_temperature(
                 config,
@@ -1180,9 +1279,7 @@ async fn handle_startup_led_command(
     *startup_led_on.lock().await = on;
     publish_startup_led_state(client, config, on).await;
     if on {
-        tracing::info!(
-            "Startup LED preference ON (green LED applies on next narcolepsy start)"
-        );
+        tracing::info!("Startup LED preference ON (green LED applies on next narcolepsy start)");
     } else {
         tracing::info!("Startup LED preference OFF");
     }
@@ -1314,6 +1411,7 @@ pub async fn run(
     prime_frame: Arc<[u8]>,
     sensor_priming_events: Option<mpsc::Receiver<PrimingEvent>>,
     frozen_temperature_rx: Option<mpsc::Receiver<FrozenTemperatureUpdate>>,
+    capacitance_rx: Option<mpsc::Receiver<SensorCapacitanceZones>>,
 ) {
     let handler_state = PublishHandlerState {
         light_state: Arc::new(Mutex::new(LightStateSnapshot::default())),
@@ -1353,6 +1451,30 @@ pub async fn run(
         });
     }
 
+    if let Some(mut cap_rx) = capacitance_rx {
+        let c = client.clone();
+        let cfg = config.clone();
+        tokio::spawn(async move {
+            let threshold = cfg.presence_cap_threshold;
+            let mut prev: Option<(bool, bool)> = None;
+            while let Some(z) = cap_rx.recv().await {
+                let (left_on, right_on) = occupancy_from_capacitance(&z, threshold);
+                if prev == Some((left_on, right_on)) {
+                    continue;
+                }
+                tracing::trace!(
+                    left_on,
+                    right_on,
+                    threshold,
+                    zones = ?z.zones,
+                    "Sensor presence (capacitance)"
+                );
+                prev = Some((left_on, right_on));
+                publish_presence_readings(&c, &cfg, left_on, right_on).await;
+            }
+        });
+    }
+
     match (sensor_priming_events, config.sensor_priming_counts.clone()) {
         (Some(mut events_rx), Some(counts)) => {
             let c = client.clone();
@@ -1385,19 +1507,16 @@ pub async fn run(
         port = config.mqtt_port,
         led = config.i2c_device.is_some(),
         vibrate = config.sensor_device.is_some(),
+        presence = config.sensor_device.is_some() && config.presence_discovery,
         "MQTT client created; polling event loop"
     );
 
     #[cfg(unix)]
-    let mut sigint =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).expect(
-            "install SIGINT handler",
-        );
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("install SIGINT handler");
     #[cfg(unix)]
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect(
-            "install SIGTERM handler",
-        );
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
 
     loop {
         #[cfg(unix)]
@@ -1436,9 +1555,7 @@ pub async fn run(
                             const POLL: Duration = Duration::from_millis(20);
                             let mut waited = Duration::ZERO;
                             while waited < RETAIN_WAIT
-                                && !hs
-                                    .startup_led_broker_retain_seen
-                                    .load(Ordering::SeqCst)
+                                && !hs.startup_led_broker_retain_seen.load(Ordering::SeqCst)
                             {
                                 sleep(POLL).await;
                                 waited += POLL;
@@ -1601,6 +1718,23 @@ mod tests {
             assert_eq!(
                 v["state_topic"].as_str(),
                 Some(cfg.target_temperature_state_topic(side).as_str()),
+            );
+        }
+    }
+
+    #[test]
+    fn presence_discovery_is_occupancy() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let mut cfg = BridgeConfig::from_cli(&cli);
+        cfg.presence_discovery = true;
+        cfg.sensor_device = Some(std::path::PathBuf::from("/dev/null"));
+        for side in [BedSide::Left, BedSide::Right] {
+            let disc = discovery_payload_presence(&cfg, side);
+            let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+            assert_eq!(v["device_class"].as_str(), Some("occupancy"));
+            assert_eq!(
+                v["state_topic"].as_str(),
+                Some(cfg.presence_state_topic(side).as_str()),
             );
         }
     }

@@ -72,6 +72,8 @@ async fn main() {
 
     let mut sensor_priming_events: Option<tokio::sync::mpsc::Receiver<sensor_link::PrimingEvent>> =
         None;
+    let mut presence_cap_rx =
+        None::<tokio::sync::mpsc::Receiver<sensor_rx::SensorCapacitanceZones>>;
 
     if cli.no_vibration {
         tracing::info!("Vibration / Sensor UART disabled (--no-vibration)");
@@ -90,11 +92,20 @@ async fn main() {
             "Sensor serial opened (vibration / SetAlarm)"
         );
         config.sensor_device = Some(cli.sensor_device.clone());
+        let cap_tx = if cli.no_presence_detection {
+            None
+        } else {
+            config.presence_discovery = true;
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            presence_cap_rx = Some(rx);
+            Some(tx)
+        };
         let sensor = sensor_link::spawn(
             cli.sensor_device.clone(),
             cli.sensor_baud,
             !cli.no_sensor_bootloader_handshake,
             cli.sensor_vibrate_no_ack_wait,
+            cap_tx,
         );
         config.sensor_tx = Some(sensor.tx.clone());
         config.sensor_priming_counts = Some(sensor.priming_counts.clone());
@@ -108,6 +119,7 @@ async fn main() {
         arc,
         sensor_priming_events,
         Some(frozen_link.temperature_rx),
+        presence_cap_rx,
     )
     .await;
 }
