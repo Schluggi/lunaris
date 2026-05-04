@@ -24,7 +24,7 @@ pub fn probe(i2c_dev: &Path) -> Result<(), Is31Error> {
     Ok(())
 }
 
-/// Turn off all LED outputs (e.g. when narcolepsy exits).
+/// Turn off all LED outputs (e.g. when lunaris exits).
 pub fn shutdown_led(i2c_dev: &Path) -> Result<(), Is31Error> {
     let mut dev = Is31fl3194::open(i2c_dev)?;
     dev.set_solid_rgb(false, 0, 0, 0)

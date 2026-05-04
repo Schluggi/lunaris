@@ -26,35 +26,35 @@ use crate::sensor_rx::SensorCapacitanceZones;
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
-const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "narcolepsy_deviceinfo_device_label";
-const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "narcolepsy_deviceinfo_device_id";
-const DISCOVERY_OBJECT_ID_PRIME: &str = "narcolepsy_prime";
-const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "narcolepsy_request_temperatures";
-const DISCOVERY_OBJECT_ID_LED: &str = "narcolepsy_led";
-const DISCOVERY_OBJECT_ID_STARTUP_LED: &str = "narcolepsy_startup_led";
-const DISCOVERY_OBJECT_ID_CLIMATE_LEFT: &str = "narcolepsy_climate_left";
-const DISCOVERY_OBJECT_ID_CLIMATE_RIGHT: &str = "narcolepsy_climate_right";
-const DISCOVERY_OBJECT_ID_VIBRATE_LEFT: &str = "narcolepsy_vibrate_left";
-const DISCOVERY_OBJECT_ID_VIBRATE_RIGHT: &str = "narcolepsy_vibrate_right";
-const DISCOVERY_OBJECT_ID_TEMP_LEFT: &str = "narcolepsy_temp_left";
-const DISCOVERY_OBJECT_ID_TEMP_RIGHT: &str = "narcolepsy_temp_right";
-const DISCOVERY_OBJECT_ID_HEATSINK_TEMP: &str = "narcolepsy_heatsink_temp";
-const DISCOVERY_OBJECT_ID_VIBRATION_INTENSITY: &str = "narcolepsy_vibration_intensity";
-const DISCOVERY_OBJECT_ID_VIBRATION_DURATION: &str = "narcolepsy_vibration_duration";
-const DISCOVERY_OBJECT_ID_VIBRATION_PATTERN: &str = "narcolepsy_vibration_pattern";
-const DISCOVERY_OBJECT_ID_VIBRATION_CANCEL_PREAMBLE: &str = "narcolepsy_vibration_cancel_preamble";
-const DISCOVERY_OBJECT_ID_TARGET_TEMP_LEFT: &str = "narcolepsy_target_temp_left";
-const DISCOVERY_OBJECT_ID_TARGET_TEMP_RIGHT: &str = "narcolepsy_target_temp_right";
-const DISCOVERY_OBJECT_ID_PRESENCE_LEFT: &str = "narcolepsy_presence_left";
-const DISCOVERY_OBJECT_ID_PRESENCE_RIGHT: &str = "narcolepsy_presence_right";
-const DISCOVERY_OBJECT_ID_PRESENCE_ANY: &str = "narcolepsy_presence_any";
-const DISCOVERY_OBJECT_ID_CALIBRATE_PRESENCE: &str = "narcolepsy_calibrate_presence";
-const DISCOVERY_OBJECT_ID_PRESENCE_CAP_THRESHOLD: &str = "narcolepsy_presence_cap_threshold";
-const DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_DELTA: &str = "narcolepsy_presence_baseline_delta";
-const DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_ZONES: &str = "narcolepsy_presence_baseline_zones";
-const DISCOVERY_OBJECT_ID_PRESENCE_CALIBRATION: &str = "narcolepsy_presence_calibration";
-const DISCOVERY_OBJECT_ID_WATER_TANK: &str = "narcolepsy_water_tank";
-const DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE: &str = "narcolepsy_firmware_message";
+const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "lunaris_deviceinfo_device_label";
+const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "lunaris_deviceinfo_device_id";
+const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
+const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
+const DISCOVERY_OBJECT_ID_LED: &str = "lunaris_led";
+const DISCOVERY_OBJECT_ID_STARTUP_LED: &str = "lunaris_startup_led";
+const DISCOVERY_OBJECT_ID_CLIMATE_LEFT: &str = "lunaris_climate_left";
+const DISCOVERY_OBJECT_ID_CLIMATE_RIGHT: &str = "lunaris_climate_right";
+const DISCOVERY_OBJECT_ID_VIBRATE_LEFT: &str = "lunaris_vibrate_left";
+const DISCOVERY_OBJECT_ID_VIBRATE_RIGHT: &str = "lunaris_vibrate_right";
+const DISCOVERY_OBJECT_ID_TEMP_LEFT: &str = "lunaris_temp_left";
+const DISCOVERY_OBJECT_ID_TEMP_RIGHT: &str = "lunaris_temp_right";
+const DISCOVERY_OBJECT_ID_HEATSINK_TEMP: &str = "lunaris_heatsink_temp";
+const DISCOVERY_OBJECT_ID_VIBRATION_INTENSITY: &str = "lunaris_vibration_intensity";
+const DISCOVERY_OBJECT_ID_VIBRATION_DURATION: &str = "lunaris_vibration_duration";
+const DISCOVERY_OBJECT_ID_VIBRATION_PATTERN: &str = "lunaris_vibration_pattern";
+const DISCOVERY_OBJECT_ID_VIBRATION_CANCEL_PREAMBLE: &str = "lunaris_vibration_cancel_preamble";
+const DISCOVERY_OBJECT_ID_TARGET_TEMP_LEFT: &str = "lunaris_target_temp_left";
+const DISCOVERY_OBJECT_ID_TARGET_TEMP_RIGHT: &str = "lunaris_target_temp_right";
+const DISCOVERY_OBJECT_ID_PRESENCE_LEFT: &str = "lunaris_presence_left";
+const DISCOVERY_OBJECT_ID_PRESENCE_RIGHT: &str = "lunaris_presence_right";
+const DISCOVERY_OBJECT_ID_PRESENCE_ANY: &str = "lunaris_presence_any";
+const DISCOVERY_OBJECT_ID_CALIBRATE_PRESENCE: &str = "lunaris_calibrate_presence";
+const DISCOVERY_OBJECT_ID_PRESENCE_CAP_THRESHOLD: &str = "lunaris_presence_cap_threshold";
+const DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_DELTA: &str = "lunaris_presence_baseline_delta";
+const DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_ZONES: &str = "lunaris_presence_baseline_zones";
+const DISCOVERY_OBJECT_ID_PRESENCE_CALIBRATION: &str = "lunaris_presence_calibration";
+const DISCOVERY_OBJECT_ID_WATER_TANK: &str = "lunaris_water_tank";
+const DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE: &str = "lunaris_firmware_message";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
@@ -595,7 +595,7 @@ fn discovery_payload_button(config: &BridgeConfig) -> String {
         "unique_id": format!("{}_prime_button", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -612,7 +612,7 @@ fn discovery_payload_request_get_temperatures_button(config: &BridgeConfig) -> S
         "unique_id": format!("{}_request_get_temperatures", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -631,7 +631,7 @@ fn discovery_payload_startup_led_switch(config: &BridgeConfig) -> String {
         "unique_id": format!("{}_startup_led", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -651,7 +651,7 @@ fn discovery_payload_light(config: &BridgeConfig) -> String {
         "state_topic": config.light_state_topic(),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -684,7 +684,7 @@ fn discovery_payload_climate(config: &BridgeConfig, side: BedSide) -> String {
         "current_temperature_topic": config.frozen_current_temp_state_topic(side),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -709,7 +709,7 @@ fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> Str
         "device": config.device_json(),
         "icon": "mdi:vibrate",
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -730,7 +730,7 @@ fn discovery_payload_vibration_intensity_number(config: &BridgeConfig) -> String
         "unique_id": format!("{}_vibration_intensity", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -752,7 +752,7 @@ fn discovery_payload_vibration_duration_number(config: &BridgeConfig) -> String 
         "unique_id": format!("{}_vibration_duration", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -770,7 +770,7 @@ fn discovery_payload_vibration_pattern_select(config: &BridgeConfig) -> String {
         "unique_id": format!("{}_vibration_pattern", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -790,7 +790,7 @@ fn discovery_payload_vibration_cancel_preamble_switch(config: &BridgeConfig) -> 
         "unique_id": format!("{}_vibration_cancel_preamble", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -808,7 +808,7 @@ fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
         "unique_id": format!("{}_water_tank", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -826,7 +826,7 @@ fn discovery_payload_firmware_message(config: &BridgeConfig) -> String {
         "unique_id": format!("{}_firmware_message", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -844,7 +844,7 @@ fn discovery_payload_deviceinfo_device_label(config: &BridgeConfig) -> String {
         "unique_id": format!("{}_deviceinfo_device_label", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -862,7 +862,7 @@ fn discovery_payload_deviceinfo_device_id(config: &BridgeConfig) -> String {
         "unique_id": format!("{}_deviceinfo_device_id", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -884,7 +884,7 @@ fn discovery_payload_presence(config: &BridgeConfig, side: BedSide) -> String {
         "unique_id": format!("{}_{}", config.device_identifier, unique_suffix),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -902,7 +902,7 @@ fn discovery_payload_presence_any(config: &BridgeConfig) -> String {
         "unique_id": format!("{}_presence_any", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -921,7 +921,7 @@ fn discovery_payload_presence_calibration_binary_sensor(config: &BridgeConfig) -
         "unique_id": format!("{}_presence_calibration", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -938,7 +938,7 @@ fn discovery_payload_calibrate_presence_button(config: &BridgeConfig) -> String 
         "entity_category": "config",
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -960,7 +960,7 @@ fn discovery_payload_presence_cap_threshold_number(config: &BridgeConfig) -> Str
         "unique_id": format!("{}_presence_cap_threshold", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -977,7 +977,7 @@ fn discovery_payload_presence_baseline_zones_sensor(config: &BridgeConfig) -> St
         "entity_category": "diagnostic",
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -999,7 +999,7 @@ fn discovery_payload_presence_baseline_delta_number(config: &BridgeConfig) -> St
         "unique_id": format!("{}_presence_baseline_delta", config.device_identifier),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -1239,7 +1239,7 @@ fn discovery_payload_frozen_temperature(
         "unique_id": format!("{}_{}", config.device_identifier, unique_suffix),
         "device": config.device_json(),
         "origin": {
-            "name": "narcolepsy",
+            "name": "lunaris",
             "sw": config.sw_version,
         },
         "availability": config.availability_json(),
@@ -1465,7 +1465,7 @@ struct PublishHandlerState {
     startup_led_on: Arc<Mutex<bool>>,
     /// Set when an inbound `state_topic` message was sent with the MQTT retain flag (broker-stored preference), not a live publish.
     startup_led_broker_retain_seen: Arc<AtomicBool>,
-    /// While **true**, inbound retained **`state_topic`** payloads repopulate UI-facing settings so broker-stored HA choices survive narcolepsy restarts (climate, MQTT light snapshot, vibration, presence). Ignore after drain — later `…/state` echoes must not overwrite values set via `…/set` (no `unsubscribe`).
+    /// While **true**, inbound retained **`state_topic`** payloads repopulate UI-facing settings so broker-stored HA choices survive lunaris restarts (climate, MQTT light snapshot, vibration, presence). Ignore after drain — later `…/state` echoes must not overwrite values set via `…/set` (no `unsubscribe`).
     mqtt_ha_state_bootstrap: Arc<AtomicBool>,
     climate_left: Arc<Mutex<ClimateSideState>>,
     climate_right: Arc<Mutex<ClimateSideState>>,
@@ -2644,7 +2644,7 @@ async fn handle_startup_led_command(
     *startup_led_on.lock().await = on;
     publish_startup_led_state(client, config, on).await;
     if on {
-        tracing::info!("Startup LED preference ON (green LED applies on next narcolepsy start)");
+        tracing::info!("Startup LED preference ON (green LED applies on next lunaris start)");
     } else {
         tracing::info!("Startup LED preference OFF");
     }
@@ -3160,7 +3160,7 @@ pub async fn run(
                         }, if presence_debug && cap_stall_check.is_some() => {
                             if !saw_cap_sample {
                                 tracing::warn!(
-                                    "presence debug: no capacitance `0x33` occupancy sample in 60s — MCU likely not sending usable `0x33`, or narcolepsy rejected layout (Sensor logs first bad `0x33` WARNING once)"
+                                    "presence debug: no capacitance `0x33` occupancy sample in 60s — MCU likely not sending usable `0x33`, or lunaris rejected layout (Sensor logs first bad `0x33` WARNING once)"
                                 );
                             }
                         }
@@ -3291,7 +3291,7 @@ pub async fn run(
                                 };
                                 match commit_light_snapshot(&c, &cfg, &hs.light_state, green).await {
                                     Ok(()) => tracing::info!(
-                                        "Startup LED preference ON: green LED applied (this narcolepsy start)"
+                                        "Startup LED preference ON: green LED applied (this lunaris start)"
                                     ),
                                     Err(e) => {
                                         tracing::error!(%e, "Startup LED on boot: I²C LED write failed");
@@ -3394,7 +3394,7 @@ mod tests {
 
     #[test]
     fn climate_discovery_uses_current_temperature_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let left: serde_json::Value =
             serde_json::from_str(&discovery_payload_climate(&cfg, BedSide::Left)).unwrap();
@@ -3412,7 +3412,7 @@ mod tests {
 
     #[test]
     fn target_temperature_sensor_discovery_matches_state_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         for side in [BedSide::Left, BedSide::Right] {
             let (name, suffix) = match side {
@@ -3435,7 +3435,7 @@ mod tests {
 
     #[test]
     fn presence_discovery_is_occupancy() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let mut cfg = BridgeConfig::from_cli(&cli);
         cfg.presence_discovery = true;
         cfg.sensor_device = Some(std::path::PathBuf::from("/dev/null"));
@@ -3460,7 +3460,7 @@ mod tests {
 
     #[test]
     fn presence_calibration_running_discovery_matches_state_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let mut cfg = BridgeConfig::from_cli(&cli);
         cfg.presence_discovery = true;
         cfg.sensor_device = Some(std::path::PathBuf::from("/dev/null"));
@@ -3477,7 +3477,7 @@ mod tests {
 
     #[test]
     fn firmware_message_discovery_matches_state_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc = discovery_payload_firmware_message(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -3495,7 +3495,7 @@ mod tests {
 
     #[test]
     fn deviceinfo_discovery_matches_state_topics() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc_l = discovery_payload_deviceinfo_device_label(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc_l).unwrap();
@@ -3521,7 +3521,7 @@ mod tests {
 
     #[test]
     fn request_get_temperatures_button_discovery_matches_command_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc = discovery_payload_request_get_temperatures_button(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -3534,7 +3534,7 @@ mod tests {
 
     #[test]
     fn calibrate_presence_discovery_has_entity_category_config() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let mut cfg = BridgeConfig::from_cli(&cli);
         cfg.presence_discovery = true;
         let disc = discovery_payload_calibrate_presence_button(&cfg);
@@ -3548,7 +3548,7 @@ mod tests {
 
     #[test]
     fn presence_sensitivity_number_discovery_topics() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         for (disc, name) in [
             (
@@ -3577,7 +3577,7 @@ mod tests {
 
     #[test]
     fn startup_led_discovery_is_configuration_entity() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc = discovery_payload_startup_led_switch(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -3586,7 +3586,7 @@ mod tests {
 
     #[test]
     fn water_tank_discovery_is_mqtt_binary_sensor_with_plug_device_class() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         assert!(cfg
             .water_tank_state_topic()
@@ -3605,7 +3605,7 @@ mod tests {
 
     #[test]
     fn vibration_settings_discovery_payloads_use_config_entity_category() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         for (disc, exp_state, exp_name) in [
             (
@@ -3698,7 +3698,7 @@ mod tests {
 
     #[test]
     fn climate_state_topic_payload_ingest() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let mut st = ClimateSideState::default();
         assert!(ingest_climate_mode_from_state_payload(

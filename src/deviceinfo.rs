@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn read_deviceinfo_file_trims() {
-        let p = std::env::temp_dir().join("narcolepsy_deviceinfo_test_label");
+        let p = std::env::temp_dir().join("lunaris_deviceinfo_test_label");
         std::fs::write(&p, b"my-id\n").unwrap();
         let got = read_deviceinfo_file(p.to_str().unwrap());
         assert_eq!(got, b"my-id");

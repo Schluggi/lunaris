@@ -1,4 +1,4 @@
-# narcolepsy
+# lunaris
 
 Single-binary **local-only** bridge: **Frozen** USART (prime, per-side temperature), optional **Sensor** USART (per-side **vibration** / `SetAlarm`), optional **IS31FL3194** LED on I²C — **Home Assistant** via [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) (buttons, climates, light).
 
@@ -13,12 +13,12 @@ Protocol details for **Pod 4** are **not** officially documented here and are **
 ## Requirements
 
 - A reachable **MQTT broker** (for example Mosquitto on your LAN).
-- Network path from the machine running `narcolepsy` to that broker.
+- Network path from the machine running `lunaris` to that broker.
 - **Serial access** to the Pod Frozen USART from that same machine (typical when running **on the Pod SOM** after SSH/access setup; see opensleep [SETUP.md](https://github.com/LiamSnow/opensleep/blob/main/SETUP.md) for background — Pod 3 oriented).
 
 No cloud services are required.
 
-On startup, `narcolepsy` **opens `--serial-device` once** to verify it exists and is accessible. If that fails (missing path, permission, busy port), the process **exits before** connecting to MQTT.
+On startup, `lunaris` **opens `--serial-device` once** to verify it exists and is accessible. If that fails (missing path, permission, busy port), the process **exits before** connecting to MQTT.
 
 ## Quick start
 
@@ -41,14 +41,14 @@ cargo build --release --target aarch64-unknown-linux-gnu
 Deploy:
 
 ```bash
-scp target/aarch64-unknown-linux-gnu/release/narcolepsy eight-pod:/tmp/
+scp target/aarch64-unknown-linux-gnu/release/lunaris eight-pod:/tmp/
 ```
 
 Then on the Pod (Pod **4** example — see [Examples](#examples-pod-3-pod-4-and-pod-5) for **`--pod`** and Pod **3**):
 
 ```bash
-chmod +x /tmp/narcolepsy
-/tmp/narcolepsy \
+chmod +x /tmp/lunaris
+/tmp/lunaris \
   --mqtt-host 192.168.1.10 \
   --mqtt-port 1883 \
   --mqtt-username ha \
@@ -64,7 +64,7 @@ If the binary fails with **GLIBC / version `GLIBC_x.y` not found**, your linker 
 
 ```bash
 cargo build --release
-./target/release/narcolepsy \
+./target/release/lunaris \
   --mqtt-host 192.168.1.10 \
   --mqtt-port 1883 \
   --mqtt-username ha \
@@ -78,7 +78,7 @@ cargo build --release
 
 ## Examples: Pod 3, Pod 4, and Pod 5
 
-These examples assume `narcolepsy` runs **on the bed’s Linux SoM** (same machine that owns `/dev/tty…`). Adjust **`--mqtt-host`**, port, and credentials for your broker.
+These examples assume `lunaris` runs **on the bed’s Linux SoM** (same machine that owns `/dev/tty…`). Adjust **`--mqtt-host`**, port, and credentials for your broker.
 
 ### Pod 4 and Pod 5 (Eight Sleep Pod 4 / 5)
 
@@ -89,7 +89,7 @@ Community mapping ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/1
 **Typical start** (defaults: Frozen **38400**, Sensor **921600** — matches stock / Frankenfirmware after the bootloader jump).
 
 ```bash
-./narcolepsy \
+./lunaris \
   --mqtt-host 192.168.1.10 \
   --mqtt-port 1883 \
   --mqtt-username ha \
@@ -97,7 +97,7 @@ Community mapping ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/1
   --pod 4 \
   --serial-device /dev/ttyS1 \
   --sensor-device /dev/ttyS2 \
-  --topic-prefix narcolepsy/pod4
+  --topic-prefix lunaris/pod4
 ```
 
 Use **`--sensor-baud 38400`** only if your Sensor link still runs at **38400** and the default **921600** fails.
@@ -109,7 +109,7 @@ If **`/opt/eight/config/machine.json`** defines **`frozenPort`** / **`sensorPort
 Opensleep upstream uses **Frozen** on **`/dev/ttymxc2`** @ **38400** and **Sensor** on **`/dev/ttymxc0`** with firmware **115200** after the bootloader handshake (`opensleep` [`src/frozen/manager.rs`](https://github.com/LiamSnow/opensleep/blob/main/src/frozen/manager.rs), [`src/sensor/manager.rs`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/manager.rs)).
 
 ```bash
-./narcolepsy \
+./lunaris \
   --mqtt-host 192.168.1.10 \
   --mqtt-port 1883 \
   --mqtt-username ha \
@@ -117,14 +117,14 @@ Opensleep upstream uses **Frozen** on **`/dev/ttymxc2`** @ **38400** and **Senso
   --pod 3 \
   --serial-device /dev/ttymxc2 \
   --sensor-device /dev/ttymxc0 \
-  --topic-prefix narcolepsy/pod3
+  --topic-prefix lunaris/pod3
 ```
 
 Your hardware may still use different `tty` names — confirm with **`dmesg`**, vendor logs, or opensleep [SETUP.md](https://github.com/LiamSnow/opensleep/blob/main/SETUP.md).
 
 ## CLI arguments
 
-All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists the same flags. Optional environment variables override only the marked options when set.
+All settings are **CLI-only** (no config file in v1). `lunaris --help` lists the same flags. Optional environment variables override only the marked options when set.
 
 | Option | Default | Environment | Description |
 |--------|---------|-------------|-------------|
@@ -132,11 +132,11 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--mqtt-port` | `1883` | — | MQTT broker TCP port. |
 | `--mqtt-username` | *(empty)* | `MQTT_USERNAME` | Broker username (optional). |
 | `--mqtt-password` | *(empty)* | `MQTT_PASSWORD` | Broker password (optional). |
-| `--mqtt-client-id` | `narcolepsy` | — | MQTT client id. |
-| `--topic-prefix` | `narcolepsy/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/button/vibrate_left|vibrate_right/set`, `{prefix}/climate/...`, `{prefix}/light/...`, `{prefix}/result`, etc. |
+| `--mqtt-client-id` | `lunaris` | — | MQTT client id. |
+| `--topic-prefix` | `lunaris/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/button/vibrate_left|vibrate_right/set`, `{prefix}/climate/...`, `{prefix}/light/...`, `{prefix}/result`, etc. |
 | `--discovery-prefix` | `homeassistant` | — | Home Assistant [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) prefix. |
 | `--device-name` | `Eight Sleep` | — | Friendly device name in discovery (`device.name`). |
-| `--device-identifier` | `narcolepsy_pod` | — | Stable id for the HA device registry (`device.identifiers`). |
+| `--device-identifier` | `lunaris_pod` | — | Stable id for the HA device registry (`device.identifiers`). |
 | `--serial-device` | `/dev/ttyS1` | — | Frozen subsystem UART. Pod 4 / 5: often `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)); Pod 3: often `ttymxc2`. Must open at startup or the process exits. |
 | `--pod` | — | — | **Required.** `3`, `4`, or `5` (**5** = same baud defaults as **4**): default **`--serial-baud`** / **`--sensor-baud`** when those flags are omitted (**3** → 38400 / 115200; **4** / **5** → 38400 / 921600). Explicit baud flags override per line. |
 | `--serial-baud` | *(from `--pod`; Pod 4 / 5 → `38400`)* | — | Frozen line speed (bits/s). |
@@ -151,7 +151,7 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--vibration-intensity` | `64` | — | Default intensity 1–100 for vibrate buttons (Sensor `SetAlarm`). |
 | `--vibration-duration-sec` | `15` | — | Default duration in seconds (clamped 1…600). |
 | `--vibration-pattern` | `single` | — | `single` or `double` (opensleep `AlarmPattern`). |
-| `--log-level` | `info` | — | Default `tracing` filter if `RUST_LOG` is unset (e.g. `debug`, `info,narcolepsy=debug`). |
+| `--log-level` | `info` | — | Default `tracing` filter if `RUST_LOG` is unset (e.g. `debug`, `info,lunaris=debug`). |
 
 If **`RUST_LOG`** is set in the environment, it takes precedence over `--log-level` (standard `tracing_subscriber` behaviour).
 

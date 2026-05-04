@@ -51,7 +51,7 @@ impl PodModel {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "narcolepsy")]
+#[command(name = "lunaris")]
 #[command(
     about = "Local MQTT bridge: Frozen USART (prime, climate) + Sensor vibration (per side) + Pod LED (I²C), Home Assistant MQTT discovery."
 )]
@@ -69,11 +69,11 @@ pub struct Cli {
     #[arg(long, env = "MQTT_PASSWORD")]
     pub mqtt_password: Option<String>,
 
-    #[arg(long, default_value = "narcolepsy")]
+    #[arg(long, default_value = "lunaris")]
     pub mqtt_client_id: String,
 
     /// Prefix for device topics (`{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/climate/...`, …).
-    #[arg(long, default_value = "narcolepsy/pod4")]
+    #[arg(long, default_value = "lunaris/pod4")]
     pub topic_prefix: String,
 
     /// Home Assistant MQTT discovery prefix (usually `homeassistant`).
@@ -84,7 +84,7 @@ pub struct Cli {
     pub device_name: String,
 
     /// Stable ID for Home Assistant device registry (`device.identifiers`).
-    #[arg(long, default_value = "narcolepsy_pod")]
+    #[arg(long, default_value = "lunaris_pod")]
     pub device_identifier: String,
 
     /// Serial device for the **Frozen** subsystem.
@@ -170,7 +170,7 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = VibrationPatternArg::Single)]
     pub vibration_pattern: VibrationPatternArg,
 
-    /// `tracing` filter (e.g. `debug`, `info,narcolepsy=debug`).
+    /// `tracing` filter (e.g. `debug`, `info,lunaris=debug`).
     #[arg(long, default_value = "info")]
     pub log_level: String,
 }
@@ -195,40 +195,40 @@ mod tests {
 
     #[test]
     fn effective_bauds_default_match_pod4() {
-        let cli = Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "4"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 921600);
     }
 
     #[test]
     fn pod3_sets_sensor_115200() {
-        let cli = Cli::parse_from(["narcolepsy", "--pod", "3"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "3"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 115200);
     }
 
     #[test]
     fn explicit_baud_overrides_pod3() {
-        let cli = Cli::parse_from(["narcolepsy", "--pod", "3", "--sensor-baud", "38400"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "3", "--sensor-baud", "38400"]);
         assert_eq!(cli.effective_sensor_baud(), 38400);
     }
 
     #[test]
     fn pod4_explicit_same_as_default() {
-        let cli = Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "4"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 921600);
     }
 
     #[test]
     fn pod4_sensor_baud_can_be_overridden_to_38400() {
-        let cli = Cli::parse_from(["narcolepsy", "--pod", "4", "--sensor-baud", "38400"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "4", "--sensor-baud", "38400"]);
         assert_eq!(cli.effective_sensor_baud(), 38400);
     }
 
     #[test]
     fn pod5_matches_pod4_bauds() {
-        let cli = Cli::parse_from(["narcolepsy", "--pod", "5"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "5"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 921600);
     }

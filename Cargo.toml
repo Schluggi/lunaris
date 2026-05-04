@@ -1,14 +1,14 @@
 [package]
-name = "narcolepsy"
+name = "lunaris"
 version = "1.0.0"
 edition = "2021"
 license = "GPL-3.0"
-repository = "https://github.com/Schluggi/narcolepsy"
+repository = "https://github.com/Schluggi/lunaris"
 description = "Local MQTT bridge: Eight Sleep Pod Frozen (prime, climate) + Sensor vibration (per side) + IS31FL3194 LED, Home Assistant MQTT discovery."
 readme = "README.md"
 
 [[bin]]
-name = "narcolepsy"
+name = "lunaris"
 path = "src/main.rs"
 
 [dependencies]

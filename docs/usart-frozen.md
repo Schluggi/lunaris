@@ -1,12 +1,12 @@
 # Frozen subsystem USART (opensleep-compatible framing)
 
-This document describes the **wire format** used by `narcolepsy` for the **prime** action. It follows the implementation in [opensleep](https://github.com/LiamSnow/opensleep) (GPL-3.0): `src/common/codec.rs`, `src/common/checksum.rs`, `src/frozen/command.rs`.
+This document describes the **wire format** used by `lunaris` for the **prime** action. It follows the implementation in [opensleep](https://github.com/LiamSnow/opensleep) (GPL-3.0): `src/common/codec.rs`, `src/common/checksum.rs`, `src/frozen/command.rs`.
 
 **Pod 4 warning:** opensleep is validated on **Pod 3** only. Eight Sleep does not publish this protocol. **Baud rate, device node (`/dev/tty…`), and command bytes may differ on Pod 4.** Treat the values below as a **working hypothesis** until confirmed with a capture from your hardware.
 
 ## Electrical / serial parameters
 
-| Variant | Frozen UART (`narcolepsy --serial-device`) | Notes |
+| Variant | Frozen UART (`lunaris --serial-device`) | Notes |
 |--------|---------------------------------------------|--------|
 | Pod 3 (opensleep tested) | `/dev/ttymxc2` @ 38400 | opensleep `src/frozen/manager.rs` (`PORT`) |
 | Pod 4 (community) | **`/dev/ttyS1`** @ 38400 | frankenfirmware: Frozen=`ttyS1`, Sensor=`ttyS2` — [opensleep#11](https://github.com/LiamSnow/opensleep/issues/11) |
@@ -28,7 +28,7 @@ CRC algorithm (same as opensleep `checksum::compute`):
 - Initial CRC value: `0x1D0F`
 - For each payload byte, update per usual CRC-CCITT table/shift implementation.
 
-## Frozen commands referenced by `narcolepsy`
+## Frozen commands referenced by `lunaris`
 
 | Name (concept) | Payload bytes (hex) | Full framed example (hex, spaces) | Notes |
 |------------------|----------------------|-------------------------------------|-------|
@@ -39,7 +39,7 @@ The **Prime** example matches opensleep’s unit test output byte-for-byte (`Fro
 
 ## Responses
 
-The Frozen MCU sends frames using the **same** `0x7E` / length / CRC wrapping for outbound packets; opensleep models these in `FrozenPacket` (`src/frozen/packet.rs`). **narcolepsy** decodes a **subset** inbound in [`src/frozen_rx.rs`](../src/frozen_rx.rs): **temperature** (`0x41` / `0xC1`), MCU **text messages** (`0x07` UTF‑8 → MQTT **Firmware message** sensor + optional **Water Tank** MQTT sensor for two reservoir strings), pong **0x81**, and jump ack **0x90** (wake state). Other opcodes are ignored for MQTT (trace logging only).
+The Frozen MCU sends frames using the **same** `0x7E` / length / CRC wrapping for outbound packets; opensleep models these in `FrozenPacket` (`src/frozen/packet.rs`). **lunaris** decodes a **subset** inbound in [`src/frozen_rx.rs`](../src/frozen_rx.rs): **temperature** (`0x41` / `0xC1`), MCU **text messages** (`0x07` UTF‑8 → MQTT **Firmware message** sensor + optional **Water Tank** MQTT sensor for two reservoir strings), pong **0x81**, and jump ack **0x90** (wake state). Other opcodes are ignored for MQTT (trace logging only).
 
 ## Verifying on Pod 4
 
