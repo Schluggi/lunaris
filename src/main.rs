@@ -27,11 +27,12 @@ async fn main() {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(cli.log_level.clone()));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    if let Err(e) = serial_prime::check_device_accessible(&cli.serial_device, cli.serial_baud).await
+    if let Err(e) =
+        serial_prime::check_device_accessible(&cli.serial_device, cli.effective_serial_baud()).await
     {
         tracing::error!(
             device = %cli.serial_device.display(),
-            baud = cli.serial_baud,
+            baud = cli.effective_serial_baud(),
             error = %e,
             "cannot open serial device (Frozen USART); refusing to start without it \
              (Pod 4: try --serial-device /dev/ttyS1 per github.com/LiamSnow/opensleep/issues/11; Pod 3: often /dev/ttymxc2)"
@@ -40,51 +41,38 @@ async fn main() {
     }
     tracing::info!(
         device = %cli.serial_device.display(),
-        baud = cli.serial_baud,
+        baud = cli.effective_serial_baud(),
         "serial device opened successfully (startup check)"
     );
 
     let mut config = mqtt_bridge::BridgeConfig::from_cli(&cli);
 
-    let frozen_link = frozen_link::spawn(
-        cli.serial_device.clone(),
-        cli.serial_baud,
-        !cli.no_water_tank_sensor,
-        !cli.no_firmware_message_sensor,
-    );
+    let frozen_link = frozen_link::spawn(cli.serial_device.clone(), cli.effective_serial_baud());
     config.frozen_tx = Some(frozen_link.tx);
     config.frozen_temperature_discovery = true;
-    config.frozen_water_tank_discovery = !cli.no_water_tank_sensor;
-    config.frozen_firmware_message_discovery = !cli.no_firmware_message_sensor;
 
-    if cli.no_led {
-        tracing::info!("LED control disabled (--no-led)");
-    } else {
-        match crate::is31fl3194::probe(&cli.i2c_device) {
-            Ok(()) => {
-                tracing::info!(
-                    device = %cli.i2c_device.display(),
-                    "I²C LED bus opened (IS31FL3194 @ 0x53)"
-                );
-                config.i2c_device = Some(cli.i2c_device.clone());
-            }
-            Err(e) => {
-                tracing::warn!(
-                    device = %cli.i2c_device.display(),
-                    error = %e,
-                    "cannot open I²C for LED; continuing without MQTT light entity"
-                );
-            }
+    match crate::is31fl3194::probe(&cli.i2c_device) {
+        Ok(()) => {
+            tracing::info!(
+                device = %cli.i2c_device.display(),
+                "I²C LED bus opened (IS31FL3194 @ 0x53)"
+            );
+            config.i2c_device = Some(cli.i2c_device.clone());
+        }
+        Err(e) => {
+            tracing::warn!(
+                device = %cli.i2c_device.display(),
+                error = %e,
+                "cannot open I²C for LED; continuing without MQTT light entity"
+            );
         }
     }
 
     let mut presence_cap_rx =
         None::<tokio::sync::mpsc::Receiver<sensor_rx::SensorCapacitanceZones>>;
 
-    if cli.no_vibration {
-        tracing::info!("Vibration / Sensor UART disabled (--no-vibration)");
-    } else if let Err(e) =
-        serial_prime::check_device_accessible(&cli.sensor_device, cli.sensor_baud).await
+    if let Err(e) =
+        serial_prime::check_device_accessible(&cli.sensor_device, cli.effective_sensor_baud()).await
     {
         tracing::warn!(
             device = %cli.sensor_device.display(),
@@ -94,26 +82,20 @@ async fn main() {
     } else {
         tracing::info!(
             device = %cli.sensor_device.display(),
-            baud = cli.sensor_baud,
+            baud = cli.effective_sensor_baud(),
             "Sensor serial opened (vibration / SetAlarm)"
         );
         config.sensor_device = Some(cli.sensor_device.clone());
-        let cap_tx = if cli.no_presence_detection {
-            None
-        } else {
-            config.presence_discovery = true;
-            let (tx, rx) = tokio::sync::mpsc::channel(64);
-            presence_cap_rx = Some(rx);
-            Some(tx)
-        };
-        let presence_cap_parse_diag =
-            (cap_tx.is_some() && cli.presence_debug).then(sensor_rx::PresenceCapDiag::new_arc);
+        config.presence_discovery = true;
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        presence_cap_rx = Some(rx);
+        let presence_cap_parse_diag = cli.presence_debug.then(sensor_rx::PresenceCapDiag::new_arc);
         let sensor = sensor_link::spawn(
             cli.sensor_device.clone(),
-            cli.sensor_baud,
-            !cli.no_sensor_bootloader_handshake,
+            cli.effective_sensor_baud(),
+            true,
             cli.sensor_vibrate_no_ack_wait,
-            cap_tx,
+            Some(tx),
             presence_cap_parse_diag,
         );
         config.sensor_tx = Some(sensor.tx.clone());

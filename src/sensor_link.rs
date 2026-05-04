@@ -248,7 +248,7 @@ async fn run(
                             tracing::info!(
                                 len = n,
                                 hex = %hex_prefix(&chunk[..n]),
-                                "Sensor: first RX has no 0x7E — line noise, wrong --sensor-baud, or half a frame; try --sensor-baud 115200 vs 38400, or --no-sensor-bootloader-handshake with the baud stock used; --sensor-vibrate-no-ack-wait if RX never frames but TX might still drive the piezo"
+                                "Sensor: first RX has no 0x7E — line noise, wrong --sensor-baud, or half a frame; try --sensor-baud 115200 vs 38400 versus stock FW speed; --sensor-vibrate-no-ack-wait if RX never frames but TX might still drive the piezo"
                             );
                         }
                     }

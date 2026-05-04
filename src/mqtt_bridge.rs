@@ -1,6 +1,6 @@
 //! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor) + retained **number/select/switch**
 //! vibration tuning, optional capacitance **presence**,
-//! optional Frozen **water tank** status, mattress climate, JSON light (I²C).
+//! Frozen **water tank** + **Firmware message** from **`0x07`**, mattress climate, JSON light (I²C).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
 //! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
@@ -28,6 +28,33 @@ use crate::serial_prime;
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "narcolepsy_deviceinfo_device_label";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "narcolepsy_deviceinfo_device_id";
+const DISCOVERY_OBJECT_ID_PRIME: &str = "narcolepsy_prime";
+const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "narcolepsy_request_temperatures";
+const DISCOVERY_OBJECT_ID_LED: &str = "narcolepsy_led";
+const DISCOVERY_OBJECT_ID_STARTUP_LED: &str = "narcolepsy_startup_led";
+const DISCOVERY_OBJECT_ID_CLIMATE_LEFT: &str = "narcolepsy_climate_left";
+const DISCOVERY_OBJECT_ID_CLIMATE_RIGHT: &str = "narcolepsy_climate_right";
+const DISCOVERY_OBJECT_ID_VIBRATE_LEFT: &str = "narcolepsy_vibrate_left";
+const DISCOVERY_OBJECT_ID_VIBRATE_RIGHT: &str = "narcolepsy_vibrate_right";
+const DISCOVERY_OBJECT_ID_TEMP_LEFT: &str = "narcolepsy_temp_left";
+const DISCOVERY_OBJECT_ID_TEMP_RIGHT: &str = "narcolepsy_temp_right";
+const DISCOVERY_OBJECT_ID_HEATSINK_TEMP: &str = "narcolepsy_heatsink_temp";
+const DISCOVERY_OBJECT_ID_VIBRATION_INTENSITY: &str = "narcolepsy_vibration_intensity";
+const DISCOVERY_OBJECT_ID_VIBRATION_DURATION: &str = "narcolepsy_vibration_duration";
+const DISCOVERY_OBJECT_ID_VIBRATION_PATTERN: &str = "narcolepsy_vibration_pattern";
+const DISCOVERY_OBJECT_ID_VIBRATION_CANCEL_PREAMBLE: &str = "narcolepsy_vibration_cancel_preamble";
+const DISCOVERY_OBJECT_ID_TARGET_TEMP_LEFT: &str = "narcolepsy_target_temp_left";
+const DISCOVERY_OBJECT_ID_TARGET_TEMP_RIGHT: &str = "narcolepsy_target_temp_right";
+const DISCOVERY_OBJECT_ID_PRESENCE_LEFT: &str = "narcolepsy_presence_left";
+const DISCOVERY_OBJECT_ID_PRESENCE_RIGHT: &str = "narcolepsy_presence_right";
+const DISCOVERY_OBJECT_ID_PRESENCE_ANY: &str = "narcolepsy_presence_any";
+const DISCOVERY_OBJECT_ID_CALIBRATE_PRESENCE: &str = "narcolepsy_calibrate_presence";
+const DISCOVERY_OBJECT_ID_PRESENCE_CAP_THRESHOLD: &str = "narcolepsy_presence_cap_threshold";
+const DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_DELTA: &str = "narcolepsy_presence_baseline_delta";
+const DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_ZONES: &str = "narcolepsy_presence_baseline_zones";
+const DISCOVERY_OBJECT_ID_PRESENCE_CALIBRATION: &str = "narcolepsy_presence_calibration";
+const DISCOVERY_OBJECT_ID_WATER_TANK: &str = "narcolepsy_water_tank";
+const DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE: &str = "narcolepsy_firmware_message";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
@@ -61,47 +88,22 @@ pub struct BridgeConfig {
     pub mqtt_client_id: String,
     pub topic_prefix: String,
     pub discovery_prefix: String,
-    pub discovery_object_id: String,
-    pub discovery_object_id_request_temperatures: String,
-    pub discovery_object_id_led: String,
-    pub discovery_object_id_startup_led: String,
-    pub discovery_object_id_climate_left: String,
-    pub discovery_object_id_climate_right: String,
     pub climate_min_temp: f64,
     pub climate_max_temp: f64,
     pub climate_temp_step: f64,
     pub device_name: String,
     pub device_identifier: String,
+    /// Home Assistant `device.model` from [`Cli::pod`](crate::cli::Cli::pod).
+    pub device_model: String,
     pub sw_version: String,
     pub payload_press: String,
     pub serial_device: std::path::PathBuf,
     pub serial_baud: u32,
-    /// `None` → LED feature disabled (`--no-led` or I²C probe failed).
+    /// `None` → LED feature disabled (I²C probe failed at startup).
     pub i2c_device: Option<PathBuf>,
-    /// `None` → vibration MQTT buttons disabled (`--no-vibration` or Sensor UART probe failed).
+    /// `None` → vibration MQTT buttons disabled (Sensor UART probe failed at startup).
     pub sensor_device: Option<PathBuf>,
     pub sensor_baud: u32,
-    pub discovery_object_id_vibrate_left: String,
-    pub discovery_object_id_vibrate_right: String,
-    pub discovery_object_id_temp_left: String,
-    pub discovery_object_id_temp_right: String,
-    pub discovery_object_id_heatsink_temp: String,
-    pub discovery_object_id_vibration_intensity: String,
-    pub discovery_object_id_vibration_duration: String,
-    pub discovery_object_id_vibration_pattern: String,
-    pub discovery_object_id_vibration_cancel_preamble: String,
-    pub discovery_object_id_target_temp_left: String,
-    pub discovery_object_id_target_temp_right: String,
-    pub discovery_object_id_presence_left: String,
-    pub discovery_object_id_presence_right: String,
-    pub discovery_object_id_presence_any: String,
-    pub discovery_object_id_calibrate_presence: String,
-    pub discovery_object_id_presence_cap_threshold: String,
-    pub discovery_object_id_presence_baseline_delta: String,
-    pub discovery_object_id_presence_baseline_zones: String,
-    pub discovery_object_id_presence_calibration: String,
-    pub discovery_object_id_water_tank: String,
-    pub discovery_object_id_firmware_message: String,
     /// Uncalibrated: side occupied if **`max`** of three zones `>= threshold` (MQTT **Presence Cap Threshold** updates this at runtime).
     pub presence_cap_threshold: Arc<AtomicU16>,
     /// Calibrated: zone counts when raw `>` baseline + Δ (MQTT **Presence Baseline Delta**; opensleep default **50**).
@@ -121,10 +123,6 @@ pub struct BridgeConfig {
     pub sensor_tx: Option<mpsc::Sender<Vec<Vec<u8>>>>,
     /// Publish MQTT sensors for Frozen inbound temperatures (`0x41` / `0xC1`); set by [`crate::main`] with [`crate::frozen_link`].
     pub frozen_temperature_discovery: bool,
-    /// MQTT **Water Tank** binary sensor (`device_class` **plug**) from Frozen `0x07` messages ([`crate::frozen_rx`]).
-    pub frozen_water_tank_discovery: bool,
-    /// MQTT text **sensor** from Frozen `0x07` UTF‑8 message bodies (all lines, not only tank).
-    pub frozen_firmware_message_discovery: bool,
 }
 
 impl BridgeConfig {
@@ -137,67 +135,19 @@ impl BridgeConfig {
             mqtt_client_id: cli.mqtt_client_id.clone(),
             topic_prefix: cli.topic_prefix.clone(),
             discovery_prefix: cli.discovery_prefix.clone(),
-            discovery_object_id: cli.discovery_object_id.clone(),
-            discovery_object_id_request_temperatures: cli
-                .discovery_object_id_request_temperatures
-                .clone(),
-            discovery_object_id_led: cli.discovery_object_id_led.clone(),
-            discovery_object_id_startup_led: cli.discovery_object_id_startup_led.clone(),
-            discovery_object_id_climate_left: cli.discovery_object_id_climate_left.clone(),
-            discovery_object_id_climate_right: cli.discovery_object_id_climate_right.clone(),
             climate_min_temp: cli.climate_min_temp,
             climate_max_temp: cli.climate_max_temp,
             climate_temp_step: cli.climate_temp_step,
             device_name: cli.device_name.clone(),
             device_identifier: cli.device_identifier.clone(),
+            device_model: cli.pod.homeassistant_device_model().to_string(),
             sw_version: env!("CARGO_PKG_VERSION").to_string(),
             payload_press: cli.payload_press.clone(),
             serial_device: cli.serial_device.clone(),
-            serial_baud: cli.serial_baud,
+            serial_baud: cli.effective_serial_baud(),
             i2c_device: None,
             sensor_device: None,
-            sensor_baud: cli.sensor_baud,
-            discovery_object_id_vibrate_left: cli.discovery_object_id_vibrate_left.clone(),
-            discovery_object_id_vibrate_right: cli.discovery_object_id_vibrate_right.clone(),
-            discovery_object_id_temp_left: cli.discovery_object_id_temp_left.clone(),
-            discovery_object_id_temp_right: cli.discovery_object_id_temp_right.clone(),
-            discovery_object_id_heatsink_temp: cli.discovery_object_id_heatsink_temp.clone(),
-            discovery_object_id_vibration_intensity: cli
-                .discovery_object_id_vibration_intensity
-                .clone(),
-            discovery_object_id_vibration_duration: cli
-                .discovery_object_id_vibration_duration
-                .clone(),
-            discovery_object_id_vibration_pattern: cli
-                .discovery_object_id_vibration_pattern
-                .clone(),
-            discovery_object_id_vibration_cancel_preamble: cli
-                .discovery_object_id_vibration_cancel_preamble
-                .clone(),
-            discovery_object_id_target_temp_left: cli.discovery_object_id_target_temp_left.clone(),
-            discovery_object_id_target_temp_right: cli
-                .discovery_object_id_target_temp_right
-                .clone(),
-            discovery_object_id_presence_left: cli.discovery_object_id_presence_left.clone(),
-            discovery_object_id_presence_right: cli.discovery_object_id_presence_right.clone(),
-            discovery_object_id_presence_any: cli.discovery_object_id_presence_any.clone(),
-            discovery_object_id_calibrate_presence: cli
-                .discovery_object_id_calibrate_presence
-                .clone(),
-            discovery_object_id_presence_cap_threshold: cli
-                .discovery_object_id_presence_cap_threshold
-                .clone(),
-            discovery_object_id_presence_baseline_delta: cli
-                .discovery_object_id_presence_baseline_delta
-                .clone(),
-            discovery_object_id_presence_baseline_zones: cli
-                .discovery_object_id_presence_baseline_zones
-                .clone(),
-            discovery_object_id_presence_calibration: cli
-                .discovery_object_id_presence_calibration
-                .clone(),
-            discovery_object_id_water_tank: cli.discovery_object_id_water_tank.clone(),
-            discovery_object_id_firmware_message: cli.discovery_object_id_firmware_message.clone(),
+            sensor_baud: cli.effective_sensor_baud(),
             presence_cap_threshold: Arc::new(AtomicU16::new(
                 cli.presence_cap_threshold
                     .clamp(PRESENCE_CAP_THRESHOLD_MIN, PRESENCE_CAP_THRESHOLD_MAX),
@@ -217,13 +167,11 @@ impl BridgeConfig {
                     crate::cli::VibrationPatternArg::Single => AlarmPattern::Single,
                     crate::cli::VibrationPatternArg::Double => AlarmPattern::Double,
                 },
-                cancel_preamble: !cli.no_sensor_vibrate_cancel_preamble,
+                cancel_preamble: true,
             })),
             frozen_tx: None,
             sensor_tx: None,
             frozen_temperature_discovery: false,
-            frozen_water_tank_discovery: false,
-            frozen_firmware_message_discovery: false,
         }
     }
 
@@ -238,7 +186,7 @@ impl BridgeConfig {
     pub fn discovery_topic(&self) -> String {
         format!(
             "{}/button/{}/config",
-            self.discovery_prefix, self.discovery_object_id
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_PRIME
         )
     }
 
@@ -249,14 +197,14 @@ impl BridgeConfig {
     pub fn discovery_topic_request_get_temperatures(&self) -> String {
         format!(
             "{}/button/{}/config",
-            self.discovery_prefix, self.discovery_object_id_request_temperatures
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES
         )
     }
 
     pub fn discovery_topic_light(&self) -> String {
         format!(
             "{}/light/{}/config",
-            self.discovery_prefix, self.discovery_object_id_led
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_LED
         )
     }
 
@@ -271,7 +219,7 @@ impl BridgeConfig {
     pub fn discovery_topic_startup_led(&self) -> String {
         format!(
             "{}/switch/{}/config",
-            self.discovery_prefix, self.discovery_object_id_startup_led
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_STARTUP_LED
         )
     }
 
@@ -285,8 +233,8 @@ impl BridgeConfig {
 
     pub fn climate_discovery_topic(&self, side: BedSide) -> String {
         let id = match side {
-            BedSide::Left => &self.discovery_object_id_climate_left,
-            BedSide::Right => &self.discovery_object_id_climate_right,
+            BedSide::Left => DISCOVERY_OBJECT_ID_CLIMATE_LEFT,
+            BedSide::Right => DISCOVERY_OBJECT_ID_CLIMATE_RIGHT,
         };
         format!("{}/climate/{}/config", self.discovery_prefix, id)
     }
@@ -325,8 +273,8 @@ impl BridgeConfig {
 
     pub fn vibrate_discovery_topic(&self, side: BedSide) -> String {
         let id = match side {
-            BedSide::Left => &self.discovery_object_id_vibrate_left,
-            BedSide::Right => &self.discovery_object_id_vibrate_right,
+            BedSide::Left => DISCOVERY_OBJECT_ID_VIBRATE_LEFT,
+            BedSide::Right => DISCOVERY_OBJECT_ID_VIBRATE_RIGHT,
         };
         format!("{}/button/{}/config", self.discovery_prefix, id)
     }
@@ -350,7 +298,7 @@ impl BridgeConfig {
     pub fn discovery_topic_vibration_intensity(&self) -> String {
         format!(
             "{}/number/{}/config",
-            self.discovery_prefix, self.discovery_object_id_vibration_intensity
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_VIBRATION_INTENSITY
         )
     }
 
@@ -365,7 +313,7 @@ impl BridgeConfig {
     pub fn discovery_topic_vibration_duration(&self) -> String {
         format!(
             "{}/number/{}/config",
-            self.discovery_prefix, self.discovery_object_id_vibration_duration
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_VIBRATION_DURATION
         )
     }
 
@@ -380,7 +328,7 @@ impl BridgeConfig {
     pub fn discovery_topic_vibration_pattern(&self) -> String {
         format!(
             "{}/select/{}/config",
-            self.discovery_prefix, self.discovery_object_id_vibration_pattern
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_VIBRATION_PATTERN
         )
     }
 
@@ -398,7 +346,7 @@ impl BridgeConfig {
     pub fn discovery_topic_vibration_cancel_preamble(&self) -> String {
         format!(
             "{}/switch/{}/config",
-            self.discovery_prefix, self.discovery_object_id_vibration_cancel_preamble
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_VIBRATION_CANCEL_PREAMBLE
         )
     }
 
@@ -418,8 +366,8 @@ impl BridgeConfig {
 
     pub fn discovery_topic_frozen_current_temp(&self, side: BedSide) -> String {
         let id = match side {
-            BedSide::Left => &self.discovery_object_id_temp_left,
-            BedSide::Right => &self.discovery_object_id_temp_right,
+            BedSide::Left => DISCOVERY_OBJECT_ID_TEMP_LEFT,
+            BedSide::Right => DISCOVERY_OBJECT_ID_TEMP_RIGHT,
         };
         format!("{}/sensor/{}/config", self.discovery_prefix, id)
     }
@@ -427,7 +375,7 @@ impl BridgeConfig {
     pub fn discovery_topic_frozen_heatsink_temp(&self) -> String {
         format!(
             "{}/sensor/{}/config",
-            self.discovery_prefix, self.discovery_object_id_heatsink_temp
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_HEATSINK_TEMP
         )
     }
 
@@ -445,8 +393,8 @@ impl BridgeConfig {
 
     pub fn discovery_topic_target_temperature(&self, side: BedSide) -> String {
         let id = match side {
-            BedSide::Left => &self.discovery_object_id_target_temp_left,
-            BedSide::Right => &self.discovery_object_id_target_temp_right,
+            BedSide::Left => DISCOVERY_OBJECT_ID_TARGET_TEMP_LEFT,
+            BedSide::Right => DISCOVERY_OBJECT_ID_TARGET_TEMP_RIGHT,
         };
         format!("{}/sensor/{}/config", self.discovery_prefix, id)
     }
@@ -465,8 +413,8 @@ impl BridgeConfig {
 
     pub fn discovery_topic_presence(&self, side: BedSide) -> String {
         let id = match side {
-            BedSide::Left => &self.discovery_object_id_presence_left,
-            BedSide::Right => &self.discovery_object_id_presence_right,
+            BedSide::Left => DISCOVERY_OBJECT_ID_PRESENCE_LEFT,
+            BedSide::Right => DISCOVERY_OBJECT_ID_PRESENCE_RIGHT,
         };
         format!("{}/binary_sensor/{}/config", self.discovery_prefix, id)
     }
@@ -474,7 +422,7 @@ impl BridgeConfig {
     pub fn discovery_topic_presence_any(&self) -> String {
         format!(
             "{}/binary_sensor/{}/config",
-            self.discovery_prefix, self.discovery_object_id_presence_any
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_PRESENCE_ANY
         )
     }
 
@@ -485,7 +433,7 @@ impl BridgeConfig {
     pub fn discovery_topic_calibrate_presence(&self) -> String {
         format!(
             "{}/button/{}/config",
-            self.discovery_prefix, self.discovery_object_id_calibrate_presence
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_CALIBRATE_PRESENCE
         )
     }
 
@@ -500,7 +448,7 @@ impl BridgeConfig {
     pub fn discovery_topic_presence_cap_threshold(&self) -> String {
         format!(
             "{}/number/{}/config",
-            self.discovery_prefix, self.discovery_object_id_presence_cap_threshold
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_PRESENCE_CAP_THRESHOLD
         )
     }
 
@@ -515,7 +463,7 @@ impl BridgeConfig {
     pub fn discovery_topic_presence_baseline_delta(&self) -> String {
         format!(
             "{}/number/{}/config",
-            self.discovery_prefix, self.discovery_object_id_presence_baseline_delta
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_DELTA
         )
     }
 
@@ -526,7 +474,7 @@ impl BridgeConfig {
     pub fn discovery_topic_presence_baseline_zones(&self) -> String {
         format!(
             "{}/sensor/{}/config",
-            self.discovery_prefix, self.discovery_object_id_presence_baseline_zones
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_ZONES
         )
     }
 
@@ -540,7 +488,7 @@ impl BridgeConfig {
     pub fn discovery_topic_presence_calibration(&self) -> String {
         format!(
             "{}/binary_sensor/{}/config",
-            self.discovery_prefix, self.discovery_object_id_presence_calibration
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_PRESENCE_CALIBRATION
         )
     }
 
@@ -551,7 +499,7 @@ impl BridgeConfig {
     pub fn discovery_topic_water_tank(&self) -> String {
         format!(
             "{}/binary_sensor/{}/config",
-            self.discovery_prefix, self.discovery_object_id_water_tank
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_WATER_TANK
         )
     }
 
@@ -562,7 +510,7 @@ impl BridgeConfig {
     pub fn discovery_topic_firmware_message(&self) -> String {
         format!(
             "{}/sensor/{}/config",
-            self.discovery_prefix, self.discovery_object_id_firmware_message
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE
         )
     }
 
@@ -596,7 +544,7 @@ impl BridgeConfig {
         json!({
             "identifiers": [self.device_identifier.clone()],
             "name": self.device_name,
-            "model": "Eight Sleep Pod",
+            "model": self.device_model.clone(),
             "sw_version": self.sw_version,
         })
     }
@@ -2514,23 +2462,19 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             tracing::error!(?e, "publish Frozen heatsink temperature discovery");
         }
     }
-    if config.frozen_water_tank_discovery {
-        let disc = discovery_payload_water_tank(config);
-        if let Err(e) = client
-            .publish(config.discovery_topic_water_tank(), qos, true, disc)
-            .await
-        {
-            tracing::error!(?e, "publish Frozen water tank discovery");
-        }
+    let disc = discovery_payload_water_tank(config);
+    if let Err(e) = client
+        .publish(config.discovery_topic_water_tank(), qos, true, disc)
+        .await
+    {
+        tracing::error!(?e, "publish Frozen water tank discovery");
     }
-    if config.frozen_firmware_message_discovery {
-        let disc = discovery_payload_firmware_message(config);
-        if let Err(e) = client
-            .publish(config.discovery_topic_firmware_message(), qos, true, disc)
-            .await
-        {
-            tracing::error!(?e, "publish Frozen firmware message discovery");
-        }
+    let disc = discovery_payload_firmware_message(config);
+    if let Err(e) = client
+        .publish(config.discovery_topic_firmware_message(), qos, true, disc)
+        .await
+    {
+        tracing::error!(?e, "publish Frozen firmware message discovery");
     }
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
@@ -2986,8 +2930,8 @@ pub async fn run(
     config: BridgeConfig,
     prime_frame: Arc<[u8]>,
     frozen_temperature_rx: Option<mpsc::Receiver<FrozenTemperatureUpdate>>,
-    frozen_water_tank_rx: Option<mpsc::Receiver<bool>>,
-    frozen_firmware_message_rx: Option<mpsc::Receiver<String>>,
+    frozen_water_tank_rx: mpsc::Receiver<bool>,
+    frozen_firmware_message_rx: mpsc::Receiver<String>,
     capacitance_rx: Option<mpsc::Receiver<SensorCapacitanceZones>>,
 ) {
     let (presence_calibrate_tx, presence_calibrate_rx) =
@@ -3038,38 +2982,28 @@ pub async fn run(
         });
     }
 
-    if let Some(mut water_rx) = frozen_water_tank_rx {
-        let c = client.clone();
-        let cfg = config.clone();
-        let enabled = config.frozen_water_tank_discovery;
-        tokio::spawn(async move {
-            if !enabled {
-                return;
+    let mut water_rx = frozen_water_tank_rx;
+    let c = client.clone();
+    let cfg = config.clone();
+    tokio::spawn(async move {
+        let mut last: Option<bool> = None;
+        while let Some(present) = water_rx.recv().await {
+            if last == Some(present) {
+                continue;
             }
-            let mut last: Option<bool> = None;
-            while let Some(present) = water_rx.recv().await {
-                if last == Some(present) {
-                    continue;
-                }
-                last = Some(present);
-                publish_water_tank_state(&c, &cfg, present).await;
-            }
-        });
-    }
+            last = Some(present);
+            publish_water_tank_state(&c, &cfg, present).await;
+        }
+    });
 
-    if let Some(mut fw_rx) = frozen_firmware_message_rx {
-        let c = client.clone();
-        let cfg = config.clone();
-        let enabled = config.frozen_firmware_message_discovery;
-        tokio::spawn(async move {
-            if !enabled {
-                return;
-            }
-            while let Some(msg) = fw_rx.recv().await {
-                publish_firmware_message_state(&c, &cfg, &msg).await;
-            }
-        });
-    }
+    let mut fw_rx = frozen_firmware_message_rx;
+    let c = client.clone();
+    let cfg = config.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = fw_rx.recv().await {
+            publish_firmware_message_state(&c, &cfg, &msg).await;
+        }
+    });
 
     if let Some(mut cap_rx) = capacitance_rx {
         if let Some(mut cal_rx) = presence_calibrate_rx {
@@ -3274,6 +3208,15 @@ pub async fn run(
             Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
                 if ack.code == rumqttc::ConnectReturnCode::Success {
                     tracing::info!("MQTT connected");
+                    // Retained `…/state` replays can arrive on the next `poll()` before the spawned
+                    // session task runs — set bootstrap flags here so `handle_publish` ingests them
+                    // instead of dropping them at the `light/.../state` echo guard (`bootstrap == false`).
+                    handler_state
+                        .mqtt_ha_state_bootstrap
+                        .store(true, Ordering::SeqCst);
+                    handler_state
+                        .startup_led_broker_retain_seen
+                        .store(false, Ordering::SeqCst);
                     // rumqttc: `AsyncClient` requests are only processed while `eventloop.poll()` runs.
                     // Awaiting `publish`/`subscribe` on the same task that calls `poll()` deadlocks the
                     // event loop — spawn so the broker actually receives discovery and availability.
@@ -3282,9 +3225,6 @@ pub async fn run(
                     let hs = handler_state.clone();
                     let hw_once = startup_led_hw_once_per_process.clone();
                     tokio::spawn(async move {
-                        hs.mqtt_ha_state_bootstrap.store(true, Ordering::SeqCst);
-                        hs.startup_led_broker_retain_seen
-                            .store(false, Ordering::SeqCst);
                         setup_session(&c, &cfg).await;
 
                         // Broker retain replay (climate/light/vibration/presence **`state_topic`** + startup_led)
@@ -3454,7 +3394,7 @@ mod tests {
 
     #[test]
     fn climate_discovery_uses_current_temperature_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let left: serde_json::Value =
             serde_json::from_str(&discovery_payload_climate(&cfg, BedSide::Left)).unwrap();
@@ -3472,7 +3412,7 @@ mod tests {
 
     #[test]
     fn target_temperature_sensor_discovery_matches_state_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         for side in [BedSide::Left, BedSide::Right] {
             let (name, suffix) = match side {
@@ -3495,7 +3435,7 @@ mod tests {
 
     #[test]
     fn presence_discovery_is_occupancy() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let mut cfg = BridgeConfig::from_cli(&cli);
         cfg.presence_discovery = true;
         cfg.sensor_device = Some(std::path::PathBuf::from("/dev/null"));
@@ -3520,7 +3460,7 @@ mod tests {
 
     #[test]
     fn presence_calibration_running_discovery_matches_state_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let mut cfg = BridgeConfig::from_cli(&cli);
         cfg.presence_discovery = true;
         cfg.sensor_device = Some(std::path::PathBuf::from("/dev/null"));
@@ -3537,7 +3477,7 @@ mod tests {
 
     #[test]
     fn firmware_message_discovery_matches_state_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc = discovery_payload_firmware_message(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -3555,7 +3495,7 @@ mod tests {
 
     #[test]
     fn deviceinfo_discovery_matches_state_topics() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc_l = discovery_payload_deviceinfo_device_label(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc_l).unwrap();
@@ -3581,7 +3521,7 @@ mod tests {
 
     #[test]
     fn request_get_temperatures_button_discovery_matches_command_topic() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc = discovery_payload_request_get_temperatures_button(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -3594,7 +3534,7 @@ mod tests {
 
     #[test]
     fn calibrate_presence_discovery_has_entity_category_config() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let mut cfg = BridgeConfig::from_cli(&cli);
         cfg.presence_discovery = true;
         let disc = discovery_payload_calibrate_presence_button(&cfg);
@@ -3608,7 +3548,7 @@ mod tests {
 
     #[test]
     fn presence_sensitivity_number_discovery_topics() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         for (disc, name) in [
             (
@@ -3637,7 +3577,7 @@ mod tests {
 
     #[test]
     fn startup_led_discovery_is_configuration_entity() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc = discovery_payload_startup_led_switch(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -3646,7 +3586,7 @@ mod tests {
 
     #[test]
     fn water_tank_discovery_is_mqtt_binary_sensor_with_plug_device_class() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         assert!(cfg
             .water_tank_state_topic()
@@ -3665,7 +3605,7 @@ mod tests {
 
     #[test]
     fn vibration_settings_discovery_payloads_use_config_entity_category() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         for (disc, exp_state, exp_name) in [
             (
@@ -3758,7 +3698,7 @@ mod tests {
 
     #[test]
     fn climate_state_topic_payload_ingest() {
-        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cli = crate::cli::Cli::parse_from(["narcolepsy", "--pod", "4"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let mut st = ClimateSideState::default();
         assert!(ingest_climate_mode_from_state_payload(

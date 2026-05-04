@@ -14,6 +14,42 @@ pub enum VibrationPatternArg {
     Double,
 }
 
+/// Pod generation for default USART speeds ([`Cli::effective_serial_baud`] / [`Cli::effective_sensor_baud`]) when baud flags are omitted.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum PodModel {
+    /// Opensleep-style defaults: Frozen **38400**, Sensor firmware **115200** after bootloader jump.
+    #[value(name = "3")]
+    Three,
+    /// Community Pod **4**: Frozen **38400**, Sensor **921600** (stock / Frankenfirmware firmware speed after bootloader jump). Use **`--sensor-baud`** to override (e.g. **38400** when testing).
+    #[value(name = "4")]
+    Four,
+    /// Pod **5**: same default USART speeds as Pod **4** (**38400** / **921600**).
+    #[value(name = "5")]
+    Five,
+}
+
+impl PodModel {
+    fn default_frozen_baud(self) -> u32 {
+        38400
+    }
+
+    fn default_sensor_baud(self) -> u32 {
+        match self {
+            PodModel::Three => 115200,
+            PodModel::Four | PodModel::Five => 921600,
+        }
+    }
+
+    /// MQTT discovery `device.model` (matches [`--pod`](Cli::pod)).
+    pub fn homeassistant_device_model(self) -> &'static str {
+        match self {
+            PodModel::Three => "Eight Sleep Pod 3",
+            PodModel::Four => "Eight Sleep Pod 4",
+            PodModel::Five => "Eight Sleep Pod 5",
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "narcolepsy")]
 #[command(
@@ -44,14 +80,6 @@ pub struct Cli {
     #[arg(long, default_value = "homeassistant")]
     pub discovery_prefix: String,
 
-    /// `<object_id>` in `homeassistant/button/<object_id>/config`.
-    #[arg(long, default_value = "narcolepsy_prime")]
-    pub discovery_object_id: String,
-
-    /// `<object_id>` for `homeassistant/button/.../config` (Frozen **GetTemperatures** `0x41` request).
-    #[arg(long, default_value = "narcolepsy_request_temperatures")]
-    pub discovery_object_id_request_temperatures: String,
-
     #[arg(long, default_value = "Eight Sleep")]
     pub device_name: String,
 
@@ -64,15 +92,20 @@ pub struct Cli {
     /// Default **`/dev/ttyS1`** is overridden by **`frozenPort`** in **`/opt/eight/config/machine.json`**
     /// when present and **`--serial-device`** is **not** on the command line.
     ///
-    /// Pod **4** (community): often **`ttyS1`/`ttyS2`** ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11));
+    /// Pod **4** / **5** (community): often **`ttyS1`/`ttyS2`** ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11));
     /// Pod **3** / opensleep paths often **`/dev/ttymxc2`** for Frozen.
     ///
     /// Must be openable at startup; otherwise the process exits before MQTT connects.
     #[arg(long, default_value = "/dev/ttyS1")]
     pub serial_device: PathBuf,
 
-    #[arg(long, default_value_t = 38400)]
-    pub serial_baud: u32,
+    /// Pod generation (**required**): sets default **`--serial-baud`** / **`--sensor-baud`** when those flags are omitted (**4** / **5** = **38400** / **921600**; **3** = **38400** / **115200** opensleep). Explicit **`--serial-baud`** or **`--sensor-baud`** always override.
+    #[arg(long, value_name = "MODEL")]
+    pub pod: PodModel,
+
+    /// Serial line speed for Frozen (bits/s). Omit to use **`--pod`** default (**38400** for Pod **3**, **4**, and **5**).
+    #[arg(long)]
+    pub serial_baud: Option<u32>,
 
     /// Payload Home Assistant sends when the button is pressed (see discovery `payload_press`).
     #[arg(long, default_value = "PRESS")]
@@ -81,26 +114,6 @@ pub struct Cli {
     /// Linux I²C bus device for the IS31FL3194 LED controller (address `0x53`).
     #[arg(long, default_value = "/dev/i2c-1")]
     pub i2c_device: PathBuf,
-
-    /// Skip LED support: no I²C open at startup, no MQTT light discovery.
-    #[arg(long, default_value_t = false)]
-    pub no_led: bool,
-
-    /// `<object_id>` for `homeassistant/light/<object_id>/config`.
-    #[arg(long, default_value = "narcolepsy_led")]
-    pub discovery_object_id_led: String,
-
-    /// `<object_id>` for `homeassistant/switch/<object_id>/config` (startup LED on/off preference).
-    #[arg(long, default_value = "narcolepsy_startup_led")]
-    pub discovery_object_id_startup_led: String,
-
-    /// `<object_id>` for `homeassistant/climate/<object_id>/config` (left mattress side).
-    #[arg(long, default_value = "narcolepsy_climate_left")]
-    pub discovery_object_id_climate_left: String,
-
-    /// `<object_id>` for `homeassistant/climate/<object_id>/config` (right mattress side).
-    #[arg(long, default_value = "narcolepsy_climate_right")]
-    pub discovery_object_id_climate_right: String,
 
     /// Minimum target temperature (°C) published in MQTT climate discovery.
     #[arg(long, default_value_t = 13.0)]
@@ -121,25 +134,9 @@ pub struct Cli {
     #[arg(long, default_value = "/dev/ttyS2")]
     pub sensor_device: PathBuf,
 
-    /// Sensor line speed. Opensleep Pod **3**: **115200**. Pod **4** default **38400**; **Frankenfirmware** (and matching strace on `ttyS2`) uses **921600** after the bootloader jump — use **`--sensor-baud 921600`** if framed `0x7E` RX or vibration fails at 38400.
-    #[arg(long, default_value_t = 38400)]
-    pub sensor_baud: u32,
-
-    /// Do not open the Sensor UART — no vibration MQTT buttons, no capacitance presence.
-    #[arg(long, default_value_t = false)]
-    pub no_vibration: bool,
-
-    /// Do not publish MQTT **occupancy** from Sensor capacitance (`0x33`). Vibration is unchanged.
-    #[arg(long, default_value_t = false)]
-    pub no_presence_detection: bool,
-
-    /// Do not publish MQTT **Water Tank** from Frozen `0x07` messages (`FW: water …`, opensleep parity).
-    #[arg(long, default_value_t = false)]
-    pub no_water_tank_sensor: bool,
-
-    /// Do not publish MQTT **Firmware message** text sensor (Frozen `0x07` UTF‑8 lines — can be noisy).
-    #[arg(long, default_value_t = false)]
-    pub no_firmware_message_sensor: bool,
+    /// Sensor line speed (bits/s). Omit to use **`--pod`** defaults. Pod **3**: **115200**; Pod **4** / **5**: **921600**; pass **`--sensor-baud`** (e.g. **38400**) to override.
+    #[arg(long)]
+    pub sensor_baud: Option<u32>,
 
     /// Minimum **maximum** raw capacitance among the three Sensor zones on one mattress side to report that side as **occupied**. Lower if presence never triggers; raise if it sticks ON when empty (`RUST_LOG` `trace` shows zone values). Unused after successful **MQTT calibrate presence** (opensleep baseline + Δ + debounce applies). **Runtime:** Home Assistant MQTT **Presence Cap Threshold** number (same bounds as opensleep tuning).
     #[arg(long, default_value_t = 800)]
@@ -157,101 +154,9 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub presence_debug: bool,
 
-    /// `<object_id>` for `homeassistant/button/...` (presence baseline calibration — empty bed during the calibration window).
-    #[arg(long, default_value = "narcolepsy_calibrate_presence")]
-    pub discovery_object_id_calibrate_presence: String,
-
-    /// `<object_id>` for `homeassistant/number/.../config` (uncalibrated presence: max zone vs this raw threshold).
-    #[arg(long, default_value = "narcolepsy_presence_cap_threshold")]
-    pub discovery_object_id_presence_cap_threshold: String,
-
-    /// `<object_id>` for `homeassistant/number/.../config` (calibrated presence: Δ above baseline per zone, opensleep default 50).
-    #[arg(long, default_value = "narcolepsy_presence_baseline_delta")]
-    pub discovery_object_id_presence_baseline_delta: String,
-
-    /// `<object_id>` for `homeassistant/sensor/.../config` (persisted calibrated zone baselines `[z0…z5]` JSON; MQTT retained across restarts).
-    #[arg(long, default_value = "narcolepsy_presence_baseline_zones")]
-    pub discovery_object_id_presence_baseline_zones: String,
-
-    /// `<object_id>` for `homeassistant/binary_sensor/.../config` (presence baseline calibration window in progress).
-    #[arg(long, default_value = "narcolepsy_presence_calibration")]
-    pub discovery_object_id_presence_calibration: String,
-
-    /// Skip Sensor **bootloader handshake** (38400: Ping + JumpToFirmware, then `--sensor-baud`). Opensleep does this before firmware traffic; disable only if your MCU is already in firmware-only mode and the handshake causes trouble.
-    #[arg(long, default_value_t = false)]
-    pub no_sensor_bootloader_handshake: bool,
-
     /// Do **not** wait for `0xAE` VibrationEnabled between piezo priming and SetAlarm — send all five frames back-to-back. Use when Sensor RX never shows opensleep `0x7E` framing (wrong baud / Pod 4 differences) but TX might still drive the piezo.
     #[arg(long, default_value_t = false)]
     pub sensor_vibrate_no_ack_wait: bool,
-
-    /// Disable opensleep-style **alarm cancel** (`SetAlarm` intensity/duration 0) before piezo priming. Omit this flag to keep cancel preamble **on** (default). When debugging **`AlarmSet` status 2**, try **`--no-sensor-vibrate-cancel-preamble`** — the first `0xAC` line in logs may be the cancel frame’s ack, not the real alarm.
-    #[arg(long, default_value_t = false)]
-    pub no_sensor_vibrate_cancel_preamble: bool,
-
-    /// `<object_id>` for `homeassistant/button/<object_id>/config` (vibrate left).
-    #[arg(long, default_value = "narcolepsy_vibrate_left")]
-    pub discovery_object_id_vibrate_left: String,
-
-    /// `<object_id>` for `homeassistant/button/<object_id>/config` (vibrate right).
-    #[arg(long, default_value = "narcolepsy_vibrate_right")]
-    pub discovery_object_id_vibrate_right: String,
-
-    /// `<object_id>` for `homeassistant/number/<object_id>/config` (vibration intensity).
-    #[arg(long, default_value = "narcolepsy_vibration_intensity")]
-    pub discovery_object_id_vibration_intensity: String,
-
-    /// `<object_id>` for `homeassistant/number/<object_id>/config` (vibration duration).
-    #[arg(long, default_value = "narcolepsy_vibration_duration")]
-    pub discovery_object_id_vibration_duration: String,
-
-    /// `<object_id>` for `homeassistant/select/<object_id>/config` (vibration pattern).
-    #[arg(long, default_value = "narcolepsy_vibration_pattern")]
-    pub discovery_object_id_vibration_pattern: String,
-
-    /// `<object_id>` for `homeassistant/switch/<object_id>/config` (Vibration Cancel Preamble).
-    #[arg(long, default_value = "narcolepsy_vibration_cancel_preamble")]
-    pub discovery_object_id_vibration_cancel_preamble: String,
-
-    /// `<object_id>` for occupancy (left side), from Sensor capacitance zones 0–2.
-    #[arg(long, default_value = "narcolepsy_presence_left")]
-    pub discovery_object_id_presence_left: String,
-
-    /// `<object_id>` for occupancy (right side), from Sensor capacitance zones 3–5.
-    #[arg(long, default_value = "narcolepsy_presence_right")]
-    pub discovery_object_id_presence_right: String,
-
-    /// `<object_id>` for occupancy (either side ON → ON).
-    #[arg(long, default_value = "narcolepsy_presence_any")]
-    pub discovery_object_id_presence_any: String,
-
-    /// `<object_id>` for `homeassistant/sensor/.../config` (Frozen reservoir present).
-    #[arg(long, default_value = "narcolepsy_water_tank")]
-    pub discovery_object_id_water_tank: String,
-
-    /// `<object_id>` for `homeassistant/sensor/.../config` (Frozen `0x07` firmware UTF‑8 messages).
-    #[arg(long, default_value = "narcolepsy_firmware_message")]
-    pub discovery_object_id_firmware_message: String,
-
-    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (Frozen current temperature, left).
-    #[arg(long, default_value = "narcolepsy_temp_left")]
-    pub discovery_object_id_temp_left: String,
-
-    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (Frozen current temperature, right).
-    #[arg(long, default_value = "narcolepsy_temp_right")]
-    pub discovery_object_id_temp_right: String,
-
-    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (Frozen heatsink temperature).
-    #[arg(long, default_value = "narcolepsy_heatsink_temp")]
-    pub discovery_object_id_heatsink_temp: String,
-
-    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (climate target temperature, left).
-    #[arg(long, default_value = "narcolepsy_target_temp_left")]
-    pub discovery_object_id_target_temp_left: String,
-
-    /// `<object_id>` for `homeassistant/sensor/<object_id>/config` (climate target temperature, right).
-    #[arg(long, default_value = "narcolepsy_target_temp_right")]
-    pub discovery_object_id_target_temp_right: String,
 
     /// Default vibration intensity (1–100) for MQTT vibrate buttons.
     #[arg(long, default_value_t = 64)]
@@ -268,4 +173,70 @@ pub struct Cli {
     /// `tracing` filter (e.g. `debug`, `info,narcolepsy=debug`).
     #[arg(long, default_value = "info")]
     pub log_level: String,
+}
+
+impl Cli {
+    /// Effective Frozen USART baud: **`--serial-baud`** if set, else **`--pod`** default (**38400** for all pod models).
+    pub fn effective_serial_baud(&self) -> u32 {
+        self.serial_baud
+            .unwrap_or_else(|| self.pod.default_frozen_baud())
+    }
+
+    /// Effective Sensor USART baud: **`--sensor-baud`** if set, else **`--pod`** default (**3** → **115200**, **4** / **5** → **921600**).
+    pub fn effective_sensor_baud(&self) -> u32 {
+        self.sensor_baud
+            .unwrap_or_else(|| self.pod.default_sensor_baud())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_bauds_default_match_pod4() {
+        let cli = Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        assert_eq!(cli.effective_serial_baud(), 38400);
+        assert_eq!(cli.effective_sensor_baud(), 921600);
+    }
+
+    #[test]
+    fn pod3_sets_sensor_115200() {
+        let cli = Cli::parse_from(["narcolepsy", "--pod", "3"]);
+        assert_eq!(cli.effective_serial_baud(), 38400);
+        assert_eq!(cli.effective_sensor_baud(), 115200);
+    }
+
+    #[test]
+    fn explicit_baud_overrides_pod3() {
+        let cli = Cli::parse_from(["narcolepsy", "--pod", "3", "--sensor-baud", "38400"]);
+        assert_eq!(cli.effective_sensor_baud(), 38400);
+    }
+
+    #[test]
+    fn pod4_explicit_same_as_default() {
+        let cli = Cli::parse_from(["narcolepsy", "--pod", "4"]);
+        assert_eq!(cli.effective_serial_baud(), 38400);
+        assert_eq!(cli.effective_sensor_baud(), 921600);
+    }
+
+    #[test]
+    fn pod4_sensor_baud_can_be_overridden_to_38400() {
+        let cli = Cli::parse_from(["narcolepsy", "--pod", "4", "--sensor-baud", "38400"]);
+        assert_eq!(cli.effective_sensor_baud(), 38400);
+    }
+
+    #[test]
+    fn pod5_matches_pod4_bauds() {
+        let cli = Cli::parse_from(["narcolepsy", "--pod", "5"]);
+        assert_eq!(cli.effective_serial_baud(), 38400);
+        assert_eq!(cli.effective_sensor_baud(), 921600);
+    }
+
+    #[test]
+    fn pod_model_homeassistant_device_model() {
+        assert_eq!(PodModel::Three.homeassistant_device_model(), "Eight Sleep Pod 3");
+        assert_eq!(PodModel::Four.homeassistant_device_model(), "Eight Sleep Pod 4");
+        assert_eq!(PodModel::Five.homeassistant_device_model(), "Eight Sleep Pod 5");
+    }
 }

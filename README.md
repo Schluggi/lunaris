@@ -44,7 +44,7 @@ Deploy:
 scp target/aarch64-unknown-linux-gnu/release/narcolepsy eight-pod:/tmp/
 ```
 
-Then on the Pod (Pod **4** example — see [Examples: Pod 4 vs Pod 3](#examples-pod-4-vs-pod-3) for Pod **3**):
+Then on the Pod (Pod **4** example — see [Examples](#examples-pod-3-pod-4-and-pod-5) for **`--pod`** and Pod **3**):
 
 ```bash
 chmod +x /tmp/narcolepsy
@@ -53,6 +53,7 @@ chmod +x /tmp/narcolepsy
   --mqtt-port 1883 \
   --mqtt-username ha \
   --mqtt-password secret \
+  --pod 4 \
   --serial-device /dev/ttyS1 \
   --sensor-device /dev/ttyS2
 ```
@@ -68,21 +69,24 @@ cargo build --release
   --mqtt-port 1883 \
   --mqtt-username ha \
   --mqtt-password secret \
+  --pod 4 \
   --serial-device /dev/ttyS1 \
   --sensor-device /dev/ttyS2
 ```
 
-CLI defaults target **Pod 4** (`ttyS1` / `ttyS2`). For **Pod 3** paths and Sensor baud, use the templates below.
+**`--pod`** (**3**, **4**, or **5**) is **required** — it selects default USART speeds (**5** matches **4**); see [Examples](#examples-pod-3-pod-4-and-pod-5). Paths default to Pod **4**/ **5** style (`ttyS1` / `ttyS2`).
 
-## Examples: Pod 4 vs Pod 3
+## Examples: Pod 3, Pod 4, and Pod 5
 
 These examples assume `narcolepsy` runs **on the bed’s Linux SoM** (same machine that owns `/dev/tty…`). Adjust **`--mqtt-host`**, port, and credentials for your broker.
 
-### Pod 4 (Eight Sleep Pod 4)
+### Pod 4 and Pod 5 (Eight Sleep Pod 4 / 5)
+
+**Pod 5** uses the **same** CLI USART defaults as Pod **4** — pass **`--pod 5`** instead of **`--pod 4`** when that matches your hardware.
 
 Community mapping ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)): **Frozen** → **`/dev/ttyS1`**, **Sensor** (vibration / capacitance) → **`/dev/ttyS2`**. Frozen uses **38400** (default **`--serial-baud`**).
 
-**Typical start (Sensor @ default 38400):**
+**Typical start** (defaults: Frozen **38400**, Sensor **921600** — matches stock / Frankenfirmware after the bootloader jump).
 
 ```bash
 ./narcolepsy \
@@ -90,24 +94,13 @@ Community mapping ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/1
   --mqtt-port 1883 \
   --mqtt-username ha \
   --mqtt-password secret \
+  --pod 4 \
   --serial-device /dev/ttyS1 \
   --sensor-device /dev/ttyS2 \
   --topic-prefix narcolepsy/pod4
 ```
 
-**Sensor line @ 921600** (matches **Frankenfirmware** / traces that raise `ttyS2` to **921600** after the bootloader jump). Use this if framed traffic or vibration does not work at **38400**:
-
-```bash
-./narcolepsy \
-  --mqtt-host 192.168.1.10 \
-  --mqtt-port 1883 \
-  --mqtt-username ha \
-  --mqtt-password secret \
-  --serial-device /dev/ttyS1 \
-  --sensor-device /dev/ttyS2 \
-  --sensor-baud 921600 \
-  --topic-prefix narcolepsy/pod4
-```
+Use **`--sensor-baud 38400`** only if your Sensor link still runs at **38400** and the default **921600** fails.
 
 If **`/opt/eight/config/machine.json`** defines **`frozenPort`** / **`sensorPort`**, you can omit **`--serial-device`** / **`--sensor-device`** unless you want to override the file.
 
@@ -121,9 +114,9 @@ Opensleep upstream uses **Frozen** on **`/dev/ttymxc2`** @ **38400** and **Senso
   --mqtt-port 1883 \
   --mqtt-username ha \
   --mqtt-password secret \
+  --pod 3 \
   --serial-device /dev/ttymxc2 \
   --sensor-device /dev/ttymxc0 \
-  --sensor-baud 115200 \
   --topic-prefix narcolepsy/pod3
 ```
 
@@ -142,27 +135,19 @@ All settings are **CLI-only** (no config file in v1). `narcolepsy --help` lists 
 | `--mqtt-client-id` | `narcolepsy` | — | MQTT client id. |
 | `--topic-prefix` | `narcolepsy/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/button/vibrate_left|vibrate_right/set`, `{prefix}/climate/...`, `{prefix}/light/...`, `{prefix}/result`, etc. |
 | `--discovery-prefix` | `homeassistant` | — | Home Assistant [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) prefix. |
-| `--discovery-object-id` | `narcolepsy_prime` | — | `<object_id>` in `homeassistant/button/<object_id>/config`. |
 | `--device-name` | `Eight Sleep` | — | Friendly device name in discovery (`device.name`). |
 | `--device-identifier` | `narcolepsy_pod` | — | Stable id for the HA device registry (`device.identifiers`). |
-| `--serial-device` | `/dev/ttyS1` | — | Frozen subsystem UART. Pod 4: often `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)); Pod 3: often `ttymxc2`. Must open at startup or the process exits. |
-| `--serial-baud` | `38400` | — | Serial line speed (bits/s). |
+| `--serial-device` | `/dev/ttyS1` | — | Frozen subsystem UART. Pod 4 / 5: often `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)); Pod 3: often `ttymxc2`. Must open at startup or the process exits. |
+| `--pod` | — | — | **Required.** `3`, `4`, or `5` (**5** = same baud defaults as **4**): default **`--serial-baud`** / **`--sensor-baud`** when those flags are omitted (**3** → 38400 / 115200; **4** / **5** → 38400 / 921600). Explicit baud flags override per line. |
+| `--serial-baud` | *(from `--pod`; Pod 4 / 5 → `38400`)* | — | Frozen line speed (bits/s). |
 | `--payload-press` | `PRESS` | — | Payload Home Assistant publishes when the button is pressed (must match discovery `payload_press`). |
 | `--i2c-device` | `/dev/i2c-1` | — | Linux I²C bus where the IS31FL3194 LED driver sits (address **0x53**). Probed at startup; if it cannot be opened, MQTT **Prime** still runs but no **Light** entity is advertised. |
-| `--no-led` | *(off)* | — | Disables LED/I²C entirely (no probe, no `homeassistant/light/...` discovery). |
-| `--discovery-object-id-led` | `narcolepsy_led` | — | `<object_id>` for `homeassistant/light/<object_id>/config`. |
-| `--discovery-object-id-climate-left` | `narcolepsy_climate_left` | — | `<object_id>` for `homeassistant/climate/<object_id>/config` (left mattress side). |
-| `--discovery-object-id-climate-right` | `narcolepsy_climate_right` | — | Same for the right side. |
 | `--climate-min-temp` | `13` | — | Minimum target temperature (°C) in climate discovery. |
 | `--climate-max-temp` | `47` | — | Maximum target temperature (°C) in climate discovery. |
 | `--climate-temp-step` | `0.5` | — | Slider step (°C) in Home Assistant. |
-| `--sensor-device` | `/dev/ttyS2` | — | **Sensor** subsystem UART (vibration / `SetAlarm`). Pod 4: often `ttyS2` while Frozen is `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)). Probed at startup; if it cannot be opened, the bridge continues **without** vibrate buttons. |
-| `--sensor-baud` | `38400` | — | Sensor serial speed (bits/s). Pod **4**: default **38400**; use **921600** when the Sensor firmware expects that (e.g. Frankenfirmware after jump). Pod **3** (opensleep): typically **`115200`**. See [Examples: Pod 4 vs Pod 3](#examples-pod-4-vs-pod-3). |
-| `--no-vibration` | *(off)* | — | Skip Sensor UART: no vibrate button discovery. |
-| `--no-sensor-bootloader-handshake` | *(off)* | — | Skip Sensor boot sequence at **38400** (Ping + JumpToFirmware) before opening **`--sensor-baud`**. Default follows opensleep; try this only if the handshake breaks an already‑running firmware link. |
+| `--sensor-device` | `/dev/ttyS2` | — | **Sensor** subsystem UART (vibration / `SetAlarm`). Pod 4 / 5: often `ttyS2` while Frozen is `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)). Probed at startup; if it cannot be opened, the bridge continues **without** vibrate buttons. |
+| `--sensor-baud` | *(from `--pod`; Pod 4 / 5 → `921600`)* | — | Sensor serial speed (bits/s). Override when your hardware differs. See [Examples](#examples-pod-3-pod-4-and-pod-5). |
 | `--sensor-vibrate-no-ack-wait` | *(off)* | — | Send vibration frames **without** waiting for `0xAE` between priming and SetAlarm. For Pods where Sensor RX is not opensleep-shaped at your baud but TX may still work. |
-| `--discovery-object-id-vibrate-left` | `narcolepsy_vibrate_left` | — | `<object_id>` for left vibrate `homeassistant/button/.../config`. |
-| `--discovery-object-id-vibrate-right` | `narcolepsy_vibrate_right` | — | Same for the right side. |
 | `--vibration-intensity` | `64` | — | Default intensity 1–100 for vibrate buttons (Sensor `SetAlarm`). |
 | `--vibration-duration-sec` | `15` | — | Default duration in seconds (clamped 1…600). |
 | `--vibration-pattern` | `single` | — | `single` or `double` (opensleep `AlarmPattern`). |
@@ -180,7 +165,7 @@ Two MQTT **[climate](https://www.home-assistant.io/integrations/climate.mqtt/)**
 
 ## Vibration (per side, Sensor UART)
 
-Vibration uses the **Sensor** MCU’s USART (not Frozen). Each button press sends the same **primed sequence** as opensleep’s sensor scheduler — **`EnableVibration`**, **`SetPiezoGain`**, **`SetPiezoFreq`**, **`EnablePiezo`**, then **`SetAlarm`** (`0x2C` + side + intensity + pattern + duration) — so the piezo path is enabled before the alarm. MQTT exposes two **[buttons](https://www.home-assistant.io/integrations/button.mqtt/)** (**Vibrate mattress (left)** / **Vibrate mattress (right)**); parameters come from **`--vibration-intensity`**, **`--vibration-duration-sec`**, and **`--vibration-pattern`**. Device paths and **`--sensor-baud`** per hardware: [Examples: Pod 4 vs Pod 3](#examples-pod-4-vs-pod-3).
+Vibration uses the **Sensor** MCU’s USART (not Frozen). Each button press sends the same **primed sequence** as opensleep’s sensor scheduler — **`EnableVibration`**, **`SetPiezoGain`**, **`SetPiezoFreq`**, **`EnablePiezo`**, then **`SetAlarm`** (`0x2C` + side + intensity + pattern + duration) — so the piezo path is enabled before the alarm. MQTT exposes two **[buttons](https://www.home-assistant.io/integrations/button.mqtt/)** (**Vibrate mattress (left)** / **Vibrate mattress (right)**); parameters come from **`--vibration-intensity`**, **`--vibration-duration-sec`**, and **`--vibration-pattern`**. Device paths and **`--sensor-baud`** per hardware: [Examples](#examples-pod-3-pod-4-and-pod-5).
 
 ## LED (Home Assistant light)
 

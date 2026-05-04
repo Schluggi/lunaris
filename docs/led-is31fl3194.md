@@ -10,7 +10,6 @@ The cover status LEDs are driven by an **IS31FL3194** 3-channel LED driver on IÂ
 ## Behaviour in `narcolepsy`
 
 - At startup the bus is **opened** once (with slave `0x53`). Failure logs a **warning** and the bridge continues **without** the MQTT **Light** entity (Frozen **Prime** still works).
-- Use **`--no-led`** to skip IÂ²C entirely (no probe, no light discovery).
 - Home Assistant sees an MQTT **Light** with **JSON schema**, **RGB**, and **brightness** (`schema` / `supported_color_modes` / `brightness` in discovery).
 
 ## Protocol note

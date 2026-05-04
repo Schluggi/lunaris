@@ -29,32 +29,17 @@ pub struct FrozenLinkHandle {
     pub tx: mpsc::Sender<Vec<u8>>,
     /// Current water-side and heatsink temperatures from inbound Frozen frames (`0x41` / `0xC1`).
     pub temperature_rx: mpsc::Receiver<FrozenTemperatureUpdate>,
-    /// `Some` when [`crate::cli::Cli::no_water_tank_sensor`] is false — Frozen `0x07` water messages.
-    pub water_tank_rx: Option<mpsc::Receiver<bool>>,
-    /// `Some` when [`crate::cli::Cli::no_firmware_message_sensor`] is false — UTF‑8 bodies of Frozen `0x07` Messages.
-    pub firmware_message_rx: Option<mpsc::Receiver<String>>,
+    /// Frozen `0x07` water tank present / removed (for MQTT **Water Tank**).
+    pub water_tank_rx: mpsc::Receiver<bool>,
+    /// UTF‑8 bodies of Frozen `0x07` messages (MQTT **Firmware message** text sensor).
+    pub firmware_message_rx: mpsc::Receiver<String>,
 }
 
-pub fn spawn(
-    device: PathBuf,
-    baud: u32,
-    forward_water_tank: bool,
-    forward_firmware_messages: bool,
-) -> FrozenLinkHandle {
+pub fn spawn(device: PathBuf, baud: u32) -> FrozenLinkHandle {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
     let (temp_tx, temp_rx) = mpsc::channel::<FrozenTemperatureUpdate>(64);
-    let (water_tx, water_rx) = if forward_water_tank {
-        let (wtx, wrx) = mpsc::channel::<bool>(16);
-        (Some(wtx), Some(wrx))
-    } else {
-        (None, None)
-    };
-    let (fw_tx, fw_rx) = if forward_firmware_messages {
-        let (tx, rx) = mpsc::channel::<String>(128);
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
+    let (water_tx, water_rx) = mpsc::channel::<bool>(16);
+    let (fw_tx, fw_rx) = mpsc::channel::<String>(128);
     let awake = Arc::new(AtomicBool::new(false));
     let awake_clone = awake.clone();
     tokio::spawn(async move {
@@ -76,8 +61,8 @@ async fn run(
     mut cmd_rx: mpsc::Receiver<Vec<u8>>,
     awake: Arc<AtomicBool>,
     temp_tx: mpsc::Sender<FrozenTemperatureUpdate>,
-    water_tank_tx: Option<mpsc::Sender<bool>>,
-    firmware_message_tx: Option<mpsc::Sender<String>>,
+    water_tank_tx: mpsc::Sender<bool>,
+    firmware_message_tx: mpsc::Sender<String>,
 ) -> Result<(), FrozenLinkError> {
     let path = device.to_string_lossy().to_string();
     let port = tokio_serial::new(path, baud).open_native_async()?;
@@ -101,8 +86,8 @@ async fn run(
                         &mut buf,
                         &awake_reader,
                         Some(&temp_tx),
-                        water_tank_for_reader.as_ref(),
-                        fw_for_reader.as_ref(),
+                        Some(&water_tank_for_reader),
+                        Some(&fw_for_reader),
                     );
                 }
                 Err(e) => {
