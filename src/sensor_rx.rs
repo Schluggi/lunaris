@@ -114,12 +114,7 @@ pub fn drain_inbound(
             buffer.remove(0);
             continue;
         }
-        handle_payload(
-            payload,
-            vibration_enabled,
-            capacitance_tx,
-            capacitance_diag,
-        );
+        handle_payload(payload, vibration_enabled, capacitance_tx, capacitance_diag);
         buffer.drain(..frame_len);
     }
 }
