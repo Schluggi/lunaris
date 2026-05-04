@@ -615,6 +615,7 @@ fn discovery_payload_request_get_temperatures_button(config: &BridgeConfig) -> S
 fn discovery_payload_startup_led_switch(config: &BridgeConfig) -> String {
     json!({
         "name": "Startup LED",
+        "icon": "mdi:lightbulb",
         "command_topic": config.startup_led_command_topic(),
         "state_topic": config.startup_led_state_topic(),
         "payload_on": "ON",
@@ -1583,7 +1584,7 @@ fn compute_light_state(cmd: &HaLightCommand, prev: &LightStateSnapshot) -> Light
     if cmd.state.as_deref() == Some("OFF") {
         let mut s = prev.clone();
         s.on = false;
-        s.brightness = 0;
+        // Keep brightness so a later ON without brightness restores the previous level (HA toggle).
         return s;
     }
 
@@ -1602,7 +1603,11 @@ fn compute_light_state(cmd: &HaLightCommand, prev: &LightStateSnapshot) -> Light
     if cmd.state.as_deref() == Some("ON") {
         next.on = true;
         if cmd.color.is_none() && cmd.brightness.is_none() {
-            // Explicit ON without payload: keep previous color/brightness
+            // ON with no brightness/color: keep previous levels; if brightness is still 0 (e.g. broker
+            // retain or dim-to-zero), use full scale so ON is not immediately cleared below.
+            if next.brightness == 0 {
+                next.brightness = 255;
+            }
         }
     }
 
@@ -3377,6 +3382,50 @@ mod tests {
     }
 
     #[test]
+    fn compute_on_after_off_preserves_brightness() {
+        let was_on = LightStateSnapshot {
+            on: true,
+            brightness: 128,
+            base_r: 255,
+            base_g: 255,
+            base_b: 255,
+        };
+        let off_cmd = HaLightCommand {
+            state: Some("OFF".into()),
+            ..Default::default()
+        };
+        let after_off = compute_light_state(&off_cmd, &was_on);
+        assert!(!after_off.on);
+        assert_eq!(after_off.brightness, 128);
+
+        let on_cmd = HaLightCommand {
+            state: Some("ON".into()),
+            ..Default::default()
+        };
+        let after_on = compute_light_state(&on_cmd, &after_off);
+        assert!(after_on.on);
+        assert_eq!(after_on.brightness, 128);
+    }
+
+    #[test]
+    fn compute_on_restores_full_brightness_when_still_zero() {
+        let prev = LightStateSnapshot {
+            on: false,
+            brightness: 0,
+            base_r: 255,
+            base_g: 255,
+            base_b: 255,
+        };
+        let cmd = HaLightCommand {
+            state: Some("ON".into()),
+            ..Default::default()
+        };
+        let next = compute_light_state(&cmd, &prev);
+        assert!(next.on);
+        assert_eq!(next.brightness, 255);
+    }
+
+    #[test]
     fn parse_mqtt_on_off_trimmed() {
         assert_eq!(parse_mqtt_on_off(b"ON"), Some(true));
         assert_eq!(parse_mqtt_on_off(b"OFF"), Some(false));
@@ -3584,6 +3633,7 @@ mod tests {
         let disc = discovery_payload_startup_led_switch(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
         assert_eq!(v["entity_category"].as_str(), Some("config"));
+        assert_eq!(v["icon"].as_str(), Some("mdi:lightbulb"));
     }
 
     #[test]
