@@ -45,7 +45,7 @@ Typical MQTT topics: `…/button/prime/set`, `…/button/request_get_temperature
 - **Language:** User-facing text (Home Assistant discovery names, README, `docs/`, CLI help) is **English only**.
 - **License:** GPL-3.0 ([`LICENSE`](LICENSE)). Code/framing traceable to opensleep → keep attribution/source notices in affected files.
 - **Scope:** Stay focused (no large drive-by refactors). Add new features (TLS, more entities) deliberately and document them.
-- **Tests:** **Unit-test** critical logic (CRC, frame bytes); CI: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`fmt`, `test`, `clippy`; separate job **aarch64** `release` cross-build). Pushes to **`main`/`master`** run [`release.yml`](.github/workflows/release.yml): patch bump in **`Cargo.toml`**, Git tag **`v*.*.*`**, GitHub Release with **aarch64** Linux binary (+ **`SHA256SUMS`**).
+- **Tests:** **Unit-test** critical logic (CRC, frame bytes); CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml): `fmt`, `test`, `clippy`; separate job **aarch64** `release` cross-build) runs on **pull requests** only. Pushes to **`main`/`master`** run [`release.yml`](.github/workflows/release.yml): patch bump in **`Cargo.toml`**, Git tag **`v*.*.*`**, GitHub Release with **aarch64** Linux binary (+ **`SHA256SUMS`**); release notes list commits from the previous tag to the new tag (**no merge commits**, no **`chore(release):`** bump); not GitHub’s PR-based auto notes.
 - **Toolchain:** [`rust-toolchain.toml`](rust-toolchain.toml) — **clap** is pinned to `=4.5.27` (compatibility with Rust 1.84; newer clap may require Rust 1.85+/Edition 2024).
 
 ## Commands

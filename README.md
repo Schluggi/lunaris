@@ -1,4 +1,4 @@
-# 🌙 lunaris
+# 🌙 Lunaris
 <a href="https://www.buymeacoffee.com/schluggi" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/white_img.png" alt="Buy Me A Coffee" style="height: auto !important;width: auto !important;" ></a>
 
 This is a replacement firmware for Eight Sleep pods. It's local, cloud-less and communicates directly with the serial devices. 

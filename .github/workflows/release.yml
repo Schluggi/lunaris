@@ -30,6 +30,16 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Record previous release tag
+        id: prev
+        run: |
+          set -euo pipefail
+          if tag=$(git describe --tags --abbrev=0 2>/dev/null); then
+            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
@@ -92,12 +102,35 @@ jobs:
           git push origin "refs/tags/v${VERSION}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Generate release notes (all commits)
+        run: |
+          set -euo pipefail
+          PREV="${{ steps.prev.outputs.tag }}"
+          NEW="v${{ steps.tag.outputs.version }}"
+          REPO="${{ github.repository }}"
+          {
+            echo "## Commits"
+            echo ""
+            if [ -n "$PREV" ]; then
+              git log "${PREV}..${NEW}" --no-merges --invert-grep --grep='^chore(release):' --pretty=format:'- %s (%h)%n'
+            else
+              git log "${NEW}" --no-merges --invert-grep --grep='^chore(release):' --pretty=format:'- %s (%h)%n'
+            fi
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "**Full Changelog**: https://github.com/${REPO}/compare/${PREV}...${NEW}"
+            else
+              echo "**Full Changelog**: https://github.com/${REPO}/commits/${NEW}"
+            fi
+          } > release_body.md
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.tag.outputs.version }}
           name: v${{ steps.tag.outputs.version }}
-          generate_release_notes: true
+          generate_release_notes: false
+          body_path: release_body.md
           files: |
             dist/lunaris
             dist/SHA256SUMS
