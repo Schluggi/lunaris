@@ -28,7 +28,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   # Same CPU family as Eight Sleep Pod SOM (aarch64); catches missing cross-setup early.
-  build-aarch64-gnu:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
