@@ -1,31 +1,24 @@
-# systemd unit for lunaris (Eight Sleep Pod MQTT bridge).
-#
-# Install on the Pod (example paths):
-#   sudo install -m755 lunaris /usr/local/bin/
-#   sudo install -m644 systemd/lunaris.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now lunaris
+# systemd unit for lunaris
 #
 # Broker host/port and other flags: edit this unit, or prefer a drop-in:
 #   sudo systemctl edit lunaris
 # and set e.g.:
 #   [Service]
 #   ExecStart=
-#   ExecStart=/usr/local/bin/lunaris --mqtt-host 192.168.1.10 --mqtt-port 1883
+#   ExecStart=/usr/local/bin/lunaris --mqtt-host 192.168.1.10
 #
 # Optional environment (e.g. RUST_LOG): create /etc/default/lunaris
 #   RUST_LOG=info
 
 [Unit]
-Description=lunaris MQTT bridge (Frozen/Sensor USART, Home Assistant)
-Documentation=https://github.com/your-repo/lunaris
+Description=lunaris - Custom Home Assistant first firmware for Eight Sleep Pod
+Documentation=https://github.com/Schluggi/lunaris
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=-/etc/default/lunaris
-ExecStart=/usr/local/bin/lunaris --mqtt-host localhost --mqtt-port 1883
+ExecStart=/usr/local/bin/lunaris --mqtt-host 192.168.1.10 --mqtt-username user123 --mqtt-password password123
 Restart=on-failure
 RestartSec=10
 StartLimitIntervalSec=300

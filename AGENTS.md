@@ -41,6 +41,7 @@ Typical MQTT topics: `…/button/prime/set`, `…/button/request_get_temperature
 
 ## Conventions for changes
 
+- **Git commits (Conventional Commits / semantic-release style):** Use [Conventional Commits](https://www.conventionalcommits.org/) so messages work with **commitlint** and match what **semantic-release** expects — e.g. `feat:`, `fix:`, `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `perf:`; breaking changes via `feat!: …` or a `BREAKING CHANGE:` footer. This repo does **not** run the npm **semantic-release** tool; [`.github/workflows/release.yml`](.github/workflows/release.yml) still does a **patch** version bump on push to **`main`/`master`** (commit types do not yet drive major/minor).
 - **Language:** User-facing text (Home Assistant discovery names, README, `docs/`, CLI help) is **English only**.
 - **License:** GPL-3.0 ([`LICENSE`](LICENSE)). Code/framing traceable to opensleep → keep attribution/source notices in affected files.
 - **Scope:** Stay focused (no large drive-by refactors). Add new features (TLS, more entities) deliberately and document them.
@@ -64,6 +65,7 @@ Logging: `RUST_LOG`, plus `--log-level` (see `--help`).
 
 When you change any of the following, **update AGENTS.md here**:
 
+- Commit-message conventions or release automation (semantic-release, commitlint, `release.yml`).
 - New CLI flags, default topics, or discovery fields.
 - Serial parameters, protocol bytes, or Pod-specific assumptions.
 - New dependencies or intentional pins (e.g. clap).
