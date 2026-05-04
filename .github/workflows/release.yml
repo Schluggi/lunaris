@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Avoid loop: automated version-bump commit must not trigger another release.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.head_commit != null &&
+       !startsWith(github.event.head_commit.message, 'chore(release):'))
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.84.0
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install AArch64 GNU toolchain (linker)
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Bump patch version in Cargo.toml
+        id: bump
+        run: |
+          set -euo pipefail
+          python3 << 'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("Cargo.toml")
+          text = path.read_text()
+          m = re.search(r'^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"', text, re.MULTILINE)
+          if not m:
+              raise SystemExit("Could not parse version from Cargo.toml")
+          major, minor, patch = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+          new_ver = f"{major}.{minor}.{patch + 1}"
+          new_text, n = re.subn(
+              r'(^version\s*=\s*)"(\d+)\.(\d+)\.(\d+)"',
+              rf'\1"{new_ver}"',
+              text,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if n != 1:
+              raise SystemExit("Failed to substitute version in Cargo.toml")
+          path.write_text(new_text)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              print(f"version={new_ver}", file=f)
+          print(f"Bumped version to {new_ver}")
+          PY
+
+      - name: Build release (x86_64)
+        run: cargo build --release --verbose
+
+      - name: Build release (aarch64)
+        run: cargo build --release --verbose --target aarch64-unknown-linux-gnu
+
+      - name: Stage binaries
+        run: |
+          mkdir -p dist
+          cp target/release/lunaris "dist/lunaris-x86_64-unknown-linux-gnu"
+          cp target/aarch64-unknown-linux-gnu/release/lunaris "dist/lunaris-aarch64-unknown-linux-gnu"
+          sha256sum dist/* > dist/SHA256SUMS
+
+      - name: Commit version bump and tag
+        id: tag
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.bump.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          git commit -m "chore(release): v${VERSION}"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin HEAD:"${{ github.ref_name }}"
+          git push origin "refs/tags/v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.tag.outputs.version }}
+          name: v${{ steps.tag.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/lunaris-x86_64-unknown-linux-gnu
+            dist/lunaris-aarch64-unknown-linux-gnu
+            dist/SHA256SUMS

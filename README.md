@@ -1,176 +1,219 @@
-# lunaris
+# 🌙 lunaris
+<a href="https://www.buymeacoffee.com/schluggi" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/white_img.png" alt="Buy Me A Coffee" style="height: auto !important;width: auto !important;" ></a>
 
-Single-binary **local-only** bridge: **Frozen** USART (prime, per-side temperature), optional **Sensor** USART (per-side **vibration** / `SetAlarm`), optional **IS31FL3194** LED on I²C — **Home Assistant** via [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) (buttons, climates, light).
+This is a replacement firmware for Eight Sleep pods. It's local, cloud-less and communicates directly with the serial devices. 
 
-## Disclaimer
+Home Assistant first approach. It supports MQTT discovery so no need for manual configuration.
 
-This project is for **personal, educational, and research** use. It is **not** affiliated with, endorsed by, or sponsored by Eight Sleep. “Eight Sleep” and related names are trademarks of Eight Sleep, Inc.
+This is an AI-fork of [opensleep](https://github.com/LiamSnow/opensleep).
 
-Using custom firmware or low-level hardware control **may void warranties**, **break the vendor app**, or in rare cases **damage hardware**. **Use at your own risk.**
+## ⚠️ Disclaimer
+This project is for personal, educational, and research use. It is **not** affiliated with, endorsed by, or sponsored by Eight Sleep. “Eight Sleep” and related names are trademarks of Eight Sleep, Inc.
 
-Protocol details for **Pod 4** are **not** officially documented here and are **assumed compatible** with the opensleep Pod 3 Frozen framing until verified on real hardware.
+Using custom firmware or low-level hardware control may void warranties, break the vendor app, or in rare cases damage hardware. Use at your own risk!
 
-## Requirements
+## 🛏️ Supported Pods
+- ❌ Pod 1
+- ❌ Pod 2
+- ⚠️ Pod 3 (should work, untested)
+- ✅ Pod 4 
+- ⚠️ Pod 5 (should work, untested)
 
-- A reachable **MQTT broker** (for example Mosquitto on your LAN).
-- Network path from the machine running `lunaris` to that broker.
-- **Serial access** to the Pod Frozen USART from that same machine (typical when running **on the Pod SOM** after SSH/access setup; see opensleep [SETUP.md](https://github.com/LiamSnow/opensleep/blob/main/SETUP.md) for background — Pod 3 oriented).
+## 🏠 Entities
 
-No cloud services are required.
+### Controls
 
-On startup, `lunaris` **opens `--serial-device` once** to verify it exists and is accessible. If that fails (missing path, permission, busy port), the process **exits before** connecting to MQTT.
+![Home Assistant Entities — Controls](img/controls.png)
 
-## Quick start
+| Name | Kind | Hidden by default | What it does |
+|:---|:---|:---:|:---|
+| Cover Left / Cover Right | climate | No | Set how warm or cool each side of the bed should feel. |
+| LED | light | No | Colour and brightness for the indicator LED on the bed. |
+| Prime | button | No | Tell the pod to prepare / prime its water system before use. |
+| Vibrate Cover Left / Vibrate Cover Right | button | No | Run a vibration on that side (alarm-style buzz). |
 
-### Run on the Pod (aarch64) — cross-compile on your PC
+### Sensors
 
-The Pod OS (**Eight Layer**, Yocto Kirkstone) reports **`aarch64`** (`uname -m`). A binary built on a typical PC is **`x86_64`** — copying it to the Pod yields:
+![Home Assistant Entities — Sensors](img/sensors.png)
 
-`cannot execute binary file: Exec format error`
+| Name | Kind | Hidden by default | What it does |
+|:---|:---|:---:|:---|
+| Current Temperature Left / Current Temperature Right | sensor | No | Roughly how warm each side of the mattress is right now. |
+| Heatsink Temperature | sensor | No | Temperature of the cooling hardware. |
+| Presence Any | binary_sensor | No | Someone is detected on either side of the bed. |
+| Presence Calibration | binary_sensor | No | On while lunaris is learning an “empty bed” baseline. |
+| Presence Left / Presence Right | binary_sensor | No | Someone is detected on that side of the mattress. |
+| Target Temperature Left / Target Temperature Right | sensor | No | Same target you set on the climate control, shown as plain numbers for dashboards or cards. |
+| Water Tank | binary_sensor | No | Shows whether the water tank is plugged in. |
 
-Build for ARM64 on your dev machine:
+### Configuration
+
+![Home Assistant Entities — Configuration](img/configuration.png)
+
+| Name | Kind | Hidden by default | What it does |
+|:---|:---|:---:|:---|
+| Calibrate Presence | button | No | Start learning what an empty mattress looks like (keep the bed clear for ~10 s afterwards). |
+| Presence Baseline Delta | number | Yes | Fine-tune sensitivity after calibration. |
+| Presence Cap Threshold | number | Yes | Fine-tune rough “capacitance” sensitivity before calibration. |
+| Startup LED | switch | No | If on, lunaris flashes the green indicator once each time it starts. |
+| Vibration Cancel Preamble | switch | Yes | Tweaks vibration behaviour — leave as-is unless troubleshooting. |
+| Vibration Duration | number | No | How long vibrations last when you press a vibrate button. |
+| Vibration Intensity | number | No | How strong vibrations feel (percentage). |
+| Vibration Pattern | select | No | Simple vs double vibration pattern. |
+
+### Diagnostics
+
+![Home Assistant Entities — Diagnostics](img/dianostics.png)
+
+| Name | Kind | Hidden by default | What it does |
+|:---|:---|:---:|:---|
+| Device ID | sensor | Yes | Short internal id taken from pod files when available; mostly for support. |
+| Device Label | sensor | Yes | Human-readable pod name from disk when available; mostly for support. |
+| Firmware Message | sensor | Yes | Occasionally shows one-line status chatter from the bed’s controller. |
+| Presence Baseline Zones | sensor | Yes | Raw saved calibration snapshot for nerds/support; not usually needed daily. |
+| Request Temperatures | button | No | Ask the pod to refresh its temperature readings (troubleshooting / curiosity). |
+
+## 📦 Installation
+
+### 1. Get Root Access
+There is an excellent guide from [free-sleep](https://github.com/throwaway31265/free-sleep/blob/main/INSTALLATION.md).
+We only need steps 1-12.
+
+### 2. Disable Cloud
+Because free-sleep uses a different approach to communicate to the pod, we have to disable an additional service:
 
 ```bash
-rustup target add aarch64-unknown-linux-gnu
-# Debian/Ubuntu — provides linker aarch64-linux-gnu-gcc (see [.cargo/config.toml](.cargo/config.toml))
-sudo apt install gcc-aarch64-linux-gnu
+systemctl disable --now frank
+systemctl mask frank
+```
 
+Also make sure you blocked the Eight Sleep servers in your `/etc/hosts`:
+```
+127.0.0.1 	raw-api-upload.8slp.net update-api.8slp.net device-api.8slp.net 8slp.net
+```
+
+### 3. Install lunaris
+Connect to your pod and run these commands in a root shell:
+```bash
+# Download lunaris
+wget https://github.com/Schluggi/lunaris/releases/latest/download/lunaris -O /usr/bin/lunaris
+
+# Make the binary executable
+chmod +x /usr/bin/lunaris
+
+# Download unit file
+wget https://github.com/Schluggi/lunaris/raw/refs/heads/main/systemd/lunaris.service -O /etc/systemd/system/lunaris.service
+
+# Edit ExecStart — at minimum set broker + pod (see README [Quick start](#cli-quick-start), full tables [below](#cli-arguments))
+vi /etc/systemd/system/lunaris.service
+
+# Activate service
+systemctl daemon-reload
+systemctl enable --now lunaris
+```
+### 4. Configure Priming
+> There is no periodic priming built-in. You have to manage it yourself!
+
+Add this automation to Home Assistant using the **Prime** button entity from your MQTT device—the `entity_id` below is **only an example**; replace it with yours (see note under [Entities](#entities)).
+
+```yaml
+description: "Eight Sleep priming"
+mode: single
+triggers:
+  - trigger: time
+    at: "12:00:00"
+actions:
+  - action: button.press
+    target:
+      entity_id: button.eight_sleep_prime  # substitute: HA → device → Prime button entity_id
+```
+
+<a id="cli-arguments"></a>
+
+## ⚙️ Arguments
+
+All settings are CLI-only (there is no config file or ENVs). **`lunaris --help`** lists the same flags.
+
+<a id="cli-quick-start"></a>
+
+### Quick start
+```bash
+lunaris \
+  --mqtt-host 192.168.1.40 \
+  --mqtt-username user123 \
+  --mqtt-password password123 \
+  --pod 4 # 3/4/5
+```
+
+ Option | Default | Required | Description |
+|--------|---------|:--------:|-------------|
+| `--pod` | — | Yes | Your Pod generation: **3**, **4**, or **5**. Chooses sensible default serial speeds. |
+
+### MQTT
+| Option | Default | Required | Description |
+|--------|---------|:--------:|-------------|
+| `--device-identifier` | `lunaris_pod` | No | Stable id so Home Assistant recognizes the same device across restarts. |
+| `--device-name` | `Eight Sleep` | No | Name shown for the device in Home Assistant. |
+| `--discovery-prefix` | `homeassistant` | No | Where Home Assistant expects [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) messages (change only if your setup uses a different prefix). |
+| `--mqtt-client-id` | `lunaris` | No | Name of this program on the MQTT broker. |
+| `--mqtt-host` | — | Yes | Your MQTT broker (hostname or IP). |
+| `--mqtt-password` | — | No | Broker password, if required. |
+| `--mqtt-port` | `1883` | No | Broker port. |
+| `--mqtt-username` | — | No | Broker username, if required. |
+| `--payload-press` | `PRESS` | No | Text Home Assistant sends when you “press” an MQTT button; must match what discovery advertises. |
+| `--topic-prefix` | `lunaris/pod4` | No | Leading part of all topics for this bed (availability, controls, sensors, etc.). |
+
+
+### Climate
+| Option | Default | Required | Description |
+|--------|---------|:--------:|-------------|
+| `--climate-max-temp` | `47` | No | Highest setpoint (°C) allowed in the climate controls. |
+| `--climate-min-temp` | `13` | No | Lowest setpoint (°C) allowed. |
+| `--climate-temp-step` | `0.5` | No | Step size (°C) for the temperature slider. |
+
+### Debugging
+| Option | Default | Required | Description |
+|--------|---------|:--------:|-------------|
+| `--i2c-device` | `/dev/i2c-1` | No | I²C bus used for the status LED. If it is missing, everything else still works except the light in Home Assistant. |
+| `--log-level` | `info` | No | How chatty the logs are when `RUST_LOG` is not set. |
+| `--sensor-baud` | *(from `--pod`; Pod 4 / 5 → `921600`)* | No | Speed for the sensor/vibration serial line; change if your hardware needs it. |
+| `--sensor-device` | `/dev/ttyS2` | No | Serial port for vibration and presence. If it cannot be opened, heating and MQTT still work, but not vibration or presence. |
+| `--sensor-vibrate-no-ack-wait` | *(off)* | No | Try this if vibration never starts but you suspect the sensor port does not report replies. |
+| `--serial-baud` | *(from `--pod`; Pod 4 / 5 → `38400`)* | No | Speed for the main (temperature) serial line. |
+| `--serial-device` | `/dev/ttyS1` | No | Serial port for temperature and related control. **Required:** the program exits if this port cannot be opened. |
+
+
+
+## 🔨 How To Build
+- Host: Ubuntu 24.04
+```bash
+# Install dependencies
+apt-get install -y gcc-aarch64-linux-gnu
+rustup target add aarch64-unknown-linux-gnu
+
+# Build
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
+The compiled binary is located in `./target/aarch64-unknown-linux-gnu/release/`.
 
-Deploy:
 
-```bash
-scp target/aarch64-unknown-linux-gnu/release/lunaris eight-pod:/tmp/
-```
+## ❓ FAQ
 
-Then on the Pod (Pod **4** example — see [Examples](#examples-pod-3-pod-4-and-pod-5) for **`--pod`** and Pod **3**):
+### Presence Calibration
 
-```bash
-chmod +x /tmp/lunaris
-/tmp/lunaris \
-  --mqtt-host 192.168.1.10 \
-  --mqtt-port 1883 \
-  --mqtt-username ha \
-  --mqtt-password secret \
-  --pod 4 \
-  --serial-device /dev/ttyS1 \
-  --sensor-device /dev/ttyS2
-```
+When lunaris starts and the MQTT topic does not exist yet (this is normally the first start ever), it will automatically calibrate the presence sensors.
+You can also calibrate manually with the discovered **Calibrate Presence** MQTT button—the entity ID differs per install (**`--topic-prefix`** / **`--device-name`**; defaults in [Quick start](#cli-quick-start)). Calibration takes ~10s; keep the bed empty.
+For fine-tuning, use **Presence Baseline Delta** and **Presence Cap Threshold** on the device (same naming caveat—copy IDs from HA, not static examples).
 
-If the binary fails with **GLIBC / version `GLIBC_x.y` not found**, your linker used a **newer** glibc than the Pod’s rootfs. Options: build on an older distro/container closer to Kirkstone, use a **[musl](https://musl.cc/) static** target (e.g. `aarch64-unknown-linux-musl` with a suitable toolchain), or tools like [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) / [cross](https://github.com/cross-rs/cross).
+### Water Tank
 
-### Run on the same machine as `cargo build` (native)
+The **Water Tank** binary sensor often shows **`unknown`** briefly at startup until the bridge has parsed reservoir state from Frozen traffic. Cycling the physical tank plug usually refreshes HA; replace any hard-coded `binary_sensor.*` ID with yours from the device page.
 
-```bash
-cargo build --release
-./target/release/lunaris \
-  --mqtt-host 192.168.1.10 \
-  --mqtt-port 1883 \
-  --mqtt-username ha \
-  --mqtt-password secret \
-  --pod 4 \
-  --serial-device /dev/ttyS1 \
-  --sensor-device /dev/ttyS2
-```
 
-**`--pod`** (**3**, **4**, or **5**) is **required** — it selects default USART speeds (**5** matches **4**); see [Examples](#examples-pod-3-pod-4-and-pod-5). Paths default to Pod **4**/ **5** style (`ttyS1` / `ttyS2`).
+## 🙏 Special Thanks
+- [LiamSnow](https://github.com/LiamSnow/) for the great research and groundwork on the protocol ([opensleep](https://github.com/LiamSnow/opensleep)).
+- [throwaway31265](https://github.com/throwaway31265) for [free-sleep](https://github.com/throwaway31265/free-sleep) and the instructions on how to root.
 
-## Examples: Pod 3, Pod 4, and Pod 5
-
-These examples assume `lunaris` runs **on the bed’s Linux SoM** (same machine that owns `/dev/tty…`). Adjust **`--mqtt-host`**, port, and credentials for your broker.
-
-### Pod 4 and Pod 5 (Eight Sleep Pod 4 / 5)
-
-**Pod 5** uses the **same** CLI USART defaults as Pod **4** — pass **`--pod 5`** instead of **`--pod 4`** when that matches your hardware.
-
-Community mapping ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)): **Frozen** → **`/dev/ttyS1`**, **Sensor** (vibration / capacitance) → **`/dev/ttyS2`**. Frozen uses **38400** (default **`--serial-baud`**).
-
-**Typical start** (defaults: Frozen **38400**, Sensor **921600** — matches stock / Frankenfirmware after the bootloader jump).
-
-```bash
-./lunaris \
-  --mqtt-host 192.168.1.10 \
-  --mqtt-port 1883 \
-  --mqtt-username ha \
-  --mqtt-password secret \
-  --pod 4 \
-  --serial-device /dev/ttyS1 \
-  --sensor-device /dev/ttyS2 \
-  --topic-prefix lunaris/pod4
-```
-
-Use **`--sensor-baud 38400`** only if your Sensor link still runs at **38400** and the default **921600** fails.
-
-If **`/opt/eight/config/machine.json`** defines **`frozenPort`** / **`sensorPort`**, you can omit **`--serial-device`** / **`--sensor-device`** unless you want to override the file.
-
-### Pod 3 (opensleep-validated layout)
-
-Opensleep upstream uses **Frozen** on **`/dev/ttymxc2`** @ **38400** and **Sensor** on **`/dev/ttymxc0`** with firmware **115200** after the bootloader handshake (`opensleep` [`src/frozen/manager.rs`](https://github.com/LiamSnow/opensleep/blob/main/src/frozen/manager.rs), [`src/sensor/manager.rs`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/manager.rs)).
-
-```bash
-./lunaris \
-  --mqtt-host 192.168.1.10 \
-  --mqtt-port 1883 \
-  --mqtt-username ha \
-  --mqtt-password secret \
-  --pod 3 \
-  --serial-device /dev/ttymxc2 \
-  --sensor-device /dev/ttymxc0 \
-  --topic-prefix lunaris/pod3
-```
-
-Your hardware may still use different `tty` names — confirm with **`dmesg`**, vendor logs, or opensleep [SETUP.md](https://github.com/LiamSnow/opensleep/blob/main/SETUP.md).
-
-## CLI arguments
-
-All settings are **CLI-only** (no config file in v1). `lunaris --help` lists the same flags. Optional environment variables override only the marked options when set.
-
-| Option | Default | Environment | Description |
-|--------|---------|-------------|-------------|
-| `--mqtt-host` | `localhost` | — | MQTT broker hostname or IP. |
-| `--mqtt-port` | `1883` | — | MQTT broker TCP port. |
-| `--mqtt-username` | *(empty)* | `MQTT_USERNAME` | Broker username (optional). |
-| `--mqtt-password` | *(empty)* | `MQTT_PASSWORD` | Broker password (optional). |
-| `--mqtt-client-id` | `lunaris` | — | MQTT client id. |
-| `--topic-prefix` | `lunaris/pod4` | — | Prefix for device topics: `{prefix}/availability`, `{prefix}/button/prime/set`, `{prefix}/button/vibrate_left|vibrate_right/set`, `{prefix}/climate/...`, `{prefix}/light/...`, `{prefix}/result`, etc. |
-| `--discovery-prefix` | `homeassistant` | — | Home Assistant [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) prefix. |
-| `--device-name` | `Eight Sleep` | — | Friendly device name in discovery (`device.name`). |
-| `--device-identifier` | `lunaris_pod` | — | Stable id for the HA device registry (`device.identifiers`). |
-| `--serial-device` | `/dev/ttyS1` | — | Frozen subsystem UART. Pod 4 / 5: often `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)); Pod 3: often `ttymxc2`. Must open at startup or the process exits. |
-| `--pod` | — | — | **Required.** `3`, `4`, or `5` (**5** = same baud defaults as **4**): default **`--serial-baud`** / **`--sensor-baud`** when those flags are omitted (**3** → 38400 / 115200; **4** / **5** → 38400 / 921600). Explicit baud flags override per line. |
-| `--serial-baud` | *(from `--pod`; Pod 4 / 5 → `38400`)* | — | Frozen line speed (bits/s). |
-| `--payload-press` | `PRESS` | — | Payload Home Assistant publishes when the button is pressed (must match discovery `payload_press`). |
-| `--i2c-device` | `/dev/i2c-1` | — | Linux I²C bus where the IS31FL3194 LED driver sits (address **0x53**). Probed at startup; if it cannot be opened, MQTT **Prime** still runs but no **Light** entity is advertised. |
-| `--climate-min-temp` | `13` | — | Minimum target temperature (°C) in climate discovery. |
-| `--climate-max-temp` | `47` | — | Maximum target temperature (°C) in climate discovery. |
-| `--climate-temp-step` | `0.5` | — | Slider step (°C) in Home Assistant. |
-| `--sensor-device` | `/dev/ttyS2` | — | **Sensor** subsystem UART (vibration / `SetAlarm`). Pod 4 / 5: often `ttyS2` while Frozen is `ttyS1` ([opensleep#11](https://github.com/LiamSnow/opensleep/issues/11)). Probed at startup; if it cannot be opened, the bridge continues **without** vibrate buttons. |
-| `--sensor-baud` | *(from `--pod`; Pod 4 / 5 → `921600`)* | — | Sensor serial speed (bits/s). Override when your hardware differs. See [Examples](#examples-pod-3-pod-4-and-pod-5). |
-| `--sensor-vibrate-no-ack-wait` | *(off)* | — | Send vibration frames **without** waiting for `0xAE` between priming and SetAlarm. For Pods where Sensor RX is not opensleep-shaped at your baud but TX may still work. |
-| `--vibration-intensity` | `64` | — | Default intensity 1–100 for vibrate buttons (Sensor `SetAlarm`). |
-| `--vibration-duration-sec` | `15` | — | Default duration in seconds (clamped 1…600). |
-| `--vibration-pattern` | `single` | — | `single` or `double` (opensleep `AlarmPattern`). |
-| `--log-level` | `info` | — | Default `tracing` filter if `RUST_LOG` is unset (e.g. `debug`, `info,lunaris=debug`). |
-
-If **`RUST_LOG`** is set in the environment, it takes precedence over `--log-level` (standard `tracing_subscriber` behaviour).
-
-## USART protocol
-
-See [docs/usart-frozen.md](docs/usart-frozen.md).
-
-## Climate (Home Assistant, left / right)
-
-Two MQTT **[climate](https://www.home-assistant.io/integrations/climate.mqtt/)** entities send opensleep-compatible **`SetTargetTemperature`** frames on the Frozen UART (`0x40` + side + enable + target in **centidegree** Celsius). Modes: **`off`** and **`heat_cool`**. There is **no** MQTT-published **current** temperature yet (serial RX not implemented).
-
-## Vibration (per side, Sensor UART)
-
-Vibration uses the **Sensor** MCU’s USART (not Frozen). Each button press sends the same **primed sequence** as opensleep’s sensor scheduler — **`EnableVibration`**, **`SetPiezoGain`**, **`SetPiezoFreq`**, **`EnablePiezo`**, then **`SetAlarm`** (`0x2C` + side + intensity + pattern + duration) — so the piezo path is enabled before the alarm. MQTT exposes two **[buttons](https://www.home-assistant.io/integrations/button.mqtt/)** (**Vibrate mattress (left)** / **Vibrate mattress (right)**); parameters come from **`--vibration-intensity`**, **`--vibration-duration-sec`**, and **`--vibration-pattern`**. Device paths and **`--sensor-baud`** per hardware: [Examples](#examples-pod-3-pod-4-and-pod-5).
-
-## LED (Home Assistant light)
-
-See [docs/led-is31fl3194.md](docs/led-is31fl3194.md).
-
-## License
+## ⚖️ License
 
 SPDX: **GPL-3.0-only**. See [LICENSE](LICENSE). CRC/framing for Frozen frames derives from [opensleep](https://github.com/LiamSnow/opensleep) (same license).

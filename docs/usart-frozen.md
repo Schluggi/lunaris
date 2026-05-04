@@ -1,6 +1,6 @@
 # Frozen subsystem USART (opensleep-compatible framing)
 
-This document describes the **wire format** used by `lunaris` for the **prime** action. It follows the implementation in [opensleep](https://github.com/LiamSnow/opensleep) (GPL-3.0): `src/common/codec.rs`, `src/common/checksum.rs`, `src/frozen/command.rs`.
+This document describes the **wire format** for the **Frozen** USART subsystem that `lunaris` uses for mandatory pod serial control beyond a single command: **`0x7E`-framed** payloads with CRC, including **Prime**, **SetTargetTemperature** (climate left/right), **GetTemperatures** (**`0x41`**), wake traffic (**Ping** / **JumpToFirmware**), and inbound packets that the bridge decodes (**temperature**, **MCU text** **`0x07`**, pong **`0x81`**, jump ack **`0x90`**). For behavior and MQTT mapping, see the source tree and **[AGENTS.md](../AGENTS.md)**. Opensleep references: [opensleep](https://github.com/LiamSnow/opensleep) (GPL-3.0) `src/common/codec.rs`, `src/common/checksum.rs`, `src/frozen/command.rs`.
 
 **Pod 4 warning:** opensleep is validated on **Pod 3** only. Eight Sleep does not publish this protocol. **Baud rate, device node (`/dev/tty…`), and command bytes may differ on Pod 4.** Treat the values below as a **working hypothesis** until confirmed with a capture from your hardware.
 

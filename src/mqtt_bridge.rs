@@ -141,7 +141,7 @@ impl BridgeConfig {
             device_name: cli.device_name.clone(),
             device_identifier: cli.device_identifier.clone(),
             device_model: cli.pod.homeassistant_device_model().to_string(),
-            sw_version: env!("CARGO_PKG_VERSION").to_string(),
+            sw_version: format!("Lunaris {}", env!("CARGO_PKG_VERSION")),
             payload_press: cli.payload_press.clone(),
             serial_device: cli.serial_device.clone(),
             serial_baud: cli.effective_serial_baud(),
@@ -160,15 +160,7 @@ impl BridgeConfig {
             presence_calibrate_secs: cli.presence_calibrate_secs.max(3),
             presence_discovery: false,
             presence_debug: cli.presence_debug,
-            vibration_settings: Arc::new(Mutex::new(VibrationSettings {
-                intensity: cli.vibration_intensity.clamp(1, 100),
-                duration_sec: cli.vibration_duration_sec.clamp(1, 600),
-                pattern: match cli.vibration_pattern {
-                    crate::cli::VibrationPatternArg::Single => AlarmPattern::Single,
-                    crate::cli::VibrationPatternArg::Double => AlarmPattern::Double,
-                },
-                cancel_preamble: true,
-            })),
+            vibration_settings: Arc::new(Mutex::new(VibrationSettings::default())),
             frozen_tx: None,
             sensor_tx: None,
             frozen_temperature_discovery: false,
@@ -3394,7 +3386,8 @@ mod tests {
 
     #[test]
     fn climate_discovery_uses_current_temperature_topic() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let left: serde_json::Value =
             serde_json::from_str(&discovery_payload_climate(&cfg, BedSide::Left)).unwrap();
@@ -3412,7 +3405,8 @@ mod tests {
 
     #[test]
     fn target_temperature_sensor_discovery_matches_state_topic() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         for side in [BedSide::Left, BedSide::Right] {
             let (name, suffix) = match side {
@@ -3435,7 +3429,8 @@ mod tests {
 
     #[test]
     fn presence_discovery_is_occupancy() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let mut cfg = BridgeConfig::from_cli(&cli);
         cfg.presence_discovery = true;
         cfg.sensor_device = Some(std::path::PathBuf::from("/dev/null"));
@@ -3460,7 +3455,8 @@ mod tests {
 
     #[test]
     fn presence_calibration_running_discovery_matches_state_topic() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let mut cfg = BridgeConfig::from_cli(&cli);
         cfg.presence_discovery = true;
         cfg.sensor_device = Some(std::path::PathBuf::from("/dev/null"));
@@ -3477,7 +3473,8 @@ mod tests {
 
     #[test]
     fn firmware_message_discovery_matches_state_topic() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc = discovery_payload_firmware_message(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -3495,7 +3492,8 @@ mod tests {
 
     #[test]
     fn deviceinfo_discovery_matches_state_topics() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc_l = discovery_payload_deviceinfo_device_label(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc_l).unwrap();
@@ -3521,7 +3519,8 @@ mod tests {
 
     #[test]
     fn request_get_temperatures_button_discovery_matches_command_topic() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc = discovery_payload_request_get_temperatures_button(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -3534,7 +3533,8 @@ mod tests {
 
     #[test]
     fn calibrate_presence_discovery_has_entity_category_config() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let mut cfg = BridgeConfig::from_cli(&cli);
         cfg.presence_discovery = true;
         let disc = discovery_payload_calibrate_presence_button(&cfg);
@@ -3548,7 +3548,8 @@ mod tests {
 
     #[test]
     fn presence_sensitivity_number_discovery_topics() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         for (disc, name) in [
             (
@@ -3577,7 +3578,8 @@ mod tests {
 
     #[test]
     fn startup_led_discovery_is_configuration_entity() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let disc = discovery_payload_startup_led_switch(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -3586,7 +3588,8 @@ mod tests {
 
     #[test]
     fn water_tank_discovery_is_mqtt_binary_sensor_with_plug_device_class() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         assert!(cfg
             .water_tank_state_topic()
@@ -3605,7 +3608,8 @@ mod tests {
 
     #[test]
     fn vibration_settings_discovery_payloads_use_config_entity_category() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         for (disc, exp_state, exp_name) in [
             (
@@ -3698,7 +3702,8 @@ mod tests {
 
     #[test]
     fn climate_state_topic_payload_ingest() {
-        let cli = crate::cli::Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
         let mut st = ClimateSideState::default();
         assert!(ingest_climate_mode_from_state_payload(

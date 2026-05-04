@@ -13,9 +13,7 @@
 #   ExecStart=
 #   ExecStart=/usr/local/bin/lunaris --mqtt-host 192.168.1.10 --mqtt-port 1883
 #
-# Optional environment (MQTT credentials, RUST_LOG): create /etc/default/lunaris
-#   MQTT_USERNAME=ha
-#   MQTT_PASSWORD=secret
+# Optional environment (e.g. RUST_LOG): create /etc/default/lunaris
 #   RUST_LOG=info
 
 [Unit]

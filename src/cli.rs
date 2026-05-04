@@ -6,14 +6,6 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-/// Vibration pattern for [`Cli::vibration_pattern`] (Sensor `SetAlarm` / opensleep `AlarmPattern`).
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
-pub enum VibrationPatternArg {
-    #[default]
-    Single,
-    Double,
-}
-
 /// Pod generation for default USART speeds ([`Cli::effective_serial_baud`] / [`Cli::effective_sensor_baud`]) when baud flags are omitted.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum PodModel {
@@ -57,16 +49,16 @@ impl PodModel {
 )]
 pub struct Cli {
     /// MQTT broker hostname or IP.
-    #[arg(long, default_value = "localhost")]
+    #[arg(long)]
     pub mqtt_host: String,
 
     #[arg(long, default_value_t = 1883)]
     pub mqtt_port: u16,
 
-    #[arg(long, env = "MQTT_USERNAME")]
+    #[arg(long)]
     pub mqtt_username: Option<String>,
 
-    #[arg(long, env = "MQTT_PASSWORD")]
+    #[arg(long)]
     pub mqtt_password: Option<String>,
 
     #[arg(long, default_value = "lunaris")]
@@ -158,18 +150,6 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub sensor_vibrate_no_ack_wait: bool,
 
-    /// Default vibration intensity (1–100) for MQTT vibrate buttons.
-    #[arg(long, default_value_t = 64)]
-    pub vibration_intensity: u8,
-
-    /// Default duration (seconds) for MQTT vibrate buttons.
-    #[arg(long, default_value_t = 15)]
-    pub vibration_duration_sec: u32,
-
-    /// Default vibration pattern for MQTT vibrate buttons.
-    #[arg(long, value_enum, default_value_t = VibrationPatternArg::Single)]
-    pub vibration_pattern: VibrationPatternArg,
-
     /// `tracing` filter (e.g. `debug`, `info,lunaris=debug`).
     #[arg(long, default_value = "info")]
     pub log_level: String,
@@ -195,40 +175,56 @@ mod tests {
 
     #[test]
     fn effective_bauds_default_match_pod4() {
-        let cli = Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 921600);
     }
 
     #[test]
     fn pod3_sets_sensor_115200() {
-        let cli = Cli::parse_from(["lunaris", "--pod", "3"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "3", "--mqtt-host", "localhost"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 115200);
     }
 
     #[test]
     fn explicit_baud_overrides_pod3() {
-        let cli = Cli::parse_from(["lunaris", "--pod", "3", "--sensor-baud", "38400"]);
+        let cli = Cli::parse_from([
+            "lunaris",
+            "--pod",
+            "3",
+            "--sensor-baud",
+            "38400",
+            "--mqtt-host",
+            "localhost",
+        ]);
         assert_eq!(cli.effective_sensor_baud(), 38400);
     }
 
     #[test]
     fn pod4_explicit_same_as_default() {
-        let cli = Cli::parse_from(["lunaris", "--pod", "4"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 921600);
     }
 
     #[test]
     fn pod4_sensor_baud_can_be_overridden_to_38400() {
-        let cli = Cli::parse_from(["lunaris", "--pod", "4", "--sensor-baud", "38400"]);
+        let cli = Cli::parse_from([
+            "lunaris",
+            "--pod",
+            "4",
+            "--sensor-baud",
+            "38400",
+            "--mqtt-host",
+            "localhost",
+        ]);
         assert_eq!(cli.effective_sensor_baud(), 38400);
     }
 
     #[test]
     fn pod5_matches_pod4_bauds() {
-        let cli = Cli::parse_from(["lunaris", "--pod", "5"]);
+        let cli = Cli::parse_from(["lunaris", "--pod", "5", "--mqtt-host", "localhost"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 921600);
     }
