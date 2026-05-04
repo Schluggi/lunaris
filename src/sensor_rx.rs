@@ -186,7 +186,7 @@ fn handle_payload(
             } else {
                 tracing::warn!(
                     status,
-                    "Sensor: AlarmSet status (0xAC) — opensleep tests expect status 1; with `--sensor-vibrate-cancel-preamble` the first `0xAC` can be the cancel-SetAlarm ack; non-1 on the real alarm may still mean the MCU did not start vibration — watch for `Sensor: MCU text`"
+                    "Sensor: AlarmSet status (0xAC) — opensleep tests expect status 1; with cancel preamble on (default) the first `0xAC` can be the cancel-SetAlarm ack; non-1 on the real alarm may still mean the MCU did not start vibration — watch for `Sensor: MCU text`"
                 );
             }
         }

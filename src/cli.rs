@@ -141,9 +141,13 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub no_firmware_message_sensor: bool,
 
-    /// Minimum **maximum** raw capacitance among the three Sensor zones on one mattress side to report that side as **occupied**. Lower if presence never triggers; raise if it sticks ON when empty (`RUST_LOG` `trace` shows zone values). Unused after successful **MQTT calibrate presence** (opensleep baseline + Δ + debounce applies).
+    /// Minimum **maximum** raw capacitance among the three Sensor zones on one mattress side to report that side as **occupied**. Lower if presence never triggers; raise if it sticks ON when empty (`RUST_LOG` `trace` shows zone values). Unused after successful **MQTT calibrate presence** (opensleep baseline + Δ + debounce applies). **Runtime:** Home Assistant MQTT **Presence Cap Threshold** number (same bounds as opensleep tuning).
     #[arg(long, default_value_t = 800)]
     pub presence_cap_threshold: u16,
+
+    /// Δ above calibrated per-zone baseline before a zone counts toward occupancy (opensleep `DEFAULT_THRESHOLD` = **50**). Only used **after** **MQTT Calibrate presence**. **Runtime:** Home Assistant MQTT **Presence Baseline Delta** number.
+    #[arg(long, default_value_t = 50)]
+    pub presence_baseline_delta: u16,
 
     /// Duration (seconds) to average capacitance **with the mattress empty**, after MQTT **Calibrate presence** (opensleep `CALIBRATION_DURATION` = 10 s).
     #[arg(long, default_value_t = 10)]
@@ -157,6 +161,22 @@ pub struct Cli {
     #[arg(long, default_value = "narcolepsy_calibrate_presence")]
     pub discovery_object_id_calibrate_presence: String,
 
+    /// `<object_id>` for `homeassistant/number/.../config` (uncalibrated presence: max zone vs this raw threshold).
+    #[arg(long, default_value = "narcolepsy_presence_cap_threshold")]
+    pub discovery_object_id_presence_cap_threshold: String,
+
+    /// `<object_id>` for `homeassistant/number/.../config` (calibrated presence: Δ above baseline per zone, opensleep default 50).
+    #[arg(long, default_value = "narcolepsy_presence_baseline_delta")]
+    pub discovery_object_id_presence_baseline_delta: String,
+
+    /// `<object_id>` for `homeassistant/sensor/.../config` (persisted calibrated zone baselines `[z0…z5]` JSON; MQTT retained across restarts).
+    #[arg(long, default_value = "narcolepsy_presence_baseline_zones")]
+    pub discovery_object_id_presence_baseline_zones: String,
+
+    /// `<object_id>` for `homeassistant/binary_sensor/.../config` (presence baseline calibration window in progress).
+    #[arg(long, default_value = "narcolepsy_presence_calibration")]
+    pub discovery_object_id_presence_calibration: String,
+
     /// Skip Sensor **bootloader handshake** (38400: Ping + JumpToFirmware, then `--sensor-baud`). Opensleep does this before firmware traffic; disable only if your MCU is already in firmware-only mode and the handshake causes trouble.
     #[arg(long, default_value_t = false)]
     pub no_sensor_bootloader_handshake: bool,
@@ -165,9 +185,9 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub sensor_vibrate_no_ack_wait: bool,
 
-    /// Prepend opensleep-style **alarm cancel** (`SetAlarm` intensity/duration 0) before piezo priming. Try **`false`** (default) when debugging **`AlarmSet` status 2** — the first `0xAC` line in logs may be the cancel frame’s ack, not the real alarm.
+    /// Disable opensleep-style **alarm cancel** (`SetAlarm` intensity/duration 0) before piezo priming. Omit this flag to keep cancel preamble **on** (default). When debugging **`AlarmSet` status 2**, try **`--no-sensor-vibrate-cancel-preamble`** — the first `0xAC` line in logs may be the cancel frame’s ack, not the real alarm.
     #[arg(long, default_value_t = false)]
-    pub sensor_vibrate_cancel_preamble: bool,
+    pub no_sensor_vibrate_cancel_preamble: bool,
 
     /// `<object_id>` for `homeassistant/button/<object_id>/config` (vibrate left).
     #[arg(long, default_value = "narcolepsy_vibrate_left")]
@@ -189,7 +209,7 @@ pub struct Cli {
     #[arg(long, default_value = "narcolepsy_vibration_pattern")]
     pub discovery_object_id_vibration_pattern: String,
 
-    /// `<object_id>` for `homeassistant/switch/<object_id>/config` (vibration cancel preamble).
+    /// `<object_id>` for `homeassistant/switch/<object_id>/config` (Vibration Cancel Preamble).
     #[arg(long, default_value = "narcolepsy_vibration_cancel_preamble")]
     pub discovery_object_id_vibration_cancel_preamble: String,
 
@@ -205,7 +225,7 @@ pub struct Cli {
     #[arg(long, default_value = "narcolepsy_presence_any")]
     pub discovery_object_id_presence_any: String,
 
-    /// `<object_id>` for `homeassistant/binary_sensor/.../config` (Frozen reservoir present).
+    /// `<object_id>` for `homeassistant/sensor/.../config` (Frozen reservoir present).
     #[arg(long, default_value = "narcolepsy_water_tank")]
     pub discovery_object_id_water_tank: String,
 

@@ -1,4 +1,5 @@
-//! Pod host files mirrored to MQTT state topics of the same path string (`/deviceinfo/…`).
+//! Reads Pod host paths under **`/deviceinfo/`**; [`crate::mqtt_bridge`] publishes payloads on
+//! **`{topic_prefix}/sensor/deviceinfo_device_{label|id}/state`** (retained), not on filesystem paths.
 //!
 //! SPDX-License-Identifier: GPL-3.0-only
 

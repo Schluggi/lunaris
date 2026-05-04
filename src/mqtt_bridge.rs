@@ -6,7 +6,7 @@
 //! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 
 use rumqttc::{AsyncClient, ConnectionError, Event, Incoming, LastWill, MqttOptions, Publish, QoS};
@@ -26,9 +26,6 @@ use crate::sensor_rx::SensorCapacitanceZones;
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
-/// MQTT text sensor state topics (leading `/` — not under [`BridgeConfig::topic_prefix`]).
-const DEVICEINFO_DEVICE_LABEL_STATE_TOPIC: &str = "/deviceinfo/device-label";
-const DEVICEINFO_DEVICE_ID_STATE_TOPIC: &str = "/deviceinfo/device-id";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "narcolepsy_deviceinfo_device_label";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "narcolepsy_deviceinfo_device_id";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
@@ -50,7 +47,7 @@ impl Default for VibrationSettings {
             intensity: 64,
             duration_sec: 15,
             pattern: AlarmPattern::Single,
-            cancel_preamble: false,
+            cancel_preamble: true,
         }
     }
 }
@@ -99,10 +96,18 @@ pub struct BridgeConfig {
     pub discovery_object_id_presence_right: String,
     pub discovery_object_id_presence_any: String,
     pub discovery_object_id_calibrate_presence: String,
+    pub discovery_object_id_presence_cap_threshold: String,
+    pub discovery_object_id_presence_baseline_delta: String,
+    pub discovery_object_id_presence_baseline_zones: String,
+    pub discovery_object_id_presence_calibration: String,
     pub discovery_object_id_water_tank: String,
     pub discovery_object_id_firmware_message: String,
-    /// Uncalibrated: side occupied if **`max`** of three zones `>= threshold`. After MQTT calibration: opensleep baseline + Δ + debounce.
-    pub presence_cap_threshold: u16,
+    /// Uncalibrated: side occupied if **`max`** of three zones `>= threshold` (MQTT **Presence Cap Threshold** updates this at runtime).
+    pub presence_cap_threshold: Arc<AtomicU16>,
+    /// Calibrated: zone counts when raw `>` baseline + Δ (MQTT **Presence Baseline Delta**; opensleep default **50**).
+    pub presence_baseline_delta: Arc<AtomicU16>,
+    /// Calibrated baseline grid from MQTT (**retained**) or runtime **Calibrate presence**; synced into the occupancy task each `0x33` sample.
+    pub presence_baselines_mtx: Arc<Mutex<Option<[u16; 6]>>>,
     /// Window for MQTT **Calibrate presence** (average samples → baseline per zone; opensleep default 10.).
     pub presence_calibrate_secs: u64,
     /// MQTT occupancy from Sensor capacitance (needs open Sensor UART; see [`crate::main`]).
@@ -116,7 +121,7 @@ pub struct BridgeConfig {
     pub sensor_tx: Option<mpsc::Sender<Vec<Vec<u8>>>>,
     /// Publish MQTT sensors for Frozen inbound temperatures (`0x41` / `0xC1`); set by [`crate::main`] with [`crate::frozen_link`].
     pub frozen_temperature_discovery: bool,
-    /// MQTT **Water Tank** binary_sensor from Frozen `0x07` messages ([`crate::frozen_rx`]).
+    /// MQTT **Water Tank** binary sensor (`device_class` **plug**) from Frozen `0x07` messages ([`crate::frozen_rx`]).
     pub frozen_water_tank_discovery: bool,
     /// MQTT text **sensor** from Frozen `0x07` UTF‑8 message bodies (all lines, not only tank).
     pub frozen_firmware_message_discovery: bool,
@@ -179,9 +184,29 @@ impl BridgeConfig {
             discovery_object_id_calibrate_presence: cli
                 .discovery_object_id_calibrate_presence
                 .clone(),
+            discovery_object_id_presence_cap_threshold: cli
+                .discovery_object_id_presence_cap_threshold
+                .clone(),
+            discovery_object_id_presence_baseline_delta: cli
+                .discovery_object_id_presence_baseline_delta
+                .clone(),
+            discovery_object_id_presence_baseline_zones: cli
+                .discovery_object_id_presence_baseline_zones
+                .clone(),
+            discovery_object_id_presence_calibration: cli
+                .discovery_object_id_presence_calibration
+                .clone(),
             discovery_object_id_water_tank: cli.discovery_object_id_water_tank.clone(),
             discovery_object_id_firmware_message: cli.discovery_object_id_firmware_message.clone(),
-            presence_cap_threshold: cli.presence_cap_threshold,
+            presence_cap_threshold: Arc::new(AtomicU16::new(
+                cli.presence_cap_threshold
+                    .clamp(PRESENCE_CAP_THRESHOLD_MIN, PRESENCE_CAP_THRESHOLD_MAX),
+            )),
+            presence_baseline_delta: Arc::new(AtomicU16::new(
+                cli.presence_baseline_delta
+                    .clamp(PRESENCE_BASELINE_DELTA_MIN, PRESENCE_BASELINE_DELTA_MAX),
+            )),
+            presence_baselines_mtx: Arc::new(Mutex::new(None)),
             presence_calibrate_secs: cli.presence_calibrate_secs.max(3),
             presence_discovery: false,
             presence_debug: cli.presence_debug,
@@ -192,7 +217,7 @@ impl BridgeConfig {
                     crate::cli::VibrationPatternArg::Single => AlarmPattern::Single,
                     crate::cli::VibrationPatternArg::Double => AlarmPattern::Double,
                 },
-                cancel_preamble: cli.sensor_vibrate_cancel_preamble,
+                cancel_preamble: !cli.no_sensor_vibrate_cancel_preamble,
             })),
             frozen_tx: None,
             sensor_tx: None,
@@ -464,6 +489,61 @@ impl BridgeConfig {
         )
     }
 
+    pub fn presence_cap_threshold_command_topic(&self) -> String {
+        format!("{}/number/presence_cap_threshold/set", self.topic_prefix)
+    }
+
+    pub fn presence_cap_threshold_state_topic(&self) -> String {
+        format!("{}/number/presence_cap_threshold/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_presence_cap_threshold(&self) -> String {
+        format!(
+            "{}/number/{}/config",
+            self.discovery_prefix, self.discovery_object_id_presence_cap_threshold
+        )
+    }
+
+    pub fn presence_baseline_delta_command_topic(&self) -> String {
+        format!("{}/number/presence_baseline_delta/set", self.topic_prefix)
+    }
+
+    pub fn presence_baseline_delta_state_topic(&self) -> String {
+        format!("{}/number/presence_baseline_delta/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_presence_baseline_delta(&self) -> String {
+        format!(
+            "{}/number/{}/config",
+            self.discovery_prefix, self.discovery_object_id_presence_baseline_delta
+        )
+    }
+
+    pub fn presence_baseline_zones_state_topic(&self) -> String {
+        format!("{}/sensor/presence_baseline_zones/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_presence_baseline_zones(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, self.discovery_object_id_presence_baseline_zones
+        )
+    }
+
+    pub fn presence_calibration_state_topic(&self) -> String {
+        format!(
+            "{}/binary_sensor/presence_calibration/state",
+            self.topic_prefix
+        )
+    }
+
+    pub fn discovery_topic_presence_calibration(&self) -> String {
+        format!(
+            "{}/binary_sensor/{}/config",
+            self.discovery_prefix, self.discovery_object_id_presence_calibration
+        )
+    }
+
     pub fn water_tank_state_topic(&self) -> String {
         format!("{}/binary_sensor/water_tank/state", self.topic_prefix)
     }
@@ -484,6 +564,14 @@ impl BridgeConfig {
             "{}/sensor/{}/config",
             self.discovery_prefix, self.discovery_object_id_firmware_message
         )
+    }
+
+    pub fn deviceinfo_device_label_state_topic(&self) -> String {
+        format!("{}/sensor/deviceinfo_device_label/state", self.topic_prefix)
+    }
+
+    pub fn deviceinfo_device_id_state_topic(&self) -> String {
+        format!("{}/sensor/deviceinfo_device_id/state", self.topic_prefix)
     }
 
     pub fn discovery_topic_deviceinfo_device_label(&self) -> String {
@@ -683,7 +771,7 @@ fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> Str
 
 fn discovery_payload_vibration_intensity_number(config: &BridgeConfig) -> String {
     json!({
-        "name": "Vibration intensity",
+        "name": "Vibration Intensity",
         "command_topic": config.vibration_intensity_command_topic(),
         "state_topic": config.vibration_intensity_state_topic(),
         "min": 1,
@@ -704,7 +792,7 @@ fn discovery_payload_vibration_intensity_number(config: &BridgeConfig) -> String
 
 fn discovery_payload_vibration_duration_number(config: &BridgeConfig) -> String {
     json!({
-        "name": "Vibration duration",
+        "name": "Vibration Duration",
         "command_topic": config.vibration_duration_command_topic(),
         "state_topic": config.vibration_duration_state_topic(),
         "min": 1,
@@ -726,7 +814,7 @@ fn discovery_payload_vibration_duration_number(config: &BridgeConfig) -> String 
 
 fn discovery_payload_vibration_pattern_select(config: &BridgeConfig) -> String {
     json!({
-        "name": "Vibration pattern",
+        "name": "Vibration Pattern",
         "command_topic": config.vibration_pattern_command_topic(),
         "state_topic": config.vibration_pattern_state_topic(),
         "options": ["single", "double"],
@@ -744,12 +832,13 @@ fn discovery_payload_vibration_pattern_select(config: &BridgeConfig) -> String {
 
 fn discovery_payload_vibration_cancel_preamble_switch(config: &BridgeConfig) -> String {
     json!({
-        "name": "Vibration cancel preamble",
+        "name": "Vibration Cancel Preamble",
         "command_topic": config.vibration_cancel_preamble_command_topic(),
         "state_topic": config.vibration_cancel_preamble_state_topic(),
         "payload_on": "ON",
         "payload_off": "OFF",
         "entity_category": "config",
+        "enabled_by_default": false,
         "unique_id": format!("{}_vibration_cancel_preamble", config.device_identifier),
         "device": config.device_json(),
         "origin": {
@@ -768,7 +857,6 @@ fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
         "payload_on": "ON",
         "payload_off": "OFF",
         "device_class": "plug",
-        "icon": "mdi:water",
         "unique_id": format!("{}_water_tank", config.device_identifier),
         "device": config.device_json(),
         "origin": {
@@ -801,7 +889,7 @@ fn discovery_payload_firmware_message(config: &BridgeConfig) -> String {
 fn discovery_payload_deviceinfo_device_label(config: &BridgeConfig) -> String {
     json!({
         "name": "Device Label",
-        "state_topic": DEVICEINFO_DEVICE_LABEL_STATE_TOPIC,
+        "state_topic": config.deviceinfo_device_label_state_topic(),
         "icon": "mdi:label",
         "entity_category": "diagnostic",
         "enabled_by_default": false,
@@ -819,7 +907,7 @@ fn discovery_payload_deviceinfo_device_label(config: &BridgeConfig) -> String {
 fn discovery_payload_deviceinfo_device_id(config: &BridgeConfig) -> String {
     json!({
         "name": "Device ID",
-        "state_topic": DEVICEINFO_DEVICE_ID_STATE_TOPIC,
+        "state_topic": config.deviceinfo_device_id_state_topic(),
         "icon": "mdi:identifier",
         "entity_category": "diagnostic",
         "enabled_by_default": false,
@@ -874,6 +962,25 @@ fn discovery_payload_presence_any(config: &BridgeConfig) -> String {
     .to_string()
 }
 
+fn discovery_payload_presence_calibration_binary_sensor(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Presence Calibration",
+        "state_topic": config.presence_calibration_state_topic(),
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device_class": "running",
+        "icon": "mdi:leak",
+        "unique_id": format!("{}_presence_calibration", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 fn discovery_payload_calibrate_presence_button(config: &BridgeConfig) -> String {
     json!({
         "name": "Calibrate Presence",
@@ -891,8 +998,74 @@ fn discovery_payload_calibrate_presence_button(config: &BridgeConfig) -> String 
     .to_string()
 }
 
-/// opensleep [`PresenceConfig.threshold`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/presence.rs) (`DEFAULT_THRESHOLD`).
-const PRESENCE_BASELINE_DELTA: u16 = 50;
+fn discovery_payload_presence_cap_threshold_number(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Presence Cap Threshold",
+        "command_topic": config.presence_cap_threshold_command_topic(),
+        "state_topic": config.presence_cap_threshold_state_topic(),
+        "min": PRESENCE_CAP_THRESHOLD_MIN,
+        "max": PRESENCE_CAP_THRESHOLD_MAX,
+        "step": 1,
+        "mode": "box",
+        "entity_category": "config",
+        "enabled_by_default": false,
+        "unique_id": format!("{}_presence_cap_threshold", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_presence_baseline_zones_sensor(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Presence Baseline Zones",
+        "state_topic": config.presence_baseline_zones_state_topic(),
+        "unique_id": format!("{}_presence_baseline_zones", config.device_identifier),
+        "enabled_by_default": false,
+        "entity_category": "diagnostic",
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_presence_baseline_delta_number(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Presence Baseline Delta",
+        "command_topic": config.presence_baseline_delta_command_topic(),
+        "state_topic": config.presence_baseline_delta_state_topic(),
+        "min": PRESENCE_BASELINE_DELTA_MIN,
+        "max": PRESENCE_BASELINE_DELTA_MAX,
+        "step": 1,
+        "mode": "box",
+        "entity_category": "config",
+        "enabled_by_default": false,
+        "unique_id": format!("{}_presence_baseline_delta", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+/// Raw capacitance MQTT number bounds (uncalibrated max‑per‑side vs threshold).
+const PRESENCE_CAP_THRESHOLD_MIN: u16 = 1;
+const PRESENCE_CAP_THRESHOLD_MAX: u16 = u16::MAX;
+
+/// opensleep [`PresenceConfig.threshold`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/presence.rs) (`DEFAULT_THRESHOLD` = **50**) — HA **Presence Baseline Delta** default; clamped to this range at runtime.
+const PRESENCE_BASELINE_DELTA_MIN: u16 = 1;
+const PRESENCE_BASELINE_DELTA_MAX: u16 = 2000;
 
 /// opensleep [`PresenceConfig.debounce_count`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/presence.rs) (`DEFAULT_DEBOUNCE`).
 const PRESENCE_DEBOUNCE_FRAMES: u8 = 5;
@@ -907,6 +1080,19 @@ impl PresenceInferenceState {
     fn set_baselines(&mut self, b: [u16; 6]) {
         self.baselines = Some(b);
         self.debounce = [0; 6];
+    }
+
+    fn sync_baselines_from_shared(&mut self, shared: &Option<[u16; 6]>) {
+        if &self.baselines == shared {
+            return;
+        }
+        match shared {
+            Some(b) => self.set_baselines(*b),
+            None => {
+                self.baselines = None;
+                self.debounce = [0; 6];
+            }
+        }
     }
 }
 
@@ -924,6 +1110,49 @@ fn mean_baselines_from_samples(samples: &[[u16; 6]]) -> Option<[u16; 6]> {
     Some(sums.map(|sum| (sum / n) as u16))
 }
 
+/// Slack above strongest per‑mattress‑side capacitance during the calibration window → **Presence Cap Threshold**
+/// (single threshold for left and right vs max‑of‑zones in uncalibrated mode).
+const PRESENCE_CALIB_CAP_PADDING: u16 = 48;
+
+/// Slack above strongest |sample − baseline| per zone → **Presence Baseline Delta** (Δ over mean baseline).
+const PRESENCE_CALIB_DELTA_PADDING: u16 = 16;
+
+/// Derive MQTT **Presence Cap Threshold** / **Presence Baseline Delta** from empty‑bed **`0x33`** samples (`cal_samples` window).
+///
+/// Threshold: max(left three zones, right three zones) across samples plus padding — empty bed stays below occupancy in **uncalibrated** mode next run.
+///
+/// Δ: strongest absolute deviation from the computed baseline grid plus padding — noise headroom vs opensleep‑style fixed **50**.
+fn presence_tune_from_calibration_samples(
+    samples: &[[u16; 6]],
+    baselines: &[u16; 6],
+) -> (u16, u16) {
+    let mut peak_abs_dev: u16 = 0;
+    for s in samples {
+        for i in 0..6 {
+            let dev = if s[i] > baselines[i] {
+                s[i] - baselines[i]
+            } else {
+                baselines[i] - s[i]
+            };
+            peak_abs_dev = peak_abs_dev.max(dev);
+        }
+    }
+    let mut peak_left_side = 0u16;
+    let mut peak_right_side = 0u16;
+    for s in samples {
+        peak_left_side = peak_left_side.max(s[0].max(s[1]).max(s[2]));
+        peak_right_side = peak_right_side.max(s[3].max(s[4]).max(s[5]));
+    }
+    let peak_side_signal = peak_left_side.max(peak_right_side);
+    let cap = peak_side_signal
+        .saturating_add(PRESENCE_CALIB_CAP_PADDING)
+        .clamp(PRESENCE_CAP_THRESHOLD_MIN, PRESENCE_CAP_THRESHOLD_MAX);
+    let delta = peak_abs_dev
+        .saturating_add(PRESENCE_CALIB_DELTA_PADDING)
+        .clamp(PRESENCE_BASELINE_DELTA_MIN, PRESENCE_BASELINE_DELTA_MAX);
+    (cap, delta)
+}
+
 /// Uncalibrated: max-of-three zones vs absolute threshold (`--presence-cap-threshold`).
 fn occupancy_uncalibrated_max(z: &SensorCapacitanceZones, abs_threshold: u16) -> (bool, bool) {
     let left_max = z.zones[..3].iter().copied().max().unwrap_or(0);
@@ -935,12 +1164,13 @@ fn occupancy_uncalibrated_max(z: &SensorCapacitanceZones, abs_threshold: u16) ->
 fn occupancy_calibrated(
     z: &SensorCapacitanceZones,
     inference: &mut PresenceInferenceState,
+    baseline_delta: u16,
 ) -> (bool, bool) {
     let Some(ref baselines) = inference.baselines else {
         return (false, false);
     };
     for (i, &b) in baselines.iter().enumerate() {
-        if z.zones[i] > b.saturating_add(PRESENCE_BASELINE_DELTA) {
+        if z.zones[i] > b.saturating_add(baseline_delta) {
             inference.debounce[i] = inference.debounce[i].saturating_add(1);
         } else {
             inference.debounce[i] = 0;
@@ -959,9 +1189,10 @@ fn inference_occupancy(
     z: &SensorCapacitanceZones,
     inference: &mut PresenceInferenceState,
     fallback_abs_threshold: u16,
+    baseline_delta: u16,
 ) -> (bool, bool) {
     if inference.baselines.is_some() {
-        occupancy_calibrated(z, inference)
+        occupancy_calibrated(z, inference, baseline_delta)
     } else {
         occupancy_uncalibrated_max(z, fallback_abs_threshold)
     }
@@ -972,6 +1203,7 @@ fn log_presence_debug(
     z: &SensorCapacitanceZones,
     inference: &PresenceInferenceState,
     fallback_abs_threshold: u16,
+    baseline_delta: u16,
     left_on: bool,
     right_on: bool,
     calibrating: bool,
@@ -998,7 +1230,7 @@ fn log_presence_debug(
                 zones = ?z.zones,
                 baseline = ?b,
                 debounce_per_zone = ?inference.debounce,
-                delta = PRESENCE_BASELINE_DELTA,
+                delta = baseline_delta,
                 debounce_need = PRESENCE_DEBOUNCE_FRAMES,
                 occupied_left = left_on,
                 occupied_right = right_on,
@@ -1065,6 +1297,26 @@ fn discovery_payload_frozen_temperature(
         "availability": config.availability_json(),
     })
     .to_string()
+}
+
+async fn publish_presence_calibration_running_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    running: bool,
+) {
+    let qos = QoS::AtLeastOnce;
+    let payload = if running { "ON" } else { "OFF" };
+    if let Err(e) = client
+        .publish(
+            config.presence_calibration_state_topic(),
+            qos,
+            true,
+            payload.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish presence calibration running state");
+    }
 }
 
 async fn publish_presence_readings(
@@ -1217,6 +1469,34 @@ impl Default for ClimateSideState {
     }
 }
 
+fn ingest_climate_mode_from_state_payload(st: &mut ClimateSideState, payload: &[u8]) -> bool {
+    let Ok(mode_str) = std::str::from_utf8(payload) else {
+        return false;
+    };
+    match mode_str.trim() {
+        CLIMATE_MODE_OFF => st.enabled = false,
+        CLIMATE_MODE_HEAT_COOL => st.enabled = true,
+        _ => return false,
+    };
+    true
+}
+
+fn ingest_climate_temperature_from_state_payload(
+    st: &mut ClimateSideState,
+    config: &BridgeConfig,
+    payload: &[u8],
+) -> bool {
+    let Ok(text) = std::str::from_utf8(payload) else {
+        return false;
+    };
+    let Ok(temp_c) = text.trim().parse::<f64>() else {
+        return false;
+    };
+    let clamped = temp_c.clamp(config.climate_min_temp, config.climate_max_temp);
+    st.target_centi = (clamped * 100.0).round() as u16;
+    true
+}
+
 fn climate_action_label(side: BedSide) -> &'static str {
     match side {
         BedSide::Left => "climate_left",
@@ -1237,8 +1517,8 @@ struct PublishHandlerState {
     startup_led_on: Arc<Mutex<bool>>,
     /// Set when an inbound `state_topic` message was sent with the MQTT retain flag (broker-stored preference), not a live publish.
     startup_led_broker_retain_seen: Arc<AtomicBool>,
-    /// While **true**, inbound vibration `…/state` topics update the mutex (broker retain on connect). Cleared after bootstrap so later `state` echoes do not overwrite values set via `…/set` (no `unsubscribe` — rumqttc `unsubscribe` here deadlocked the client on some brokers).
-    vibration_bootstrap_state_topics: Arc<AtomicBool>,
+    /// While **true**, inbound retained **`state_topic`** payloads repopulate UI-facing settings so broker-stored HA choices survive narcolepsy restarts (climate, MQTT light snapshot, vibration, presence). Ignore after drain — later `…/state` echoes must not overwrite values set via `…/set` (no `unsubscribe`).
+    mqtt_ha_state_bootstrap: Arc<AtomicBool>,
     climate_left: Arc<Mutex<ClimateSideState>>,
     climate_right: Arc<Mutex<ClimateSideState>>,
     /// Notify presence task to start baseline sampling (MQTT **Calibrate presence**).
@@ -1478,6 +1758,168 @@ fn parse_and_clamp_duration_secs(payload: &[u8]) -> Option<u32> {
     }
     let v = v.round() as i64;
     Some((v.clamp(1, 600)) as u32)
+}
+
+fn parse_and_clamp_presence_cap_threshold_mqtt(payload: &[u8]) -> Option<u16> {
+    let t = std::str::from_utf8(payload).ok()?.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let v: f64 = t.parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    let v = v.round() as i64;
+    Some(v.clamp(
+        i64::from(PRESENCE_CAP_THRESHOLD_MIN),
+        i64::from(PRESENCE_CAP_THRESHOLD_MAX),
+    ) as u16)
+}
+
+fn parse_and_clamp_presence_baseline_delta_mqtt(payload: &[u8]) -> Option<u16> {
+    let t = std::str::from_utf8(payload).ok()?.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let v: f64 = t.parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    let v = v.round() as i64;
+    Some(v.clamp(
+        i64::from(PRESENCE_BASELINE_DELTA_MIN),
+        i64::from(PRESENCE_BASELINE_DELTA_MAX),
+    ) as u16)
+}
+
+async fn publish_presence_cap_threshold_state(client: &AsyncClient, config: &BridgeConfig, v: u16) {
+    let qos = QoS::AtLeastOnce;
+    let body = format!("{v}");
+    if let Err(e) = client
+        .publish(
+            config.presence_cap_threshold_state_topic(),
+            qos,
+            true,
+            body.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish presence cap threshold state");
+    }
+}
+
+async fn publish_presence_baseline_delta_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    v: u16,
+) {
+    let qos = QoS::AtLeastOnce;
+    let body = format!("{v}");
+    if let Err(e) = client
+        .publish(
+            config.presence_baseline_delta_state_topic(),
+            qos,
+            true,
+            body.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish presence baseline delta state");
+    }
+}
+
+async fn publish_presence_sensitivity_states(client: &AsyncClient, config: &BridgeConfig) {
+    let thr = config.presence_cap_threshold.load(Ordering::Relaxed);
+    let delta = config.presence_baseline_delta.load(Ordering::Relaxed);
+    publish_presence_cap_threshold_state(client, config, thr).await;
+    publish_presence_baseline_delta_state(client, config, delta).await;
+}
+
+/// JSON **`[z0,z1,…,z5]`** or `{"zones":[…]}` — broker-retained copy of calibrated baselines.
+#[derive(Deserialize)]
+struct PresenceBaselineZonesJson {
+    zones: [u16; 6],
+}
+
+fn parse_presence_baseline_zones_payload(payload: &[u8]) -> Option<[u16; 6]> {
+    let t = std::str::from_utf8(payload).ok()?.trim();
+    if t.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<[u16; 6]>(t).ok().or_else(|| {
+        serde_json::from_str::<PresenceBaselineZonesJson>(t)
+            .ok()
+            .map(|w| w.zones)
+    })
+}
+
+async fn publish_presence_baseline_zones_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    zones: &[u16; 6],
+) {
+    let qos = QoS::AtLeastOnce;
+    let body = match serde_json::to_string(zones) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(?e, "serialize presence baseline zones");
+            return;
+        }
+    };
+    if let Err(e) = client
+        .publish(
+            config.presence_baseline_zones_state_topic(),
+            qos,
+            true,
+            body.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish presence baseline zones state");
+    }
+}
+
+/// After broker retain drain: republish numbers + optional zones (refreshes HA without clobbering retain during discovery).
+async fn publish_presence_bootstrap_finalize(client: &AsyncClient, config: &BridgeConfig) {
+    publish_presence_sensitivity_states(client, config).await;
+    let snap = *config.presence_baselines_mtx.lock().await;
+    if let Some(ref z) = snap {
+        publish_presence_baseline_zones_state(client, config, z).await;
+    }
+}
+
+async fn apply_presence_cap_threshold_mqtt(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    payload: &[u8],
+) {
+    let Some(v) = parse_and_clamp_presence_cap_threshold_mqtt(payload) else {
+        tracing::trace!("ignored presence cap threshold MQTT payload");
+        return;
+    };
+    let prev = config.presence_cap_threshold.load(Ordering::SeqCst);
+    if prev == v {
+        return;
+    }
+    config.presence_cap_threshold.store(v, Ordering::SeqCst);
+    publish_presence_cap_threshold_state(client, config, v).await;
+}
+
+async fn apply_presence_baseline_delta_mqtt(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    payload: &[u8],
+) {
+    let Some(v) = parse_and_clamp_presence_baseline_delta_mqtt(payload) else {
+        tracing::trace!("ignored presence baseline delta MQTT payload");
+        return;
+    };
+    let prev = config.presence_baseline_delta.load(Ordering::SeqCst);
+    if prev == v {
+        return;
+    }
+    config.presence_baseline_delta.store(v, Ordering::SeqCst);
+    publish_presence_baseline_delta_state(client, config, v).await;
 }
 
 async fn publish_vibration_intensity_state(client: &AsyncClient, config: &BridgeConfig, v: u8) {
@@ -1815,7 +2257,7 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         let (label_payload, id_payload) = deviceinfo::device_label_and_id_payloads();
         if let Err(e) = client
             .publish(
-                DEVICEINFO_DEVICE_LABEL_STATE_TOPIC,
+                config.deviceinfo_device_label_state_topic(),
                 qos,
                 true,
                 label_payload,
@@ -1825,7 +2267,12 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             tracing::error!(?e, "publish deviceinfo device-label state");
         }
         if let Err(e) = client
-            .publish(DEVICEINFO_DEVICE_ID_STATE_TOPIC, qos, true, id_payload)
+            .publish(
+                config.deviceinfo_device_id_state_topic(),
+                qos,
+                true,
+                id_payload,
+            )
             .await
         {
             tracing::error!(?e, "publish deviceinfo device-id state");
@@ -1960,6 +2407,7 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         }
         // HA shows "Unknown" until a retained state arrives; capacitance `0x33` may be rare/absent at boot.
         publish_presence_readings(client, config, false, false).await;
+        publish_presence_calibration_running_state(client, config, false).await;
         let disc_cal = discovery_payload_calibrate_presence_button(config);
         if let Err(e) = client
             .publish(
@@ -1971,6 +2419,54 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             .await
         {
             tracing::error!(?e, "publish presence calibration button discovery");
+        }
+        let disc_thr = discovery_payload_presence_cap_threshold_number(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_presence_cap_threshold(),
+                qos,
+                true,
+                disc_thr,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish presence cap threshold discovery");
+        }
+        let disc_delta = discovery_payload_presence_baseline_delta_number(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_presence_baseline_delta(),
+                qos,
+                true,
+                disc_delta,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish presence baseline delta discovery");
+        }
+        let disc_z = discovery_payload_presence_baseline_zones_sensor(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_presence_baseline_zones(),
+                qos,
+                true,
+                disc_z,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish presence baseline zones discovery");
+        }
+        let disc_cal_run = discovery_payload_presence_calibration_binary_sensor(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_presence_calibration(),
+                qos,
+                true,
+                disc_cal_run,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish presence calibration running discovery");
         }
     }
     if config.frozen_temperature_discovery {
@@ -2085,6 +2581,23 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
         {
             tracing::error!(?e, side = ?side, "subscribe climate temperature topic");
         }
+        if let Err(e) = client
+            .subscribe(config.climate_mode_state_topic(side), qos)
+            .await
+        {
+            tracing::error!(?e, side = ?side, "subscribe climate mode state topic (broker retain)");
+        }
+        if let Err(e) = client
+            .subscribe(config.climate_temperature_state_topic(side), qos)
+            .await
+        {
+            tracing::error!(?e, side = ?side, "subscribe climate temperature state topic (broker retain)");
+        }
+    }
+    if config.i2c_device.is_some() {
+        if let Err(e) = client.subscribe(config.light_state_topic(), qos).await {
+            tracing::error!(?e, "subscribe light state topic (broker retain)");
+        }
     }
     if config.sensor_device.is_some() {
         for side in [BedSide::Left, BedSide::Right] {
@@ -2115,6 +2628,17 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
                 .await
             {
                 tracing::error!(?e, "subscribe calibrate_presence button topic");
+            }
+            for topic in [
+                config.presence_cap_threshold_command_topic(),
+                config.presence_cap_threshold_state_topic(),
+                config.presence_baseline_delta_command_topic(),
+                config.presence_baseline_delta_state_topic(),
+                config.presence_baseline_zones_state_topic(),
+            ] {
+                if let Err(e) = client.subscribe(topic.as_str(), qos).await {
+                    tracing::error!(?e, topic = %topic, "subscribe presence sensitivity topic");
+                }
             }
         }
     }
@@ -2257,6 +2781,41 @@ async fn handle_publish(
         return;
     }
 
+    if config.sensor_device.is_some()
+        && config.presence_discovery
+        && st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst)
+    {
+        if p.topic == config.presence_cap_threshold_state_topic() {
+            if let Some(v) = parse_and_clamp_presence_cap_threshold_mqtt(&p.payload) {
+                config.presence_cap_threshold.store(v, Ordering::SeqCst);
+            }
+            return;
+        }
+        if p.topic == config.presence_baseline_delta_state_topic() {
+            if let Some(v) = parse_and_clamp_presence_baseline_delta_mqtt(&p.payload) {
+                config.presence_baseline_delta.store(v, Ordering::SeqCst);
+            }
+            return;
+        }
+        if p.topic == config.presence_baseline_zones_state_topic() {
+            if let Some(z) = parse_presence_baseline_zones_payload(p.payload.as_ref()) {
+                *config.presence_baselines_mtx.lock().await = Some(z);
+            }
+            return;
+        }
+    }
+
+    if config.sensor_device.is_some() && config.presence_discovery {
+        if p.topic == config.presence_cap_threshold_command_topic() {
+            apply_presence_cap_threshold_mqtt(client, config, &p.payload).await;
+            return;
+        }
+        if p.topic == config.presence_baseline_delta_command_topic() {
+            apply_presence_baseline_delta_mqtt(client, config, &p.payload).await;
+            return;
+        }
+    }
+
     if config.sensor_device.is_some() {
         if p.topic == config.vibration_intensity_command_topic() {
             apply_vibration_intensity_mqtt(client, config, &p.payload).await;
@@ -2275,25 +2834,25 @@ async fn handle_publish(
             return;
         }
         if p.topic == config.vibration_intensity_state_topic() {
-            if st.vibration_bootstrap_state_topics.load(Ordering::SeqCst) {
+            if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
                 apply_vibration_intensity_mqtt(client, config, &p.payload).await;
             }
             return;
         }
         if p.topic == config.vibration_duration_state_topic() {
-            if st.vibration_bootstrap_state_topics.load(Ordering::SeqCst) {
+            if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
                 apply_vibration_duration_mqtt(client, config, &p.payload).await;
             }
             return;
         }
         if p.topic == config.vibration_pattern_state_topic() {
-            if st.vibration_bootstrap_state_topics.load(Ordering::SeqCst) {
+            if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
                 apply_vibration_pattern_mqtt(client, config, &p.payload).await;
             }
             return;
         }
         if p.topic == config.vibration_cancel_preamble_state_topic() {
-            if st.vibration_bootstrap_state_topics.load(Ordering::SeqCst) {
+            if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
                 apply_vibration_cancel_preamble_mqtt(client, config, &p.payload).await;
             }
             return;
@@ -2307,6 +2866,40 @@ async fn handle_publish(
         if p.topic == config.vibrate_command_topic(BedSide::Right) && p.payload.as_ref() == expected
         {
             handle_vibrate_press(client, config, BedSide::Right).await;
+            return;
+        }
+    }
+
+    if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
+        if p.topic == config.climate_mode_state_topic(BedSide::Left) {
+            ingest_climate_mode_from_state_payload(&mut *st.climate_left.lock().await, &p.payload);
+            return;
+        }
+        if p.topic == config.climate_mode_state_topic(BedSide::Right) {
+            ingest_climate_mode_from_state_payload(&mut *st.climate_right.lock().await, &p.payload);
+            return;
+        }
+        if p.topic == config.climate_temperature_state_topic(BedSide::Left) {
+            ingest_climate_temperature_from_state_payload(
+                &mut *st.climate_left.lock().await,
+                config,
+                &p.payload,
+            );
+            return;
+        }
+        if p.topic == config.climate_temperature_state_topic(BedSide::Right) {
+            ingest_climate_temperature_from_state_payload(
+                &mut *st.climate_right.lock().await,
+                config,
+                &p.payload,
+            );
+            return;
+        }
+        if config.i2c_device.is_some() && p.topic == config.light_state_topic() {
+            if let Some(cmd) = parse_light_command(&p.payload) {
+                let base = LightStateSnapshot::default();
+                *st.light_state.lock().await = compute_light_state(&cmd, &base);
+            }
             return;
         }
     }
@@ -2350,6 +2943,14 @@ async fn handle_publish(
         return;
     }
 
+    for side in [BedSide::Left, BedSide::Right] {
+        if p.topic == config.climate_mode_state_topic(side)
+            || p.topic == config.climate_temperature_state_topic(side)
+        {
+            return;
+        }
+    }
+
     if config.i2c_device.is_some() && p.topic == config.startup_led_command_topic() {
         handle_startup_led_command(client, config, &st.startup_led_on, &p.payload).await;
         return;
@@ -2367,6 +2968,10 @@ async fn handle_publish(
 
     if config.i2c_device.is_some() && p.topic == config.light_command_topic() {
         handle_light_command(client, config, &st.light_state, &p.payload).await;
+        return;
+    }
+    // Like vibration `…/number/…/state`: ignore echoes on `light/led/state`; broker retain is drained only during bootstrap.
+    if config.i2c_device.is_some() && p.topic == config.light_state_topic() {
         return;
     }
 
@@ -2397,7 +3002,7 @@ pub async fn run(
         light_state: Arc::new(Mutex::new(LightStateSnapshot::default())),
         startup_led_on: Arc::new(Mutex::new(false)),
         startup_led_broker_retain_seen: Arc::new(AtomicBool::new(false)),
-        vibration_bootstrap_state_topics: Arc::new(AtomicBool::new(false)),
+        mqtt_ha_state_bootstrap: Arc::new(AtomicBool::new(false)),
         climate_left: Arc::new(Mutex::new(ClimateSideState::default())),
         climate_right: Arc::new(Mutex::new(ClimateSideState::default())),
         presence_calibrate_tx: presence_calibrate_tx.clone(),
@@ -2471,7 +3076,6 @@ pub async fn run(
             let c = client.clone();
             let cfg = config.clone();
             let cal_wait = Duration::from_secs(cfg.presence_calibrate_secs.max(3));
-            let fallback_abs_threshold = cfg.presence_cap_threshold;
             let presence_debug = cfg.presence_debug;
             tokio::spawn(async move {
                 let mut inference = PresenceInferenceState::default();
@@ -2509,6 +3113,7 @@ pub async fn run(
                             );
                             cal_until = Some(Instant::now() + cal_wait);
                             cal_samples.clear();
+                            publish_presence_calibration_running_state(&c, &cfg, true).await;
                         }
                         z_opt = cap_rx.recv() => {
                             let Some(z) = z_opt else {
@@ -2516,6 +3121,9 @@ pub async fn run(
                             };
 
                             saw_cap_sample = true;
+
+                            let bl_mtx = *cfg.presence_baselines_mtx.lock().await;
+                            inference.sync_baselines_from_shared(&bl_mtx);
 
                             if cal_until.is_some() {
                                 cal_samples.push(z.zones);
@@ -2525,13 +3133,43 @@ pub async fn run(
                                     cal_until = None;
                                     match mean_baselines_from_samples(&cal_samples) {
                                         Some(nb) => {
+                                            let (tuned_cap, tuned_delta) =
+                                                presence_tune_from_calibration_samples(
+                                                    &cal_samples,
+                                                    &nb,
+                                                );
+                                            cfg.presence_cap_threshold
+                                                .store(tuned_cap, Ordering::SeqCst);
+                                            cfg.presence_baseline_delta
+                                                .store(tuned_delta, Ordering::SeqCst);
+
+                                            {
+                                                let mut g =
+                                                    cfg.presence_baselines_mtx.lock().await;
+                                                *g = Some(nb);
+                                            }
                                             inference.set_baselines(nb);
+                                            publish_presence_cap_threshold_state(
+                                                &c, &cfg, tuned_cap,
+                                            )
+                                            .await;
+                                            publish_presence_baseline_delta_state(
+                                                &c, &cfg, tuned_delta,
+                                            )
+                                            .await;
+                                            publish_presence_baseline_zones_state(
+                                                &c, &cfg, &nb,
+                                            )
+                                            .await;
                                             tracing::info!(
                                                 baseline = ?nb,
                                                 frames = cal_samples.len(),
-                                                delta = PRESENCE_BASELINE_DELTA,
+                                                presence_cap_threshold = tuned_cap,
+                                                presence_baseline_delta = tuned_delta,
                                                 debounce_frames = PRESENCE_DEBOUNCE_FRAMES,
-                                                "presence baseline calibrated (sensor/presence parity)"
+                                                pad_cap = PRESENCE_CALIB_CAP_PADDING,
+                                                pad_delta = PRESENCE_CALIB_DELTA_PADDING,
+                                                "presence calibrated: baselines + MQTT threshold/Δ tuned from empty-bed samples"
                                             );
                                             prev_publish = None;
                                         }
@@ -2542,17 +3180,24 @@ pub async fn run(
                                         }
                                     }
                                     cal_samples.clear();
+                                    publish_presence_calibration_running_state(&c, &cfg, false)
+                                        .await;
                                 }
                             }
 
+                            let abs_thr =
+                                cfg.presence_cap_threshold.load(Ordering::Relaxed);
+                            let baseline_delta =
+                                cfg.presence_baseline_delta.load(Ordering::Relaxed);
                             let (left_on, right_on) =
-                                inference_occupancy(&z, &mut inference, fallback_abs_threshold);
+                                inference_occupancy(&z, &mut inference, abs_thr, baseline_delta);
                             let calibrating = cal_until.is_some();
                             if presence_debug {
                                 log_presence_debug(
                                     &z,
                                     &inference,
-                                    fallback_abs_threshold,
+                                    abs_thr,
+                                    baseline_delta,
                                     left_on,
                                     right_on,
                                     calibrating,
@@ -2637,26 +3282,57 @@ pub async fn run(
                     let hs = handler_state.clone();
                     let hw_once = startup_led_hw_once_per_process.clone();
                     tokio::spawn(async move {
-                        if cfg.sensor_device.is_some() {
-                            hs.vibration_bootstrap_state_topics
-                                .store(true, Ordering::SeqCst);
-                        }
+                        hs.mqtt_ha_state_bootstrap.store(true, Ordering::SeqCst);
                         hs.startup_led_broker_retain_seen
                             .store(false, Ordering::SeqCst);
                         setup_session(&c, &cfg).await;
-                        if cfg.i2c_device.is_some() {
-                            // Wait for broker-retained state (MQTT retain=1) or assume default OFF.
-                            const RETAIN_WAIT: Duration = Duration::from_millis(800);
-                            const POLL: Duration = Duration::from_millis(20);
-                            let mut waited = Duration::ZERO;
-                            while waited < RETAIN_WAIT
-                                && !hs.startup_led_broker_retain_seen.load(Ordering::SeqCst)
-                            {
-                                sleep(POLL).await;
-                                waited += POLL;
+
+                        // Broker retain replay (climate/light/vibration/presence **`state_topic`** + startup_led)
+                        // while `mqtt_ha_state_bootstrap` is observed in `handle_publish`.
+                        const HA_RETAIN_DRAIN: Duration = Duration::from_millis(850);
+                        sleep(HA_RETAIN_DRAIN).await;
+                        hs.mqtt_ha_state_bootstrap.store(false, Ordering::SeqCst);
+
+                        for side in [BedSide::Left, BedSide::Right] {
+                            let snap = match side {
+                                BedSide::Left => hs.climate_left.lock().await.clone(),
+                                BedSide::Right => hs.climate_right.lock().await.clone(),
+                            };
+                            let frame =
+                                set_target_temperature_frame(side, snap.enabled, snap.target_centi);
+                            if let Err(e) = enqueue_frozen_frame(&cfg, frame).await {
+                                tracing::warn!(
+                                    ?side,
+                                    error = %e,
+                                    "climate restore: Frozen enqueue skipped"
+                                );
                             }
-                            let on = *hs.startup_led_on.lock().await;
-                            if on
+                            publish_climate_state(&c, &cfg, side, &snap).await;
+                        }
+
+                        if cfg.sensor_device.is_some() {
+                            publish_vibration_mqtt_states(&c, &cfg).await;
+                            if cfg.presence_discovery {
+                                publish_presence_bootstrap_finalize(&c, &cfg).await;
+                                let no_stored_baselines =
+                                    cfg.presence_baselines_mtx.lock().await.is_none();
+                                if no_stored_baselines {
+                                    tracing::info!(
+                                        "presence: no MQTT-retained baseline zones after bootstrap — starting calibration (leave mattress empty)"
+                                    );
+                                    handle_presence_calibrate_press(
+                                        &c,
+                                        &cfg,
+                                        hs.presence_calibrate_tx.as_ref(),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+
+                        if cfg.i2c_device.is_some() {
+                            let startup_on = *hs.startup_led_on.lock().await;
+                            if startup_on
                                 && hw_once
                                     .compare_exchange(
                                         false,
@@ -2690,24 +3366,13 @@ pub async fn run(
                                         hw_once.store(false, Ordering::SeqCst);
                                     }
                                 }
+                            } else {
+                                let mqtt_snap = hs.light_state.lock().await.clone();
+                                let _ = commit_light_snapshot(&c, &cfg, &hs.light_state, mqtt_snap)
+                                    .await;
                             }
                             let snap = hs.light_state.lock().await.clone();
                             publish_light_state(&c, &cfg, &snap).await;
-                        }
-                        let left = hs.climate_left.lock().await.clone();
-                        publish_climate_state(&c, &cfg, BedSide::Left, &left).await;
-                        let right = hs.climate_right.lock().await.clone();
-                        publish_climate_state(&c, &cfg, BedSide::Right, &right).await;
-                        if cfg.sensor_device.is_some() {
-                            // Drain broker-retained vibration `state` messages into the mutex while `poll`
-                            // runs, then ignore further `state` inbound (see `handle_publish`): avoids HA/UI
-                            // `state` fighting `command` updates. Do **not** `unsubscribe` here — rumqttc
-                            // stalled the whole client after UNSUB on some setups.
-                            const VIB_RETAIN_DRAIN: Duration = Duration::from_millis(600);
-                            sleep(VIB_RETAIN_DRAIN).await;
-                            hs.vibration_bootstrap_state_topics
-                                .store(false, Ordering::SeqCst);
-                            publish_vibration_mqtt_states(&c, &cfg).await;
                         }
                     });
                 } else {
@@ -2854,6 +3519,23 @@ mod tests {
     }
 
     #[test]
+    fn presence_calibration_running_discovery_matches_state_topic() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let mut cfg = BridgeConfig::from_cli(&cli);
+        cfg.presence_discovery = true;
+        cfg.sensor_device = Some(std::path::PathBuf::from("/dev/null"));
+        let disc = discovery_payload_presence_calibration_binary_sensor(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Presence Calibration"));
+        assert_eq!(v["device_class"].as_str(), Some("running"));
+        assert_eq!(v["icon"].as_str(), Some("mdi:leak"));
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.presence_calibration_state_topic().as_str()),
+        );
+    }
+
+    #[test]
     fn firmware_message_discovery_matches_state_topic() {
         let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
         let cfg = BridgeConfig::from_cli(&cli);
@@ -2879,13 +3561,13 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&disc_l).unwrap();
         assert_eq!(
             v["state_topic"].as_str(),
-            Some(DEVICEINFO_DEVICE_LABEL_STATE_TOPIC),
+            Some(cfg.deviceinfo_device_label_state_topic().as_str()),
         );
         let disc_i = discovery_payload_deviceinfo_device_id(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc_i).unwrap();
         assert_eq!(
             v["state_topic"].as_str(),
-            Some(DEVICEINFO_DEVICE_ID_STATE_TOPIC),
+            Some(cfg.deviceinfo_device_id_state_topic().as_str()),
         );
         for disc in [disc_l, disc_i] {
             let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
@@ -2925,6 +3607,35 @@ mod tests {
     }
 
     #[test]
+    fn presence_sensitivity_number_discovery_topics() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        for (disc, name) in [
+            (
+                discovery_payload_presence_cap_threshold_number(&cfg),
+                cfg.presence_cap_threshold_state_topic(),
+            ),
+            (
+                discovery_payload_presence_baseline_delta_number(&cfg),
+                cfg.presence_baseline_delta_state_topic(),
+            ),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+            assert_eq!(v["entity_category"].as_str(), Some("config"));
+            assert_eq!(v["enabled_by_default"].as_bool(), Some(false));
+            assert_eq!(v["state_topic"].as_str(), Some(name.as_str()));
+        }
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &discovery_payload_presence_cap_threshold_number(&cfg)
+            )
+            .unwrap()["command_topic"]
+                .as_str(),
+            Some(cfg.presence_cap_threshold_command_topic().as_str()),
+        );
+    }
+
+    #[test]
     fn startup_led_discovery_is_configuration_entity() {
         let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
         let cfg = BridgeConfig::from_cli(&cli);
@@ -2934,44 +3645,63 @@ mod tests {
     }
 
     #[test]
-    fn water_tank_discovery_has_no_entity_category_for_sensors_grouping() {
+    fn water_tank_discovery_is_mqtt_binary_sensor_with_plug_device_class() {
         let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
         let cfg = BridgeConfig::from_cli(&cli);
+        assert!(cfg
+            .water_tank_state_topic()
+            .contains("/binary_sensor/water_tank/"));
+        assert!(cfg.discovery_topic_water_tank().contains("/binary_sensor/"));
         let disc = discovery_payload_water_tank(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
         assert!(
             v.get("entity_category").is_none(),
-            "omit entity_category so HA lists Water Tank with primary sensors, not under Diagnostics"
+            "omit entity_category so Water Tank stays with primary entities"
         );
         assert_eq!(v["device_class"].as_str(), Some("plug"));
+        assert_eq!(v["payload_on"].as_str(), Some("ON"));
+        assert_eq!(v["payload_off"].as_str(), Some("OFF"));
     }
 
     #[test]
     fn vibration_settings_discovery_payloads_use_config_entity_category() {
         let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
         let cfg = BridgeConfig::from_cli(&cli);
-        for (disc, exp_state) in [
+        for (disc, exp_state, exp_name) in [
             (
                 discovery_payload_vibration_intensity_number(&cfg),
                 cfg.vibration_intensity_state_topic(),
+                "Vibration Intensity",
             ),
             (
                 discovery_payload_vibration_duration_number(&cfg),
                 cfg.vibration_duration_state_topic(),
+                "Vibration Duration",
             ),
             (
                 discovery_payload_vibration_pattern_select(&cfg),
                 cfg.vibration_pattern_state_topic(),
+                "Vibration Pattern",
             ),
             (
                 discovery_payload_vibration_cancel_preamble_switch(&cfg),
                 cfg.vibration_cancel_preamble_state_topic(),
+                "Vibration Cancel Preamble",
             ),
         ] {
             let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
             assert_eq!(v["entity_category"].as_str(), Some("config"));
             assert_eq!(v["state_topic"].as_str(), Some(exp_state.as_str()));
+            assert_eq!(v["name"].as_str(), Some(exp_name));
         }
+        let cancel: serde_json::Value =
+            serde_json::from_str(&discovery_payload_vibration_cancel_preamble_switch(&cfg))
+                .unwrap();
+        assert_eq!(
+            cancel["enabled_by_default"].as_bool(),
+            Some(false),
+            "HA entity disabled by default; runtime still defaults cancel preamble on"
+        );
         let v: serde_json::Value =
             serde_json::from_str(&discovery_payload_vibration_pattern_select(&cfg)).unwrap();
         let opts = v["options"].as_array().expect("options array");
@@ -3004,6 +3734,60 @@ mod tests {
     }
 
     #[test]
+    fn presence_tune_from_calibration_flat_reads() {
+        let samples = [[500_u16; 6], [500; 6]];
+        let b = [500; 6];
+        // Match `PRESENCE_CALIB_CAP_PADDING` / `PRESENCE_CALIB_DELTA_PADDING`.
+        assert_eq!(
+            presence_tune_from_calibration_samples(&samples, &b),
+            (548, 16)
+        );
+    }
+
+    #[test]
+    fn presence_tune_from_calibration_peak_and_deviation() {
+        let mut spike = [400_u16; 6];
+        spike[0] = 500;
+        let samples = [spike];
+        let b = [400; 6];
+        assert_eq!(
+            presence_tune_from_calibration_samples(&samples, &b),
+            (548, 116)
+        );
+    }
+
+    #[test]
+    fn climate_state_topic_payload_ingest() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let mut st = ClimateSideState::default();
+        assert!(ingest_climate_mode_from_state_payload(
+            &mut st,
+            CLIMATE_MODE_HEAT_COOL.as_bytes()
+        ));
+        assert!(st.enabled);
+        assert!(ingest_climate_temperature_from_state_payload(
+            &mut st, &cfg, b"41.52"
+        ));
+        assert_eq!(st.target_centi, 4152);
+    }
+
+    #[test]
+    fn presence_baseline_zones_payload_json_formats() {
+        let arr = b"[100,101,102,103,104,105]";
+        assert_eq!(
+            parse_presence_baseline_zones_payload(arr),
+            Some([100, 101, 102, 103, 104, 105])
+        );
+        let obj = br#"{"zones":[200,201,202,203,204,205]}"#;
+        assert_eq!(
+            parse_presence_baseline_zones_payload(obj),
+            Some([200, 201, 202, 203, 204, 205])
+        );
+        assert!(parse_presence_baseline_zones_payload(b"").is_none());
+    }
+
+    #[test]
     fn presence_calibrated_opensleep_five_frame_debounce() {
         let z = SensorCapacitanceZones {
             sequence: 1,
@@ -3013,10 +3797,13 @@ mod tests {
         inference.set_baselines([100; 6]);
         for _ in 0..4 {
             assert_eq!(
-                inference_occupancy(&z, &mut inference, 9999),
+                inference_occupancy(&z, &mut inference, 9999, 50),
                 (false, false)
             );
         }
-        assert_eq!(inference_occupancy(&z, &mut inference, 9999), (true, true));
+        assert_eq!(
+            inference_occupancy(&z, &mut inference, 9999, 50),
+            (true, true)
+        );
     }
 }
