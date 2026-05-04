@@ -231,8 +231,17 @@ mod tests {
 
     #[test]
     fn pod_model_homeassistant_device_model() {
-        assert_eq!(PodModel::Three.homeassistant_device_model(), "Eight Sleep Pod 3");
-        assert_eq!(PodModel::Four.homeassistant_device_model(), "Eight Sleep Pod 4");
-        assert_eq!(PodModel::Five.homeassistant_device_model(), "Eight Sleep Pod 5");
+        assert_eq!(
+            PodModel::Three.homeassistant_device_model(),
+            "Eight Sleep Pod 3"
+        );
+        assert_eq!(
+            PodModel::Four.homeassistant_device_model(),
+            "Eight Sleep Pod 4"
+        );
+        assert_eq!(
+            PodModel::Five.homeassistant_device_model(),
+            "Eight Sleep Pod 5"
+        );
     }
 }

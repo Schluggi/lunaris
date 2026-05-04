@@ -63,7 +63,7 @@ Using custom firmware or low-level hardware control may void warranties, break t
 
 ### Diagnostics
 
-![Home Assistant Entities — Diagnostics](img/dianostics.png)
+![Home Assistant Entities — Diagnostics](img/diagnostics.png)
 
 | Name | Kind | Hidden by default | What it does |
 |:---|:---|:---:|:---|

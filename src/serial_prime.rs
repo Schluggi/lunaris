@@ -1,4 +1,6 @@
-//! Blocking/async helpers to send a pre-encoded Frozen frame on a serial port.
+//! Blocking/async helpers to send pre-encoded frames on a serial port.
+//!
+//! Used when UART queues from [`crate::frozen_link`] / [`crate::sensor_link`] are not wired (e.g. tests), or as the send path in [`crate::mqtt_bridge`] when a queue is unset.
 
 use std::path::Path;
 

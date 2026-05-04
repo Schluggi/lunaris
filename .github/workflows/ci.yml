@@ -12,7 +12,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -27,14 +27,11 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Cargo build (release)
-        run: cargo build --release --verbose
-
   # Same CPU family as Eight Sleep Pod SOM (aarch64); catches missing cross-setup early.
-  build-aarch64-gnu:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Must match rust-toolchain.toml channel — cargo uses that toolchain, not @stable.
       - uses: dtolnay/rust-toolchain@stable
