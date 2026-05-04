@@ -40,15 +40,46 @@ jobs:
             echo "tag=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Gate release on feat/fix commits
+        id: gate
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch — releasing."
+            exit 0
+          fi
+          PREV="${{ steps.prev.outputs.tag }}"
+          if [ -n "$PREV" ]; then
+            RANGE="${PREV}..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+          if git log "$RANGE" --no-merges --extended-regexp \
+              --grep='^(feat|fix)(\([^)]*\))?(!)?:' -1 -q; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "feat/fix commit(s) in ${RANGE} — releasing."
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "No feat/fix commits in ${RANGE} — skipping release."
+          fi
+
+      - name: Skip release (no feat/fix commits)
+        if: steps.gate.outputs.release != 'true'
+        run: echo "::notice::Release skipped — no feat or fix commits since the previous tag."
+
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.gate.outputs.release == 'true'
         with:
           toolchain: 1.84.0
           targets: aarch64-unknown-linux-gnu
 
       - name: Install AArch64 GNU toolchain (linker)
+        if: steps.gate.outputs.release == 'true'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Bump patch version in Cargo.toml
+        if: steps.gate.outputs.release == 'true'
         id: bump
         run: |
           set -euo pipefail
@@ -80,15 +111,18 @@ jobs:
           PY
 
       - name: Build release (aarch64)
+        if: steps.gate.outputs.release == 'true'
         run: cargo build --release --verbose --target aarch64-unknown-linux-gnu
 
       - name: Stage binaries
+        if: steps.gate.outputs.release == 'true'
         run: |
           mkdir -p dist
           cp target/aarch64-unknown-linux-gnu/release/lunaris "dist/lunaris"
           sha256sum dist/* > dist/SHA256SUMS
 
       - name: Commit version bump and tag
+        if: steps.gate.outputs.release == 'true'
         id: tag
         run: |
           set -euo pipefail
@@ -103,6 +137,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes (all commits)
+        if: steps.gate.outputs.release == 'true'
         run: |
           set -euo pipefail
           PREV="${{ steps.prev.outputs.tag }}"
@@ -125,6 +160,7 @@ jobs:
           } > release_body.md
 
       - name: Publish GitHub Release
+        if: steps.gate.outputs.release == 'true'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.tag.outputs.version }}
