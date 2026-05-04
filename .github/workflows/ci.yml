@@ -27,9 +27,6 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Cargo build (release)
-        run: cargo build --release --verbose
-
   # Same CPU family as Eight Sleep Pod SOM (aarch64); catches missing cross-setup early.
   build-aarch64-gnu:
     runs-on: ubuntu-latest
