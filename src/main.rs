@@ -78,8 +78,6 @@ async fn main() {
         }
     }
 
-    let mut sensor_priming_events: Option<tokio::sync::mpsc::Receiver<sensor_link::PrimingEvent>> =
-        None;
     let mut presence_cap_rx =
         None::<tokio::sync::mpsc::Receiver<sensor_rx::SensorCapacitanceZones>>;
 
@@ -119,8 +117,6 @@ async fn main() {
             presence_cap_parse_diag,
         );
         config.sensor_tx = Some(sensor.tx.clone());
-        config.sensor_priming_counts = Some(sensor.priming_counts.clone());
-        sensor_priming_events = Some(sensor.priming_events_rx);
     }
 
     let frame = frozen_frame::prime_frame();
@@ -128,7 +124,6 @@ async fn main() {
     mqtt_bridge::run(
         config,
         arc,
-        sensor_priming_events,
         Some(frozen_link.temperature_rx),
         frozen_link.water_tank_rx,
         frozen_link.firmware_message_rx,

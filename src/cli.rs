@@ -177,9 +177,21 @@ pub struct Cli {
     #[arg(long, default_value = "narcolepsy_vibrate_right")]
     pub discovery_object_id_vibrate_right: String,
 
-    /// `<object_id>` for `homeassistant/binary_sensor/<object_id>/config` (Frozen **Prime** window + optional vibrate piezo priming).
-    #[arg(long, default_value = "narcolepsy_priming")]
-    pub discovery_object_id_priming: String,
+    /// `<object_id>` for `homeassistant/number/<object_id>/config` (vibration intensity).
+    #[arg(long, default_value = "narcolepsy_vibration_intensity")]
+    pub discovery_object_id_vibration_intensity: String,
+
+    /// `<object_id>` for `homeassistant/number/<object_id>/config` (vibration duration).
+    #[arg(long, default_value = "narcolepsy_vibration_duration")]
+    pub discovery_object_id_vibration_duration: String,
+
+    /// `<object_id>` for `homeassistant/select/<object_id>/config` (vibration pattern).
+    #[arg(long, default_value = "narcolepsy_vibration_pattern")]
+    pub discovery_object_id_vibration_pattern: String,
+
+    /// `<object_id>` for `homeassistant/switch/<object_id>/config` (vibration cancel preamble).
+    #[arg(long, default_value = "narcolepsy_vibration_cancel_preamble")]
+    pub discovery_object_id_vibration_cancel_preamble: String,
 
     /// `<object_id>` for occupancy (left side), from Sensor capacitance zones 0–2.
     #[arg(long, default_value = "narcolepsy_presence_left")]
@@ -188,6 +200,10 @@ pub struct Cli {
     /// `<object_id>` for occupancy (right side), from Sensor capacitance zones 3–5.
     #[arg(long, default_value = "narcolepsy_presence_right")]
     pub discovery_object_id_presence_right: String,
+
+    /// `<object_id>` for occupancy (either side ON → ON).
+    #[arg(long, default_value = "narcolepsy_presence_any")]
+    pub discovery_object_id_presence_any: String,
 
     /// `<object_id>` for `homeassistant/binary_sensor/.../config` (Frozen reservoir present).
     #[arg(long, default_value = "narcolepsy_water_tank")]

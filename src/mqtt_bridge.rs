@@ -1,11 +1,12 @@
-//! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor), optional capacitance **presence**,
+//! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor) + retained **number/select/switch**
+//! vibration tuning, optional capacitance **presence**,
 //! optional Frozen **water tank** status, mattress climate, JSON light (I²C).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
 //! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rumqttc::{AsyncClient, ConnectionError, Event, Incoming, LastWill, MqttOptions, Publish, QoS};
@@ -21,7 +22,6 @@ use crate::frozen_frame::{get_temperatures_frame, set_target_temperature_frame, 
 use crate::frozen_rx::FrozenTemperatureUpdate;
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
 use crate::sensor_frame::{vibration_sequence_frames, AlarmPattern};
-use crate::sensor_link::{PrimingCounts, PrimingEvent};
 use crate::sensor_rx::SensorCapacitanceZones;
 use crate::serial_prime;
 
@@ -31,11 +31,29 @@ const DEVICEINFO_DEVICE_LABEL_STATE_TOPIC: &str = "/deviceinfo/device-label";
 const DEVICEINFO_DEVICE_ID_STATE_TOPIC: &str = "/deviceinfo/device-id";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "narcolepsy_deviceinfo_device_label";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "narcolepsy_deviceinfo_device_id";
-/// After HA **Prime**, MQTT **Priming** stays **ON** this long (no priming-complete frame on USART; aligns with ~8 min 30 s hub prime).
-const FROZEN_PRIME_SHOWN_AFTER_PRESS: Duration = Duration::from_secs(8 * 60 + 30);
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
+
+/// Runtime vibration / `SetAlarm` parameters (Home Assistant **number** / **select** / **switch**; retained state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VibrationSettings {
+    pub intensity: u8,
+    pub duration_sec: u32,
+    pub pattern: AlarmPattern,
+    pub cancel_preamble: bool,
+}
+
+impl Default for VibrationSettings {
+    fn default() -> Self {
+        Self {
+            intensity: 64,
+            duration_sec: 15,
+            pattern: AlarmPattern::Single,
+            cancel_preamble: false,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -68,14 +86,18 @@ pub struct BridgeConfig {
     pub sensor_baud: u32,
     pub discovery_object_id_vibrate_left: String,
     pub discovery_object_id_vibrate_right: String,
-    pub discovery_object_id_priming: String,
     pub discovery_object_id_temp_left: String,
     pub discovery_object_id_temp_right: String,
     pub discovery_object_id_heatsink_temp: String,
+    pub discovery_object_id_vibration_intensity: String,
+    pub discovery_object_id_vibration_duration: String,
+    pub discovery_object_id_vibration_pattern: String,
+    pub discovery_object_id_vibration_cancel_preamble: String,
     pub discovery_object_id_target_temp_left: String,
     pub discovery_object_id_target_temp_right: String,
     pub discovery_object_id_presence_left: String,
     pub discovery_object_id_presence_right: String,
+    pub discovery_object_id_presence_any: String,
     pub discovery_object_id_calibrate_presence: String,
     pub discovery_object_id_water_tank: String,
     pub discovery_object_id_firmware_message: String,
@@ -87,17 +109,11 @@ pub struct BridgeConfig {
     pub presence_discovery: bool,
     /// Log each `0x33` presence inference step at INFO ([`Cli::presence_debug`](crate::cli::Cli::presence_debug)).
     pub presence_debug: bool,
-    pub vibration_intensity: u8,
-    pub vibration_duration_sec: u32,
-    pub vibration_pattern: AlarmPattern,
-    /// Prepends cancel `SetAlarm` before piezo + alarm (`--sensor-vibrate-cancel-preamble`).
-    pub sensor_vibrate_cancel_preamble: bool,
+    pub vibration_settings: Arc<Mutex<VibrationSettings>>,
     /// When set, Frozen frames are queued to [`crate::frozen_link`] instead of opening the port per command.
     pub frozen_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// When set, vibration batches go to [`crate::sensor_link`].
     pub sensor_tx: Option<mpsc::Sender<Vec<Vec<u8>>>>,
-    /// Present when [`crate::sensor_link`] runs — interactive (vibrate) piezo priming refcount (combined with Frozen Prime for MQTT **Priming**).
-    pub sensor_priming_counts: Option<Arc<PrimingCounts>>,
     /// Publish MQTT sensors for Frozen inbound temperatures (`0x41` / `0xC1`); set by [`crate::main`] with [`crate::frozen_link`].
     pub frozen_temperature_discovery: bool,
     /// MQTT **Water Tank** binary_sensor from Frozen `0x07` messages ([`crate::frozen_rx`]).
@@ -138,16 +154,28 @@ impl BridgeConfig {
             sensor_baud: cli.sensor_baud,
             discovery_object_id_vibrate_left: cli.discovery_object_id_vibrate_left.clone(),
             discovery_object_id_vibrate_right: cli.discovery_object_id_vibrate_right.clone(),
-            discovery_object_id_priming: cli.discovery_object_id_priming.clone(),
             discovery_object_id_temp_left: cli.discovery_object_id_temp_left.clone(),
             discovery_object_id_temp_right: cli.discovery_object_id_temp_right.clone(),
             discovery_object_id_heatsink_temp: cli.discovery_object_id_heatsink_temp.clone(),
+            discovery_object_id_vibration_intensity: cli
+                .discovery_object_id_vibration_intensity
+                .clone(),
+            discovery_object_id_vibration_duration: cli
+                .discovery_object_id_vibration_duration
+                .clone(),
+            discovery_object_id_vibration_pattern: cli
+                .discovery_object_id_vibration_pattern
+                .clone(),
+            discovery_object_id_vibration_cancel_preamble: cli
+                .discovery_object_id_vibration_cancel_preamble
+                .clone(),
             discovery_object_id_target_temp_left: cli.discovery_object_id_target_temp_left.clone(),
             discovery_object_id_target_temp_right: cli
                 .discovery_object_id_target_temp_right
                 .clone(),
             discovery_object_id_presence_left: cli.discovery_object_id_presence_left.clone(),
             discovery_object_id_presence_right: cli.discovery_object_id_presence_right.clone(),
+            discovery_object_id_presence_any: cli.discovery_object_id_presence_any.clone(),
             discovery_object_id_calibrate_presence: cli
                 .discovery_object_id_calibrate_presence
                 .clone(),
@@ -157,16 +185,17 @@ impl BridgeConfig {
             presence_calibrate_secs: cli.presence_calibrate_secs.max(3),
             presence_discovery: false,
             presence_debug: cli.presence_debug,
-            vibration_intensity: cli.vibration_intensity.clamp(1, 100),
-            vibration_duration_sec: cli.vibration_duration_sec.clamp(1, 600),
-            vibration_pattern: match cli.vibration_pattern {
-                crate::cli::VibrationPatternArg::Single => AlarmPattern::Single,
-                crate::cli::VibrationPatternArg::Double => AlarmPattern::Double,
-            },
-            sensor_vibrate_cancel_preamble: cli.sensor_vibrate_cancel_preamble,
+            vibration_settings: Arc::new(Mutex::new(VibrationSettings {
+                intensity: cli.vibration_intensity.clamp(1, 100),
+                duration_sec: cli.vibration_duration_sec.clamp(1, 600),
+                pattern: match cli.vibration_pattern {
+                    crate::cli::VibrationPatternArg::Single => AlarmPattern::Single,
+                    crate::cli::VibrationPatternArg::Double => AlarmPattern::Double,
+                },
+                cancel_preamble: cli.sensor_vibrate_cancel_preamble,
+            })),
             frozen_tx: None,
             sensor_tx: None,
-            sensor_priming_counts: None,
             frozen_temperature_discovery: false,
             frozen_water_tank_discovery: false,
             frozen_firmware_message_discovery: false,
@@ -285,15 +314,67 @@ impl BridgeConfig {
         format!("{}/button/{}/set", self.topic_prefix, suffix)
     }
 
-    pub fn discovery_topic_priming(&self) -> String {
+    pub fn vibration_intensity_command_topic(&self) -> String {
+        format!("{}/number/vibration_intensity/set", self.topic_prefix)
+    }
+
+    pub fn vibration_intensity_state_topic(&self) -> String {
+        format!("{}/number/vibration_intensity/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_vibration_intensity(&self) -> String {
         format!(
-            "{}/binary_sensor/{}/config",
-            self.discovery_prefix, self.discovery_object_id_priming
+            "{}/number/{}/config",
+            self.discovery_prefix, self.discovery_object_id_vibration_intensity
         )
     }
 
-    pub fn priming_state_topic(&self) -> String {
-        format!("{}/binary_sensor/priming/state", self.topic_prefix)
+    pub fn vibration_duration_command_topic(&self) -> String {
+        format!("{}/number/vibration_duration/set", self.topic_prefix)
+    }
+
+    pub fn vibration_duration_state_topic(&self) -> String {
+        format!("{}/number/vibration_duration/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_vibration_duration(&self) -> String {
+        format!(
+            "{}/number/{}/config",
+            self.discovery_prefix, self.discovery_object_id_vibration_duration
+        )
+    }
+
+    pub fn vibration_pattern_command_topic(&self) -> String {
+        format!("{}/select/vibration_pattern/set", self.topic_prefix)
+    }
+
+    pub fn vibration_pattern_state_topic(&self) -> String {
+        format!("{}/select/vibration_pattern/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_vibration_pattern(&self) -> String {
+        format!(
+            "{}/select/{}/config",
+            self.discovery_prefix, self.discovery_object_id_vibration_pattern
+        )
+    }
+
+    pub fn vibration_cancel_preamble_command_topic(&self) -> String {
+        format!("{}/switch/vibration_cancel_preamble/set", self.topic_prefix)
+    }
+
+    pub fn vibration_cancel_preamble_state_topic(&self) -> String {
+        format!(
+            "{}/switch/vibration_cancel_preamble/state",
+            self.topic_prefix
+        )
+    }
+
+    pub fn discovery_topic_vibration_cancel_preamble(&self) -> String {
+        format!(
+            "{}/switch/{}/config",
+            self.discovery_prefix, self.discovery_object_id_vibration_cancel_preamble
+        )
     }
 
     /// Inbound Frozen `0x41` / `0xC1` centidegrees — current water temperature (one side of the cover).
@@ -353,12 +434,23 @@ impl BridgeConfig {
         format!("{}/binary_sensor/presence_{}/state", self.topic_prefix, s)
     }
 
+    pub fn presence_any_state_topic(&self) -> String {
+        format!("{}/binary_sensor/presence_any/state", self.topic_prefix)
+    }
+
     pub fn discovery_topic_presence(&self, side: BedSide) -> String {
         let id = match side {
             BedSide::Left => &self.discovery_object_id_presence_left,
             BedSide::Right => &self.discovery_object_id_presence_right,
         };
         format!("{}/binary_sensor/{}/config", self.discovery_prefix, id)
+    }
+
+    pub fn discovery_topic_presence_any(&self) -> String {
+        format!(
+            "{}/binary_sensor/{}/config",
+            self.discovery_prefix, self.discovery_object_id_presence_any
+        )
     }
 
     pub fn calibrate_presence_command_topic(&self) -> String {
@@ -499,6 +591,7 @@ fn discovery_payload_startup_led_switch(config: &BridgeConfig) -> String {
         "state_topic": config.startup_led_state_topic(),
         "payload_on": "ON",
         "payload_off": "OFF",
+        "entity_category": "config",
         "unique_id": format!("{}_startup_led", config.device_identifier),
         "device": config.device_json(),
         "origin": {
@@ -565,8 +658,8 @@ fn discovery_payload_climate(config: &BridgeConfig, side: BedSide) -> String {
 
 fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> String {
     let name = match side {
-        BedSide::Left => "Vibrate mattress (left)",
-        BedSide::Right => "Vibrate mattress (right)",
+        BedSide::Left => "Vibrate Cover Left",
+        BedSide::Right => "Vibrate Cover Right",
     };
     let unique_suffix = match side {
         BedSide::Left => "vibrate_left",
@@ -578,6 +671,7 @@ fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> Str
         "payload_press": config.payload_press,
         "unique_id": format!("{}_{}", config.device_identifier, unique_suffix),
         "device": config.device_json(),
+        "icon": "mdi:vibrate",
         "origin": {
             "name": "narcolepsy",
             "sw": config.sw_version,
@@ -587,13 +681,76 @@ fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> Str
     .to_string()
 }
 
-fn discovery_payload_priming(config: &BridgeConfig) -> String {
+fn discovery_payload_vibration_intensity_number(config: &BridgeConfig) -> String {
     json!({
-        "name": "Priming",
-        "state_topic": config.priming_state_topic(),
+        "name": "Vibration intensity",
+        "command_topic": config.vibration_intensity_command_topic(),
+        "state_topic": config.vibration_intensity_state_topic(),
+        "min": 1,
+        "max": 100,
+        "step": 1,
+        "mode": "slider",
+        "entity_category": "config",
+        "unique_id": format!("{}_vibration_intensity", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_vibration_duration_number(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Vibration duration",
+        "command_topic": config.vibration_duration_command_topic(),
+        "state_topic": config.vibration_duration_state_topic(),
+        "min": 1,
+        "max": 600,
+        "step": 1,
+        "unit_of_measurement": "s",
+        "mode": "box",
+        "entity_category": "config",
+        "unique_id": format!("{}_vibration_duration", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_vibration_pattern_select(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Vibration pattern",
+        "command_topic": config.vibration_pattern_command_topic(),
+        "state_topic": config.vibration_pattern_state_topic(),
+        "options": ["single", "double"],
+        "entity_category": "config",
+        "unique_id": format!("{}_vibration_pattern", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_vibration_cancel_preamble_switch(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Vibration cancel preamble",
+        "command_topic": config.vibration_cancel_preamble_command_topic(),
+        "state_topic": config.vibration_cancel_preamble_state_topic(),
         "payload_on": "ON",
         "payload_off": "OFF",
-        "unique_id": format!("{}_priming", config.device_identifier),
+        "entity_category": "config",
+        "unique_id": format!("{}_vibration_cancel_preamble", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "narcolepsy",
@@ -612,7 +769,6 @@ fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
         "payload_off": "OFF",
         "device_class": "plug",
         "icon": "mdi:water",
-        "entity_category": "diagnostic",
         "unique_id": format!("{}_water_tank", config.device_identifier),
         "device": config.device_json(),
         "origin": {
@@ -700,9 +856,27 @@ fn discovery_payload_presence(config: &BridgeConfig, side: BedSide) -> String {
     .to_string()
 }
 
+fn discovery_payload_presence_any(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Presence Any",
+        "state_topic": config.presence_any_state_topic(),
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device_class": "occupancy",
+        "unique_id": format!("{}_presence_any", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "narcolepsy",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 fn discovery_payload_calibrate_presence_button(config: &BridgeConfig) -> String {
     json!({
-        "name": "Calibrate presence",
+        "name": "Calibrate Presence",
         "command_topic": config.calibrate_presence_command_topic(),
         "payload_press": config.payload_press,
         "unique_id": format!("{}_calibrate_presence", config.device_identifier),
@@ -900,6 +1074,7 @@ async fn publish_presence_readings(
     right_on: bool,
 ) {
     let qos = QoS::AtLeastOnce;
+    let any_on = left_on || right_on;
     let publishes = [
         (
             config.presence_state_topic(BedSide::Left),
@@ -908,6 +1083,10 @@ async fn publish_presence_readings(
         (
             config.presence_state_topic(BedSide::Right),
             if right_on { "ON" } else { "OFF" },
+        ),
+        (
+            config.presence_any_state_topic(),
+            if any_on { "ON" } else { "OFF" },
         ),
     ];
     for (topic, payload) in publishes {
@@ -1058,81 +1237,97 @@ struct PublishHandlerState {
     startup_led_on: Arc<Mutex<bool>>,
     /// Set when an inbound `state_topic` message was sent with the MQTT retain flag (broker-stored preference), not a live publish.
     startup_led_broker_retain_seen: Arc<AtomicBool>,
+    /// While **true**, inbound vibration `…/state` topics update the mutex (broker retain on connect). Cleared after bootstrap so later `state` echoes do not overwrite values set via `…/set` (no `unsubscribe` — rumqttc `unsubscribe` here deadlocked the client on some brokers).
+    vibration_bootstrap_state_topics: Arc<AtomicBool>,
     climate_left: Arc<Mutex<ClimateSideState>>,
     climate_right: Arc<Mutex<ClimateSideState>>,
     /// Notify presence task to start baseline sampling (MQTT **Calibrate presence**).
     presence_calibrate_tx: Option<mpsc::Sender<()>>,
-    /// `Some(until)` while MQTT **Priming** should show Frozen **Prime** as active.
-    frozen_prime_shown_until: Arc<Mutex<Option<Instant>>>,
-    /// incremented on each Prime; stale expiry tasks ignore superseded primes.
-    frozen_prime_generation: Arc<AtomicU64>,
 }
 
-async fn priming_binary_sensor_active(
-    sensor_counts: Option<&Arc<PrimingCounts>>,
-    frozen_prime_shown_until: &Mutex<Option<Instant>>,
-) -> bool {
-    if let Some(c) = sensor_counts {
-        if c.mqtt_priming_active() {
-            return true;
-        }
-    }
-    let lock = frozen_prime_shown_until.lock().await;
-    lock.map(|u| Instant::now() < u).unwrap_or(false)
-}
-
-async fn on_frozen_prime_pressed(
+async fn apply_vibration_intensity_mqtt(
     client: &AsyncClient,
     config: &BridgeConfig,
-    hs: &PublishHandlerState,
+    payload: &[u8],
 ) {
-    let my_gen = hs.frozen_prime_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let until = Instant::now() + FROZEN_PRIME_SHOWN_AFTER_PRESS;
+    let Some(v) = parse_and_clamp_u8_intensity(payload) else {
+        tracing::trace!("ignored vibration intensity MQTT payload");
+        return;
+    };
     {
-        let mut g = hs.frozen_prime_shown_until.lock().await;
-        *g = Some(until);
-    }
-    let active = priming_binary_sensor_active(
-        config.sensor_priming_counts.as_ref(),
-        &hs.frozen_prime_shown_until,
-    )
-    .await;
-    publish_priming_state(client, config, active).await;
-
-    let c = client.clone();
-    let cfg = config.clone();
-    let counts = config.sensor_priming_counts.clone();
-    let fz_until = hs.frozen_prime_shown_until.clone();
-    let fz_gen = hs.frozen_prime_generation.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep_until(until).await;
-        if fz_gen.load(Ordering::SeqCst) != my_gen {
+        let mut g = config.vibration_settings.lock().await;
+        if g.intensity == v {
             return;
         }
-        {
-            let mut g = fz_until.lock().await;
-            if fz_gen.load(Ordering::SeqCst) == my_gen {
-                *g = None;
-            }
+        g.intensity = v;
+    }
+    publish_vibration_intensity_state(client, config, v).await;
+}
+
+async fn apply_vibration_duration_mqtt(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    payload: &[u8],
+) {
+    let Some(secs) = parse_and_clamp_duration_secs(payload) else {
+        tracing::trace!("ignored vibration duration MQTT payload");
+        return;
+    };
+    {
+        let mut g = config.vibration_settings.lock().await;
+        if g.duration_sec == secs {
+            return;
         }
-        let active = priming_binary_sensor_active(counts.as_ref(), &fz_until).await;
-        publish_priming_state(&c, &cfg, active).await;
-    });
+        g.duration_sec = secs;
+    }
+    publish_vibration_duration_state(client, config, secs).await;
+}
+
+async fn apply_vibration_pattern_mqtt(client: &AsyncClient, config: &BridgeConfig, payload: &[u8]) {
+    let Some(p) = parse_vibration_pattern_str(payload) else {
+        tracing::trace!("ignored vibration pattern MQTT payload");
+        return;
+    };
+    {
+        let mut g = config.vibration_settings.lock().await;
+        if g.pattern == p {
+            return;
+        }
+        g.pattern = p;
+    }
+    publish_vibration_pattern_state(client, config, p).await;
+}
+
+async fn apply_vibration_cancel_preamble_mqtt(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    payload: &[u8],
+) {
+    let Some(on) = parse_mqtt_on_off(payload) else {
+        tracing::trace!("ignored vibration cancel preamble MQTT payload");
+        return;
+    };
+    {
+        let mut g = config.vibration_settings.lock().await;
+        if g.cancel_preamble == on {
+            return;
+        }
+        g.cancel_preamble = on;
+    }
+    publish_vibration_cancel_preamble_state(client, config, on).await;
 }
 
 async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side: BedSide) {
     if config.sensor_device.is_none() {
         return;
     }
-    let intensity = config.vibration_intensity.clamp(1, 100);
-    let duration = config.vibration_duration_sec.clamp(1, 600);
-    let frames = vibration_sequence_frames(
-        side,
-        intensity,
-        config.vibration_pattern,
-        duration,
-        config.sensor_vibrate_cancel_preamble,
-    );
+    let (intensity, duration, pattern, cancel_preamble) = {
+        let g = config.vibration_settings.lock().await;
+        (g.intensity, g.duration_sec, g.pattern, g.cancel_preamble)
+    };
+    let intensity = intensity.clamp(1, 100);
+    let duration = duration.clamp(1, 600);
+    let frames = vibration_sequence_frames(side, intensity, pattern, duration, cancel_preamble);
     let frame_count = frames.len();
     match enqueue_sensor_vibration(config, frames).await {
         Ok(()) => {
@@ -1140,7 +1335,7 @@ async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side:
                 ?side,
                 intensity,
                 duration,
-                pattern = ?config.vibration_pattern,
+                pattern = ?pattern,
                 frame_count,
                 "Sensor vibration sequence sent (opensleep: optional cancel + EnableVibration + piezo + SetAlarm)"
             );
@@ -1243,6 +1438,128 @@ fn parse_mqtt_on_off(payload: &[u8]) -> Option<bool> {
     }
 }
 
+fn vibration_pattern_as_str(p: AlarmPattern) -> &'static str {
+    match p {
+        AlarmPattern::Single => "single",
+        AlarmPattern::Double => "double",
+    }
+}
+
+fn parse_vibration_pattern_str(payload: &[u8]) -> Option<AlarmPattern> {
+    let s = std::str::from_utf8(payload).ok()?.trim().to_lowercase();
+    match s.as_str() {
+        "single" => Some(AlarmPattern::Single),
+        "double" => Some(AlarmPattern::Double),
+        _ => None,
+    }
+}
+
+fn parse_and_clamp_u8_intensity(payload: &[u8]) -> Option<u8> {
+    let t = std::str::from_utf8(payload).ok()?.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let v: f64 = t.parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    let v = v.round() as i64;
+    Some((v.clamp(1, 100)) as u8)
+}
+
+fn parse_and_clamp_duration_secs(payload: &[u8]) -> Option<u32> {
+    let t = std::str::from_utf8(payload).ok()?.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let v: f64 = t.parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    let v = v.round() as i64;
+    Some((v.clamp(1, 600)) as u32)
+}
+
+async fn publish_vibration_intensity_state(client: &AsyncClient, config: &BridgeConfig, v: u8) {
+    let qos = QoS::AtLeastOnce;
+    let body = format!("{v}");
+    if let Err(e) = client
+        .publish(
+            config.vibration_intensity_state_topic(),
+            qos,
+            true,
+            body.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish vibration intensity state");
+    }
+}
+
+async fn publish_vibration_duration_state(client: &AsyncClient, config: &BridgeConfig, secs: u32) {
+    let qos = QoS::AtLeastOnce;
+    let body = format!("{secs}");
+    if let Err(e) = client
+        .publish(
+            config.vibration_duration_state_topic(),
+            qos,
+            true,
+            body.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish vibration duration state");
+    }
+}
+
+async fn publish_vibration_pattern_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    p: AlarmPattern,
+) {
+    let qos = QoS::AtLeastOnce;
+    let body = vibration_pattern_as_str(p);
+    if let Err(e) = client
+        .publish(
+            config.vibration_pattern_state_topic(),
+            qos,
+            true,
+            body.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish vibration pattern state");
+    }
+}
+
+async fn publish_vibration_cancel_preamble_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    on: bool,
+) {
+    let payload = if on { "ON" } else { "OFF" };
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(
+            config.vibration_cancel_preamble_state_topic(),
+            qos,
+            true,
+            payload,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish vibration cancel preamble state");
+    }
+}
+
+async fn publish_vibration_mqtt_states(client: &AsyncClient, config: &BridgeConfig) {
+    let vs = *config.vibration_settings.lock().await;
+    publish_vibration_intensity_state(client, config, vs.intensity).await;
+    publish_vibration_duration_state(client, config, vs.duration_sec).await;
+    publish_vibration_pattern_state(client, config, vs.pattern).await;
+    publish_vibration_cancel_preamble_state(client, config, vs.cancel_preamble).await;
+}
+
 async fn publish_startup_led_state(client: &AsyncClient, config: &BridgeConfig, on: bool) {
     let payload = if on { "ON" } else { "OFF" };
     let qos = QoS::AtLeastOnce;
@@ -1251,17 +1568,6 @@ async fn publish_startup_led_state(client: &AsyncClient, config: &BridgeConfig, 
         .await
     {
         tracing::error!(?e, "publish startup LED state");
-    }
-}
-
-async fn publish_priming_state(client: &AsyncClient, config: &BridgeConfig, active: bool) {
-    let payload = if active { "ON" } else { "OFF" };
-    let qos = QoS::AtLeastOnce;
-    if let Err(e) = client
-        .publish(config.priming_state_topic(), qos, true, payload)
-        .await
-    {
-        tracing::error!(?e, "publish priming state");
     }
 }
 
@@ -1460,11 +1766,7 @@ async fn handle_climate_temperature_command(
     }
 }
 
-async fn publish_discovery_and_online(
-    client: &AsyncClient,
-    config: &BridgeConfig,
-    hs: &PublishHandlerState,
-) {
+async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfig) {
     let qos = QoS::AtLeastOnce;
     let disc_btn = discovery_payload_button(config);
     if let Err(e) = client
@@ -1523,12 +1825,7 @@ async fn publish_discovery_and_online(
             tracing::error!(?e, "publish deviceinfo device-label state");
         }
         if let Err(e) = client
-            .publish(
-                DEVICEINFO_DEVICE_ID_STATE_TOPIC,
-                qos,
-                true,
-                id_payload,
-            )
+            .publish(DEVICEINFO_DEVICE_ID_STATE_TOPIC, qos, true, id_payload)
             .await
         {
             tracing::error!(?e, "publish deviceinfo device-id state");
@@ -1595,21 +1892,54 @@ async fn publish_discovery_and_online(
                 tracing::error!(?e, side = ?side, "publish vibrate discovery");
             }
         }
-    }
-    {
-        let disc_p = discovery_payload_priming(config);
+        let disc_i = discovery_payload_vibration_intensity_number(config);
         if let Err(e) = client
-            .publish(config.discovery_topic_priming(), qos, true, disc_p)
+            .publish(
+                config.discovery_topic_vibration_intensity(),
+                qos,
+                true,
+                disc_i,
+            )
             .await
         {
-            tracing::error!(?e, "publish priming binary_sensor discovery");
+            tracing::error!(?e, "publish vibration intensity discovery");
         }
-        let active = priming_binary_sensor_active(
-            config.sensor_priming_counts.as_ref(),
-            &hs.frozen_prime_shown_until,
-        )
-        .await;
-        publish_priming_state(client, config, active).await;
+        let disc_d = discovery_payload_vibration_duration_number(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_vibration_duration(),
+                qos,
+                true,
+                disc_d,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish vibration duration discovery");
+        }
+        let disc_p = discovery_payload_vibration_pattern_select(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_vibration_pattern(),
+                qos,
+                true,
+                disc_p,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish vibration pattern discovery");
+        }
+        let disc_c = discovery_payload_vibration_cancel_preamble_switch(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_vibration_cancel_preamble(),
+                qos,
+                true,
+                disc_c,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish vibration cancel preamble discovery");
+        }
     }
     if config.sensor_device.is_some() && config.presence_discovery {
         for side in [BedSide::Left, BedSide::Right] {
@@ -1620,6 +1950,13 @@ async fn publish_discovery_and_online(
             {
                 tracing::error!(?e, side = ?side, "publish presence discovery");
             }
+        }
+        let disc_any = discovery_payload_presence_any(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_presence_any(), qos, true, disc_any)
+            .await
+        {
+            tracing::error!(?e, "publish presence_any discovery");
         }
         // HA shows "Unknown" until a retained state arrives; capacitance `0x33` may be rare/absent at boot.
         publish_presence_readings(client, config, false, false).await;
@@ -1707,7 +2044,7 @@ async fn publish_discovery_and_online(
     }
 }
 
-async fn setup_session(client: &AsyncClient, config: &BridgeConfig, hs: &PublishHandlerState) {
+async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     let qos = QoS::AtLeastOnce;
     if let Err(e) = client.subscribe(config.command_topic(), qos).await {
         tracing::error!(?e, "subscribe prime command topic");
@@ -1758,6 +2095,20 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig, hs: &Publish
                 tracing::error!(?e, side = ?side, "subscribe vibrate command topic");
             }
         }
+        for topic in [
+            config.vibration_intensity_command_topic(),
+            config.vibration_intensity_state_topic(),
+            config.vibration_duration_command_topic(),
+            config.vibration_duration_state_topic(),
+            config.vibration_pattern_command_topic(),
+            config.vibration_pattern_state_topic(),
+            config.vibration_cancel_preamble_command_topic(),
+            config.vibration_cancel_preamble_state_topic(),
+        ] {
+            if let Err(e) = client.subscribe(topic.as_str(), qos).await {
+                tracing::error!(?e, topic = %topic, "subscribe vibration settings topic");
+            }
+        }
         if config.presence_discovery {
             if let Err(e) = client
                 .subscribe(config.calibrate_presence_command_topic(), qos)
@@ -1770,7 +2121,7 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig, hs: &Publish
     if let Err(e) = client.subscribe(HA_STATUS_TOPIC, qos).await {
         tracing::error!(?e, "subscribe Home Assistant birth topic");
     }
-    publish_discovery_and_online(client, config, hs).await;
+    publish_discovery_and_online(client, config).await;
 }
 
 async fn handle_light_command(
@@ -1860,7 +2211,6 @@ async fn handle_publish(
             match enqueue_frozen_frame(config, prime_frame.to_vec()).await {
                 Ok(()) => {
                     tracing::info!("prime frame queued to Frozen USART task");
-                    on_frozen_prime_pressed(client, config, st).await;
                     publish_json_result(client, config, "prime", "success", "prime frame sent")
                         .await;
                 }
@@ -1908,6 +2258,46 @@ async fn handle_publish(
     }
 
     if config.sensor_device.is_some() {
+        if p.topic == config.vibration_intensity_command_topic() {
+            apply_vibration_intensity_mqtt(client, config, &p.payload).await;
+            return;
+        }
+        if p.topic == config.vibration_duration_command_topic() {
+            apply_vibration_duration_mqtt(client, config, &p.payload).await;
+            return;
+        }
+        if p.topic == config.vibration_pattern_command_topic() {
+            apply_vibration_pattern_mqtt(client, config, &p.payload).await;
+            return;
+        }
+        if p.topic == config.vibration_cancel_preamble_command_topic() {
+            apply_vibration_cancel_preamble_mqtt(client, config, &p.payload).await;
+            return;
+        }
+        if p.topic == config.vibration_intensity_state_topic() {
+            if st.vibration_bootstrap_state_topics.load(Ordering::SeqCst) {
+                apply_vibration_intensity_mqtt(client, config, &p.payload).await;
+            }
+            return;
+        }
+        if p.topic == config.vibration_duration_state_topic() {
+            if st.vibration_bootstrap_state_topics.load(Ordering::SeqCst) {
+                apply_vibration_duration_mqtt(client, config, &p.payload).await;
+            }
+            return;
+        }
+        if p.topic == config.vibration_pattern_state_topic() {
+            if st.vibration_bootstrap_state_topics.load(Ordering::SeqCst) {
+                apply_vibration_pattern_mqtt(client, config, &p.payload).await;
+            }
+            return;
+        }
+        if p.topic == config.vibration_cancel_preamble_state_topic() {
+            if st.vibration_bootstrap_state_topics.load(Ordering::SeqCst) {
+                apply_vibration_cancel_preamble_mqtt(client, config, &p.payload).await;
+            }
+            return;
+        }
         let expected = config.payload_press.as_bytes();
         if p.topic == config.vibrate_command_topic(BedSide::Left) && p.payload.as_ref() == expected
         {
@@ -1982,7 +2372,7 @@ async fn handle_publish(
 
     if p.topic == HA_STATUS_TOPIC && p.payload.as_ref() == b"online" {
         tracing::debug!("Home Assistant online; republishing discovery");
-        publish_discovery_and_online(client, config, st).await;
+        publish_discovery_and_online(client, config).await;
     }
 }
 
@@ -1990,7 +2380,6 @@ async fn handle_publish(
 pub async fn run(
     config: BridgeConfig,
     prime_frame: Arc<[u8]>,
-    sensor_priming_events: Option<mpsc::Receiver<PrimingEvent>>,
     frozen_temperature_rx: Option<mpsc::Receiver<FrozenTemperatureUpdate>>,
     frozen_water_tank_rx: Option<mpsc::Receiver<bool>>,
     frozen_firmware_message_rx: Option<mpsc::Receiver<String>>,
@@ -2008,11 +2397,10 @@ pub async fn run(
         light_state: Arc::new(Mutex::new(LightStateSnapshot::default())),
         startup_led_on: Arc::new(Mutex::new(false)),
         startup_led_broker_retain_seen: Arc::new(AtomicBool::new(false)),
+        vibration_bootstrap_state_topics: Arc::new(AtomicBool::new(false)),
         climate_left: Arc::new(Mutex::new(ClimateSideState::default())),
         climate_right: Arc::new(Mutex::new(ClimateSideState::default())),
         presence_calibrate_tx: presence_calibrate_tx.clone(),
-        frozen_prime_shown_until: Arc::new(Mutex::new(None)),
-        frozen_prime_generation: Arc::new(AtomicU64::new(0)),
     };
 
     let startup_led_hw_once_per_process = Arc::new(AtomicBool::new(false));
@@ -2205,36 +2593,6 @@ pub async fn run(
         }
     }
 
-    let hs_priming = handler_state.clone();
-    match (sensor_priming_events, config.sensor_priming_counts.clone()) {
-        (Some(mut events_rx), Some(counts)) => {
-            let c = client.clone();
-            let cfg = config.clone();
-            tokio::spawn(async move {
-                let mut last: Option<bool> = None;
-                while let Some(_ev) = events_rx.recv().await {
-                    let active = priming_binary_sensor_active(
-                        Some(&counts),
-                        &hs_priming.frozen_prime_shown_until,
-                    )
-                    .await;
-                    if last == Some(active) {
-                        continue;
-                    }
-                    last = Some(active);
-                    publish_priming_state(&c, &cfg, active).await;
-                }
-            });
-        }
-        (Some(mut rx), None) => {
-            tracing::error!(
-                "sensor Priming MQTT events present without PrimingCounts (misconfigured)"
-            );
-            rx.close();
-        }
-        _ => {}
-    }
-
     tracing::info!(
         host = %config.mqtt_host,
         port = config.mqtt_port,
@@ -2279,9 +2637,13 @@ pub async fn run(
                     let hs = handler_state.clone();
                     let hw_once = startup_led_hw_once_per_process.clone();
                     tokio::spawn(async move {
+                        if cfg.sensor_device.is_some() {
+                            hs.vibration_bootstrap_state_topics
+                                .store(true, Ordering::SeqCst);
+                        }
                         hs.startup_led_broker_retain_seen
                             .store(false, Ordering::SeqCst);
-                        setup_session(&c, &cfg, &hs).await;
+                        setup_session(&c, &cfg).await;
                         if cfg.i2c_device.is_some() {
                             // Wait for broker-retained state (MQTT retain=1) or assume default OFF.
                             const RETAIN_WAIT: Duration = Duration::from_millis(800);
@@ -2336,6 +2698,17 @@ pub async fn run(
                         publish_climate_state(&c, &cfg, BedSide::Left, &left).await;
                         let right = hs.climate_right.lock().await.clone();
                         publish_climate_state(&c, &cfg, BedSide::Right, &right).await;
+                        if cfg.sensor_device.is_some() {
+                            // Drain broker-retained vibration `state` messages into the mutex while `poll`
+                            // runs, then ignore further `state` inbound (see `handle_publish`): avoids HA/UI
+                            // `state` fighting `command` updates. Do **not** `unsubscribe` here — rumqttc
+                            // stalled the whole client after UNSUB on some setups.
+                            const VIB_RETAIN_DRAIN: Duration = Duration::from_millis(600);
+                            sleep(VIB_RETAIN_DRAIN).await;
+                            hs.vibration_bootstrap_state_topics
+                                .store(false, Ordering::SeqCst);
+                            publish_vibration_mqtt_states(&c, &cfg).await;
+                        }
                     });
                 } else {
                     tracing::error!(code = ?ack.code, "MQTT connection refused");
@@ -2470,6 +2843,14 @@ mod tests {
                 Some(cfg.presence_state_topic(side).as_str()),
             );
         }
+        let disc_any = discovery_payload_presence_any(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc_any).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Presence Any"));
+        assert_eq!(v["device_class"].as_str(), Some("occupancy"));
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.presence_any_state_topic().as_str()),
+        );
     }
 
     #[test]
@@ -2541,6 +2922,75 @@ mod tests {
             Some(cfg.calibrate_presence_command_topic().as_str()),
         );
         assert_eq!(v["entity_category"].as_str(), Some("config"));
+    }
+
+    #[test]
+    fn startup_led_discovery_is_configuration_entity() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_startup_led_switch(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(v["entity_category"].as_str(), Some("config"));
+    }
+
+    #[test]
+    fn water_tank_discovery_has_no_entity_category_for_sensors_grouping() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_water_tank(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert!(
+            v.get("entity_category").is_none(),
+            "omit entity_category so HA lists Water Tank with primary sensors, not under Diagnostics"
+        );
+        assert_eq!(v["device_class"].as_str(), Some("plug"));
+    }
+
+    #[test]
+    fn vibration_settings_discovery_payloads_use_config_entity_category() {
+        let cli = crate::cli::Cli::parse_from(["narcolepsy"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        for (disc, exp_state) in [
+            (
+                discovery_payload_vibration_intensity_number(&cfg),
+                cfg.vibration_intensity_state_topic(),
+            ),
+            (
+                discovery_payload_vibration_duration_number(&cfg),
+                cfg.vibration_duration_state_topic(),
+            ),
+            (
+                discovery_payload_vibration_pattern_select(&cfg),
+                cfg.vibration_pattern_state_topic(),
+            ),
+            (
+                discovery_payload_vibration_cancel_preamble_switch(&cfg),
+                cfg.vibration_cancel_preamble_state_topic(),
+            ),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+            assert_eq!(v["entity_category"].as_str(), Some("config"));
+            assert_eq!(v["state_topic"].as_str(), Some(exp_state.as_str()));
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&discovery_payload_vibration_pattern_select(&cfg)).unwrap();
+        let opts = v["options"].as_array().expect("options array");
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].as_str(), Some("single"));
+        assert_eq!(opts[1].as_str(), Some("double"));
+    }
+
+    #[test]
+    fn vibration_pattern_parse_roundtrip() {
+        assert_eq!(
+            parse_vibration_pattern_str(b"single"),
+            Some(AlarmPattern::Single)
+        );
+        assert_eq!(
+            parse_vibration_pattern_str(b"DOUBLE"),
+            Some(AlarmPattern::Double)
+        );
+        assert_eq!(parse_vibration_pattern_str(b"triple"), None);
     }
 
     #[test]

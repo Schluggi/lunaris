@@ -4,7 +4,7 @@
 //! SPDX-License-Identifier: GPL-3.0-only
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -28,68 +28,9 @@ pub enum SensorLinkError {
     Port(#[from] tokio_serial::Error),
 }
 
-/// MQTT bridge notifications for **vibrate / SetAlarm** piezo priming only.
-/// Periodic background priming (boot + every 5s) does not emit events — it is not user-visible
-/// and would make the HA **Priming** binary_sensor flap.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PrimingEvent {
-    InteractiveEnter,
-    InteractiveExit,
-}
-
-#[derive(Debug)]
-pub struct PrimingCounts {
-    pub interactive: AtomicUsize,
-}
-
-impl PrimingCounts {
-    /// `ON` for MQTT **Priming** while interactive (vibration path) priming is in progress.
-    pub fn mqtt_priming_active(&self) -> bool {
-        self.interactive.load(Ordering::SeqCst) > 0
-    }
-}
-
 #[derive(Debug)]
 pub struct SensorLinkHandle {
     pub tx: mpsc::Sender<Vec<Vec<u8>>>,
-    pub priming_counts: Arc<PrimingCounts>,
-    pub priming_events_rx: mpsc::Receiver<PrimingEvent>,
-}
-
-struct PrimingGuard {
-    counts: Arc<PrimingCounts>,
-    edge: mpsc::Sender<PrimingEvent>,
-}
-
-impl Drop for PrimingGuard {
-    fn drop(&mut self) {
-        let prev = self.counts.interactive.fetch_sub(1, Ordering::SeqCst);
-        debug_assert!(prev >= 1);
-        if prev == 1 {
-            if let Err(e) = self.edge.try_send(PrimingEvent::InteractiveExit) {
-                tracing::warn!(
-                    ?e,
-                    "Sensor: InteractiveExit notify dropped (MQTT bridge lag)"
-                );
-            }
-        }
-    }
-}
-
-fn priming_guard(counts: &Arc<PrimingCounts>, edge: &mpsc::Sender<PrimingEvent>) -> PrimingGuard {
-    let prev = counts.interactive.fetch_add(1, Ordering::SeqCst);
-    if prev == 0 {
-        if let Err(e) = edge.try_send(PrimingEvent::InteractiveEnter) {
-            tracing::warn!(
-                ?e,
-                "Sensor: InteractiveEnter notify dropped (MQTT bridge lag)"
-            );
-        }
-    }
-    PrimingGuard {
-        counts: counts.clone(),
-        edge: edge.clone(),
-    }
 }
 
 pub fn spawn(
@@ -100,21 +41,13 @@ pub fn spawn(
     capacitance_tx: Option<mpsc::Sender<crate::sensor_rx::SensorCapacitanceZones>>,
     capacitance_parse_diag: Option<std::sync::Arc<PresenceCapDiag>>,
 ) -> SensorLinkHandle {
-    let (tx, rx) = mpsc::channel::<Vec<Vec<u8>>>(16);
-    let priming_counts = Arc::new(PrimingCounts {
-        interactive: AtomicUsize::new(0),
-    });
-    let (priming_edge_tx, priming_edge_rx) = mpsc::channel::<PrimingEvent>(256);
-    let pc = priming_counts.clone();
-    let pe = priming_edge_tx.clone();
+    let (tx, rx) = mpsc::channel::<Vec<Vec<u8>>>(32);
     tokio::spawn(async move {
         if let Err(e) = run(
             device,
             baud,
             bootloader_handshake,
             vibrate_no_ack_wait,
-            pc,
-            pe,
             rx,
             capacitance_tx,
             capacitance_parse_diag,
@@ -124,11 +57,7 @@ pub fn spawn(
             tracing::error!(error = %e, "Sensor USART task ended");
         }
     });
-    SensorLinkHandle {
-        tx,
-        priming_counts,
-        priming_events_rx: priming_edge_rx,
-    }
+    SensorLinkHandle { tx }
 }
 
 fn hex_prefix(bytes: &[u8]) -> String {
@@ -173,8 +102,6 @@ const SENSOR_AFTER_PRIMING_MS: u64 = 400;
 async fn wait_for_vibration_ack(
     write_half: &mut tokio::io::WriteHalf<tokio_serial::SerialStream>,
     vibration_enabled: &Arc<AtomicBool>,
-    priming_counts: &Arc<PrimingCounts>,
-    priming_edge: &mpsc::Sender<PrimingEvent>,
 ) -> Result<(), SensorLinkError> {
     if vibration_enabled.load(Ordering::SeqCst) {
         return Ok(());
@@ -186,8 +113,8 @@ async fn wait_for_vibration_ack(
             tracing::debug!(attempt, "Sensor: 0xAE VibrationEnabled seen");
             return Ok(());
         }
-        if attempt > 0 && attempt % 10 == 0 {
-            let _g = priming_guard(priming_counts, priming_edge);
+        // Re-priming too often wedges some Sensor MCUs — opensleep uses ~800 ms spacing.
+        if attempt > 0 && attempt % 30 == 0 {
             let prim = piezo_priming_frames();
             let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
             for (i, frame) in prim.iter().enumerate() {
@@ -211,13 +138,32 @@ async fn write_vibration_batch(
     frames: Vec<Vec<u8>>,
     vibration_enabled: &Arc<AtomicBool>,
     vibrate_no_ack_wait: bool,
-    priming_counts: &Arc<PrimingCounts>,
-    priming_edge: &mpsc::Sender<PrimingEvent>,
 ) -> Result<(), SensorLinkError> {
     if vibrate_no_ack_wait {
-        let _g = priming_guard(priming_counts, priming_edge);
-        for frame in &frames {
-            write_half.write_all(frame).await?;
+        // Same pacing as opensleep-style staggering — back-to-back frames can overwhelm ttyS2 / firmware.
+        let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
+        if matches!(frames.len(), 5 | 6) {
+            let has_cancel = frames.len() == 6;
+            vibration_enabled.store(false, Ordering::SeqCst);
+            if has_cancel {
+                write_half.write_all(&frames[0]).await?;
+                sleep(Duration::from_millis(100)).await;
+            }
+            let off = if has_cancel { 1 } else { 0 };
+            let rest = &frames[off..];
+            for (i, frame) in rest.iter().enumerate() {
+                write_half.write_all(frame).await?;
+                if i + 1 < rest.len() {
+                    sleep(gap).await;
+                }
+            }
+        } else {
+            for (i, frame) in frames.iter().enumerate() {
+                write_half.write_all(frame).await?;
+                if i + 1 < frames.len() {
+                    sleep(gap).await;
+                }
+            }
         }
         write_half.flush().await?;
         tracing::debug!(
@@ -237,7 +183,6 @@ async fn write_vibration_batch(
         let alarm = &frames[off + 4..off + 5];
         let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
         {
-            let _g = priming_guard(priming_counts, priming_edge);
             for (i, frame) in prim.iter().enumerate() {
                 write_half.write_all(frame).await?;
                 if i + 1 < prim.len() {
@@ -246,8 +191,7 @@ async fn write_vibration_batch(
             }
             write_half.flush().await?;
             sleep(Duration::from_millis(SENSOR_AFTER_PRIMING_MS)).await;
-            wait_for_vibration_ack(write_half, vibration_enabled, priming_counts, priming_edge)
-                .await?;
+            wait_for_vibration_ack(write_half, vibration_enabled).await?;
         }
         for frame in alarm {
             write_half.write_all(frame).await?;
@@ -268,8 +212,6 @@ async fn run(
     baud: u32,
     bootloader_handshake: bool,
     vibrate_no_ack_wait: bool,
-    priming_counts: Arc<PrimingCounts>,
-    priming_edge: mpsc::Sender<PrimingEvent>,
     mut rx: mpsc::Receiver<Vec<Vec<u8>>>,
     capacitance_tx: Option<mpsc::Sender<crate::sensor_rx::SensorCapacitanceZones>>,
     capacitance_parse_diag: Option<std::sync::Arc<PresenceCapDiag>>,
@@ -312,12 +254,7 @@ async fn run(
                     }
                     buf.extend_from_slice(&chunk[..n]);
                     let diag = parse_diag_for_rx.as_ref().map(|a| a.as_ref());
-                    sensor_rx::drain_inbound(
-                        &mut buf,
-                        &vib_flag,
-                        cap_flag.as_ref(),
-                        diag,
-                    );
+                    sensor_rx::drain_inbound(&mut buf, &vib_flag, cap_flag.as_ref(), diag);
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Sensor serial read failed");
@@ -356,8 +293,6 @@ async fn run(
                                 frames,
                                 &vibration_enabled,
                                 vibrate_no_ack_wait,
-                                &priming_counts,
-                                &priming_edge,
                             )
                             .await?;
                             tracing::debug!("Sensor link: vibration batch completed");
