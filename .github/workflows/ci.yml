@@ -35,10 +35,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.84.0
-          targets: aarch64-unknown-linux-gnu
+          targets: aarch64-unknown-linux-musl
 
-      - name: Install AArch64 GNU toolchain (linker)
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
 
-      - name: Cargo build (aarch64 release)
-        run: cargo build --release --verbose --target aarch64-unknown-linux-gnu
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --version 0.20.1 --locked
+
+      - name: Cargo build (aarch64 musl release, static — matches Pod glibc constraints)
+        run: cargo zigbuild --release --verbose --target aarch64-unknown-linux-musl

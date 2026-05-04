@@ -10,6 +10,7 @@ mod frozen_rx;
 mod is31fl3194;
 mod machine_config;
 mod mqtt_bridge;
+mod self_update;
 mod sensor_frame;
 mod sensor_link;
 mod sensor_rx;
@@ -22,10 +23,18 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    if let Some(flag) = std::env::args().nth(1) {
+        if (flag == "--version" || flag == "-V") && std::env::args().len() == 2 {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+    }
+
     let cli = machine_config::parse_cli_overlay_machine_json();
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(cli.log_level.clone()));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting lunaris");
 
     if let Err(e) =
         serial_prime::check_device_accessible(&cli.serial_device, cli.effective_serial_baud()).await

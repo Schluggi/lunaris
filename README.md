@@ -44,7 +44,7 @@ Using custom firmware or low-level hardware control may void warranties, break t
 | Presence Calibration | binary_sensor | No | On while lunaris is learning an “empty bed” baseline. |
 | Presence Left / Presence Right | binary_sensor | No | Someone is detected on that side of the mattress. |
 | Target Temperature Left / Target Temperature Right | sensor | No | Same target you set on the climate control, shown as plain numbers for dashboards or cards. |
-| Water Tank | binary_sensor | No | Shows whether the water tank is plugged in. |
+| [Water Tank](#water-tank) | binary_sensor | No | Shows whether the water tank is plugged in. |
 
 ### Configuration
 
@@ -52,6 +52,7 @@ Using custom firmware or low-level hardware control may void warranties, break t
 
 | Name | Kind | Hidden by default | What it does |
 |:---|:---|:---:|:---|
+| Firmware | update | No | Updates Lunaris itself by pullig the latest version from github releases. |
 | Calibrate Presence | button | No | Start learning what an empty mattress looks like (keep the bed clear for ~10 s afterwards). |
 | Presence Baseline Delta | number | Yes | Fine-tune sensitivity after calibration. |
 | Presence Cap Threshold | number | Yes | Fine-tune rough “capacitance” sensitivity before calibration. |
@@ -186,28 +187,35 @@ lunaris \
 
 ## 🔨 How To Build
 - Host: Ubuntu 24.04
+
 ```bash
-# Install dependencies
-apt-get install -y gcc-aarch64-linux-gnu
-rustup target add aarch64-unknown-linux-gnu
+# Download & install zig (https://ziglang.org/download/)
+wget https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz -O /opt/zig-x86_64-linux-0.16.0.tar.xz
+cd /opt/
+tar xfv zig-x86_64-linux-0.16.0.tar.xz
+export PATH=${PATH}:/opt/zig-x86_64-linux-0.16.0/
+cd -
+
+# Setup Zigbuild
+rustup target add aarch64-unknown-linux-musl
+cargo install cargo-zigbuild --version 0.20.1 --locked
 
 # Build
-cargo build --release --target aarch64-unknown-linux-gnu
+cargo zigbuild --release --target aarch64-unknown-linux-musl
 ```
-The compiled binary is located in `./target/aarch64-unknown-linux-gnu/release/`.
+
+Output: `./target/aarch64-unknown-linux-musl/release/lunaris`.
 
 
 ## ❓ FAQ
 
 ### Presence Calibration
-
 When lunaris starts and the MQTT topic does not exist yet (this is normally the first start ever), it will automatically calibrate the presence sensors.
-You can also calibrate manually with the discovered **Calibrate Presence** MQTT button—the entity ID differs per install (**`--topic-prefix`** / **`--device-name`**; defaults in [Quick start](#cli-quick-start)). Calibration takes ~10s; keep the bed empty.
+You can also calibrate manually with the discovered **Calibrate Presence** MQTT button—the entity.
 For fine-tuning, use **Presence Baseline Delta** and **Presence Cap Threshold** on the device (same naming caveat—copy IDs from HA, not static examples).
 
 ### Water Tank
-
-The **Water Tank** binary sensor often shows **`unknown`** briefly at startup until the bridge has parsed reservoir state from Frozen traffic. Cycling the physical tank plug usually refreshes HA; replace any hard-coded `binary_sensor.*` ID with yours from the device page.
+The Water Tank binary sensor often shows `unknown` briefly at startup until the bridge has parsed reservoir state. You can usually refresh it by pulling the tank out and plugging it back in.
 
 
 ## 🙏 Special Thanks
@@ -215,5 +223,4 @@ The **Water Tank** binary sensor often shows **`unknown`** briefly at startup un
 - [throwaway31265](https://github.com/throwaway31265) for [free-sleep](https://github.com/throwaway31265/free-sleep) and the instructions on how to root.
 
 ## ⚖️ License
-
 SPDX: **GPL-3.0-only**. See [LICENSE](LICENSE). CRC/framing for Frozen frames derives from [opensleep](https://github.com/LiamSnow/opensleep) (same license).

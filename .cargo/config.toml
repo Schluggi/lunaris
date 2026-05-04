@@ -1,11 +1,21 @@
-# Cross-compile for Eight Sleep Pod SOM (aarch64 Linux). Host packages vary by distro:
-# Debian/Ubuntu: sudo apt install gcc-aarch64-linux-gnu
-# Fedora: sudo dnf install gcc-aarch64-linux-gnu
+# Cross-compile for Eight Sleep Pod SOM (aarch64 Linux).
 #
-# Then: rustup target add aarch64-unknown-linux-gnu
-#      cargo build --release --target aarch64-unknown-linux-gnu
+# **Recommended for binaries that must run on the Pod:** static **musl** (no host glibc dependency).
+# GitHub Actions release builds use `cargo zigbuild` → `aarch64-unknown-linux-musl`.
 #
-# Binary path: target/aarch64-unknown-linux-gnu/release/lunaris
+#   rustup target add aarch64-unknown-linux-musl
+#   cargo install cargo-zigbuild --version 0.20.1 --locked   # lockfile → deps compatible with Rust 1.84
+#   # Zig must be on PATH — https://ziglang.org/download/  or snap install zig --classic
+#   cargo zigbuild --release --target aarch64-unknown-linux-musl
+#
+# Binary: `target/aarch64-unknown-linux-musl/release/lunaris`
+#
+# **Alternative:** GNU target links against the cross-toolchain glibc (often *newer* than the Pod).
+# If you see `GLIBC_x.y not found` on the Pod, use musl instead of this:
+#
+#   Debian/Ubuntu: sudo apt install gcc-aarch64-linux-gnu
+#   rustup target add aarch64-unknown-linux-gnu
+#   cargo build --release --target aarch64-unknown-linux-gnu
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
