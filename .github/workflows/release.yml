@@ -40,13 +40,14 @@ jobs:
             echo "tag=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Gate release on feat/fix commits
+      - name: Determine release type from commits
         id: gate
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "release=true" >> "$GITHUB_OUTPUT"
-            echo "workflow_dispatch — releasing."
+            echo "bump=patch" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch — releasing with default patch bump."
             exit 0
           fi
           PREV="${{ steps.prev.outputs.tag }}"
@@ -55,18 +56,29 @@ jobs:
           else
             RANGE="HEAD"
           fi
-          if git log "$RANGE" --no-merges --extended-regexp \
-              --grep='^(feat|fix)(\([^)]*\))?(!)?:' -1 -q; then
+          LOG="$(git log "$RANGE" --no-merges --format=%B)"
+
+          if printf '%s' "$LOG" | grep -Eq '(^|[[:space:]])BREAKING CHANGE:' ||
+             git log "$RANGE" --no-merges --extended-regexp --grep='^[a-z]+(\([^)]*\))?!:' -1 -q; then
             echo "release=true" >> "$GITHUB_OUTPUT"
-            echo "feat/fix commit(s) in ${RANGE} — releasing."
+            echo "bump=major" >> "$GITHUB_OUTPUT"
+            echo "Breaking change found in ${RANGE} — major release."
+          elif git log "$RANGE" --no-merges --extended-regexp --grep='^feat(\([^)]*\))?:' -1 -q; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "bump=minor" >> "$GITHUB_OUTPUT"
+            echo "feat commit(s) found in ${RANGE} — minor release."
+          elif git log "$RANGE" --no-merges --extended-regexp --grep='^fix(\([^)]*\))?:' -1 -q; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "bump=patch" >> "$GITHUB_OUTPUT"
+            echo "fix commit(s) found in ${RANGE} — patch release."
           else
             echo "release=false" >> "$GITHUB_OUTPUT"
-            echo "No feat/fix commits in ${RANGE} — skipping release."
+            echo "No fix/feat/breaking commits in ${RANGE} — skipping release."
           fi
 
-      - name: Skip release (no feat/fix commits)
+      - name: Skip release (no semver-relevant commits)
         if: steps.gate.outputs.release != 'true'
-        run: echo "::notice::Release skipped — no feat or fix commits since the previous tag."
+        run: echo "::notice::Release skipped — no fix, feat, or breaking change commits since the previous tag."
 
       - uses: dtolnay/rust-toolchain@stable
         if: steps.gate.outputs.release == 'true'
@@ -85,23 +97,35 @@ jobs:
         if: steps.gate.outputs.release == 'true'
         run: cargo install cargo-zigbuild --version 0.20.1 --locked
 
-      - name: Bump patch version in Cargo.toml
+      - name: Bump semantic version in Cargo.toml
         if: steps.gate.outputs.release == 'true'
         id: bump
         run: |
           set -euo pipefail
+          BUMP_KIND="${{ steps.gate.outputs.bump }}"
+          export BUMP_KIND
           python3 << 'PY'
           import os
           import re
           from pathlib import Path
 
+          bump_kind = os.environ["BUMP_KIND"]
           path = Path("Cargo.toml")
           text = path.read_text()
           m = re.search(r'^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"', text, re.MULTILINE)
           if not m:
               raise SystemExit("Could not parse version from Cargo.toml")
           major, minor, patch = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-          new_ver = f"{major}.{minor}.{patch + 1}"
+
+          if bump_kind == "major":
+              new_ver = f"{major + 1}.0.0"
+          elif bump_kind == "minor":
+              new_ver = f"{major}.{minor + 1}.0"
+          elif bump_kind == "patch":
+              new_ver = f"{major}.{minor}.{patch + 1}"
+          else:
+              raise SystemExit(f"Unsupported bump kind: {bump_kind}")
+
           new_text, n = re.subn(
               r'(^version\s*=\s*)"(\d+)\.(\d+)\.(\d+)"',
               rf'\1"{new_ver}"',
@@ -114,7 +138,7 @@ jobs:
           path.write_text(new_text)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               print(f"version={new_ver}", file=f)
-          print(f"Bumped version to {new_ver}")
+          print(f"Bumped ({bump_kind}) version to {new_ver}")
           PY
 
       - name: Build release (aarch64 musl, static)
