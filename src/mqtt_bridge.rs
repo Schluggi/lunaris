@@ -858,6 +858,7 @@ fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> Str
 fn discovery_payload_vibration_intensity_number(config: &BridgeConfig) -> String {
     json!({
         "name": "Vibration Intensity",
+        "icon": "mdi:vibrate",
         "command_topic": config.vibration_intensity_command_topic(),
         "state_topic": config.vibration_intensity_state_topic(),
         "min": 1,
@@ -1211,7 +1212,6 @@ fn discovery_payload_calibrate_presence_button(config: &BridgeConfig) -> String 
 fn discovery_payload_presence_cap_threshold_number(config: &BridgeConfig) -> String {
     json!({
         "name": "Presence Cap Threshold",
-        "icon": "mdi:vibrate",
         "command_topic": config.presence_cap_threshold_command_topic(),
         "state_topic": config.presence_cap_threshold_state_topic(),
         "min": PRESENCE_CAP_THRESHOLD_MIN,
@@ -4346,9 +4346,6 @@ mod tests {
                 .as_str(),
             Some(cfg.presence_cap_threshold_command_topic().as_str()),
         );
-        let cap: serde_json::Value =
-            serde_json::from_str(&discovery_payload_presence_cap_threshold_number(&cfg)).unwrap();
-        assert_eq!(cap["icon"].as_str(), Some("mdi:vibrate"));
     }
 
     #[test]
@@ -4434,6 +4431,9 @@ mod tests {
         let duration: serde_json::Value =
             serde_json::from_str(&discovery_payload_vibration_duration_number(&cfg)).unwrap();
         assert_eq!(duration["icon"].as_str(), Some("mdi:vibrate"));
+        let intensity: serde_json::Value =
+            serde_json::from_str(&discovery_payload_vibration_intensity_number(&cfg)).unwrap();
+        assert_eq!(intensity["icon"].as_str(), Some("mdi:vibrate"));
     }
 
     #[test]
