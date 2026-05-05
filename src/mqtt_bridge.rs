@@ -30,6 +30,7 @@ use crate::serial_prime;
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "lunaris_deviceinfo_device_label";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "lunaris_deviceinfo_device_id";
+const DISCOVERY_OBJECT_ID_SYSTEM_UPTIME: &str = "lunaris_system_uptime";
 const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
 const DISCOVERY_OBJECT_ID_REBOOT: &str = "lunaris_reboot";
@@ -551,6 +552,10 @@ impl BridgeConfig {
         format!("{}/sensor/deviceinfo_device_id/state", self.topic_prefix)
     }
 
+    pub fn system_uptime_state_topic(&self) -> String {
+        format!("{}/sensor/system_uptime/state", self.topic_prefix)
+    }
+
     pub fn discovery_topic_deviceinfo_device_label(&self) -> String {
         format!(
             "{}/sensor/{}/config",
@@ -562,6 +567,13 @@ impl BridgeConfig {
         format!(
             "{}/sensor/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_DEVICEINFO_ID
+        )
+    }
+
+    pub fn discovery_topic_system_uptime(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_SYSTEM_UPTIME
         )
     }
 
@@ -945,6 +957,56 @@ fn discovery_payload_deviceinfo_device_id(config: &BridgeConfig) -> String {
         "availability": config.availability_json(),
     })
     .to_string()
+}
+
+fn discovery_payload_system_uptime(config: &BridgeConfig) -> String {
+    json!({
+        "name": "System Uptime",
+        "state_topic": config.system_uptime_state_topic(),
+        "icon": "mdi:timer-outline",
+        "entity_category": "diagnostic",
+        "enabled_by_default": false,
+        "unit_of_measurement": "s",
+        "device_class": "duration",
+        "state_class": "measurement",
+        "unique_id": format!("{}_system_uptime", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+async fn read_system_uptime_secs() -> Option<u64> {
+    let content = tokio::fs::read_to_string("/proc/uptime").await.ok()?;
+    let raw = content.split_whitespace().next()?;
+    let secs = raw.parse::<f64>().ok()?;
+    if !secs.is_finite() || secs.is_sign_negative() {
+        return None;
+    }
+    Some(secs.floor() as u64)
+}
+
+async fn publish_system_uptime_state(client: &AsyncClient, config: &BridgeConfig) {
+    let qos = QoS::AtLeastOnce;
+    let Some(uptime_secs) = read_system_uptime_secs().await else {
+        tracing::warn!("read /proc/uptime failed; skipping System Uptime publish");
+        return;
+    };
+    if let Err(e) = client
+        .publish(
+            config.system_uptime_state_topic(),
+            qos,
+            true,
+            uptime_secs.to_string(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish system uptime state");
+    }
 }
 
 fn discovery_payload_presence(config: &BridgeConfig, side: BedSide) -> String {
@@ -2411,6 +2473,14 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         {
             tracing::error!(?e, "publish deviceinfo device-id state");
         }
+        let disc = discovery_payload_system_uptime(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_system_uptime(), qos, true, disc)
+            .await
+        {
+            tracing::error!(?e, "publish system uptime discovery");
+        }
+        publish_system_uptime_state(client, config).await;
     }
     if config.i2c_device.is_some() {
         let disc_led = discovery_payload_light(config);
@@ -3265,6 +3335,17 @@ pub async fn run(
         }
     });
 
+    let c = client.clone();
+    let cfg = config.clone();
+    tokio::spawn(async move {
+        let mut uptime_interval = interval(Duration::from_secs(60));
+        uptime_interval.tick().await;
+        loop {
+            publish_system_uptime_state(&c, &cfg).await;
+            uptime_interval.tick().await;
+        }
+    });
+
     if let Some(mut cap_rx) = capacitance_rx {
         if let Some(mut cal_rx) = presence_calibrate_rx {
             let c = client.clone();
@@ -3852,6 +3933,23 @@ mod tests {
                 "disabled in HA by default — enable under device entities if desired"
             );
         }
+    }
+
+    #[test]
+    fn system_uptime_discovery_matches_state_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_system_uptime(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.system_uptime_state_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+        assert_eq!(v["enabled_by_default"].as_bool(), Some(false));
+        assert_eq!(v["device_class"].as_str(), Some("duration"));
+        assert_eq!(v["unit_of_measurement"].as_str(), Some("s"));
     }
 
     #[test]
