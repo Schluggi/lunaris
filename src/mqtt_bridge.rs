@@ -35,6 +35,7 @@ const DISCOVERY_OBJECT_ID_SYSTEM_UPTIME: &str = "lunaris_system_uptime";
 const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
 const DISCOVERY_OBJECT_ID_REBOOT: &str = "lunaris_reboot";
+const DISCOVERY_OBJECT_ID_SHUTDOWN: &str = "lunaris_shutdown";
 const DISCOVERY_OBJECT_ID_LED: &str = "lunaris_led";
 const DISCOVERY_OBJECT_ID_LED_BEHAVIOR: &str = "lunaris_led_behavior";
 const DISCOVERY_OBJECT_ID_CLIMATE_LEFT: &str = "lunaris_climate_left";
@@ -246,6 +247,17 @@ impl BridgeConfig {
         format!(
             "{}/button/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_REBOOT
+        )
+    }
+
+    pub fn shutdown_command_topic(&self) -> String {
+        format!("{}/button/shutdown/set", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_shutdown(&self) -> String {
+        format!(
+            "{}/button/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_SHUTDOWN
         )
     }
 
@@ -712,12 +724,38 @@ fn discovery_payload_reboot_button(config: &BridgeConfig) -> String {
     .to_string()
 }
 
+fn discovery_payload_shutdown_button(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Shutdown",
+        "command_topic": config.shutdown_command_topic(),
+        "payload_press": config.payload_press,
+        "entity_category": "diagnostic",
+        "icon": "mdi:power",
+        "unique_id": format!("{}_shutdown", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 async fn trigger_pod_reboot() -> Result<(), String> {
     Command::new("systemctl")
         .arg("reboot")
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("failed to run systemctl reboot: {e}"))
+}
+
+async fn trigger_pod_shutdown() -> Result<(), String> {
+    Command::new("systemctl")
+        .arg("poweroff")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to run systemctl poweroff: {e}"))
 }
 
 fn discovery_payload_led_behavior_select(config: &BridgeConfig) -> String {
@@ -1037,7 +1075,7 @@ fn format_local_time_iso8601(secs_since_epoch: i64) -> Option<String> {
         tm_gmtoff: 0,
         tm_zone: std::ptr::null(),
     };
-    let time_val: libc::time_t = secs_since_epoch.try_into().ok()?;
+    let time_val = secs_since_epoch.try_into().ok()?;
     // SAFETY: `local_tm` and `time_val` are valid pointers for `localtime_r`.
     let tm_ptr = unsafe { libc::localtime_r(&time_val, &mut local_tm) };
     if tm_ptr.is_null() {
@@ -2546,6 +2584,13 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     {
         tracing::error!(?e, "publish reboot button discovery");
     }
+    let disc_shutdown = discovery_payload_shutdown_button(config);
+    if let Err(e) = client
+        .publish(config.discovery_topic_shutdown(), qos, true, disc_shutdown)
+        .await
+    {
+        tracing::error!(?e, "publish shutdown button discovery");
+    }
     {
         let disc = discovery_payload_deviceinfo_device_label(config);
         if let Err(e) = client
@@ -2908,6 +2953,9 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     if let Err(e) = client.subscribe(config.reboot_command_topic(), qos).await {
         tracing::error!(?e, "subscribe reboot command topic");
     }
+    if let Err(e) = client.subscribe(config.shutdown_command_topic(), qos).await {
+        tracing::error!(?e, "subscribe shutdown command topic");
+    }
     if config.self_update_enabled() {
         if let Err(e) = client.subscribe(config.update_command_topic(), qos).await {
             tracing::error!(?e, "subscribe self-update command topic");
@@ -3177,6 +3225,21 @@ async fn handle_publish(
                 publish_json_result(client, config, "reboot", "error", &e).await;
             } else {
                 tracing::warn!("pod reboot command executed");
+            }
+        }
+        return;
+    }
+
+    if p.topic == config.shutdown_command_topic() {
+        let expected = config.payload_press.as_bytes();
+        if p.payload.as_ref() == expected {
+            publish_json_result(client, config, "shutdown", "success", "pod shutdown requested")
+                .await;
+            if let Err(e) = trigger_pod_shutdown().await {
+                tracing::error!(%e, "pod shutdown failed");
+                publish_json_result(client, config, "shutdown", "error", &e).await;
+            } else {
+                tracing::warn!("pod shutdown command executed");
             }
         }
         return;
@@ -4222,6 +4285,20 @@ mod tests {
         assert_eq!(
             v["command_topic"].as_str(),
             Some(cfg.reboot_command_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+    }
+
+    #[test]
+    fn shutdown_button_discovery_matches_command_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_shutdown_button(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.shutdown_command_topic().as_str()),
         );
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
     }
