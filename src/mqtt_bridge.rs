@@ -35,7 +35,7 @@ const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
 const DISCOVERY_OBJECT_ID_REBOOT: &str = "lunaris_reboot";
 const DISCOVERY_OBJECT_ID_LED: &str = "lunaris_led";
-const DISCOVERY_OBJECT_ID_STARTUP_LED: &str = "lunaris_startup_led";
+const DISCOVERY_OBJECT_ID_LED_BEHAVIOR: &str = "lunaris_led_behavior";
 const DISCOVERY_OBJECT_ID_CLIMATE_LEFT: &str = "lunaris_climate_left";
 const DISCOVERY_OBJECT_ID_CLIMATE_RIGHT: &str = "lunaris_climate_right";
 const DISCOVERY_OBJECT_ID_VIBRATE_LEFT: &str = "lunaris_vibrate_left";
@@ -63,6 +63,38 @@ const DISCOVERY_OBJECT_ID_UPDATE: &str = "lunaris_update";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LedBehavior {
+    #[default]
+    Manual,
+    Status,
+    Startup,
+}
+
+impl LedBehavior {
+    fn as_mqtt_payload(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Status => "Status",
+            Self::Startup => "Startup",
+        }
+    }
+}
+
+fn parse_led_behavior(payload: &[u8]) -> Option<LedBehavior> {
+    let text = std::str::from_utf8(payload).ok()?.trim();
+    if text.eq_ignore_ascii_case("manual") {
+        return Some(LedBehavior::Manual);
+    }
+    if text.eq_ignore_ascii_case("status") {
+        return Some(LedBehavior::Status);
+    }
+    if text.eq_ignore_ascii_case("startup") {
+        return Some(LedBehavior::Startup);
+    }
+    None
+}
 
 /// Runtime vibration / `SetAlarm` parameters (Home Assistant **number** / **select** / **switch**; retained state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,19 +263,19 @@ impl BridgeConfig {
         format!("{}/light/led/state", self.topic_prefix)
     }
 
-    pub fn discovery_topic_startup_led(&self) -> String {
+    pub fn discovery_topic_led_behavior(&self) -> String {
         format!(
-            "{}/switch/{}/config",
-            self.discovery_prefix, DISCOVERY_OBJECT_ID_STARTUP_LED
+            "{}/select/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_LED_BEHAVIOR
         )
     }
 
-    pub fn startup_led_command_topic(&self) -> String {
-        format!("{}/switch/startup_led/set", self.topic_prefix)
+    pub fn led_behavior_command_topic(&self) -> String {
+        format!("{}/select/led_behavior/set", self.topic_prefix)
     }
 
-    pub fn startup_led_state_topic(&self) -> String {
-        format!("{}/switch/startup_led/state", self.topic_prefix)
+    pub fn led_behavior_state_topic(&self) -> String {
+        format!("{}/select/led_behavior/state", self.topic_prefix)
     }
 
     pub fn climate_discovery_topic(&self, side: BedSide) -> String {
@@ -687,16 +719,15 @@ async fn trigger_pod_reboot() -> Result<(), String> {
         .map_err(|e| format!("failed to run systemctl reboot: {e}"))
 }
 
-fn discovery_payload_startup_led_switch(config: &BridgeConfig) -> String {
+fn discovery_payload_led_behavior_select(config: &BridgeConfig) -> String {
     json!({
-        "name": "Startup LED",
+        "name": "LED Behavior",
         "icon": "mdi:lightbulb",
-        "command_topic": config.startup_led_command_topic(),
-        "state_topic": config.startup_led_state_topic(),
-        "payload_on": "ON",
-        "payload_off": "OFF",
+        "command_topic": config.led_behavior_command_topic(),
+        "state_topic": config.led_behavior_state_topic(),
+        "options": ["Manual", "Status", "Startup"],
         "entity_category": "config",
-        "unique_id": format!("{}_startup_led", config.device_identifier),
+        "unique_id": format!("{}_led_behavior", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -1601,9 +1632,9 @@ fn vibrate_action_label(side: BedSide) -> &'static str {
 #[derive(Clone)]
 struct PublishHandlerState {
     light_state: Arc<Mutex<LightStateSnapshot>>,
-    startup_led_on: Arc<Mutex<bool>>,
+    led_behavior: Arc<Mutex<LedBehavior>>,
     /// Set when an inbound `state_topic` message was sent with the MQTT retain flag (broker-stored preference), not a live publish.
-    startup_led_broker_retain_seen: Arc<AtomicBool>,
+    led_behavior_broker_retain_seen: Arc<AtomicBool>,
     /// While **true**, inbound retained **`state_topic`** payloads repopulate UI-facing settings so broker-stored HA choices survive lunaris restarts (climate, MQTT light snapshot, vibration, presence). Ignore after drain — later `…/state` echoes must not overwrite values set via `…/set` (no `unsubscribe`).
     mqtt_ha_state_bootstrap: Arc<AtomicBool>,
     climate_left: Arc<Mutex<ClimateSideState>>,
@@ -2093,14 +2124,22 @@ async fn publish_vibration_mqtt_states(client: &AsyncClient, config: &BridgeConf
     publish_vibration_cancel_preamble_state(client, config, vs.cancel_preamble).await;
 }
 
-async fn publish_startup_led_state(client: &AsyncClient, config: &BridgeConfig, on: bool) {
-    let payload = if on { "ON" } else { "OFF" };
+async fn publish_led_behavior_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    behavior: LedBehavior,
+) {
     let qos = QoS::AtLeastOnce;
     if let Err(e) = client
-        .publish(config.startup_led_state_topic(), qos, true, payload)
+        .publish(
+            config.led_behavior_state_topic(),
+            qos,
+            true,
+            behavior.as_mqtt_payload(),
+        )
         .await
     {
-        tracing::error!(?e, "publish startup LED state");
+        tracing::error!(?e, "publish LED behavior state");
     }
 }
 
@@ -2490,12 +2529,12 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         {
             tracing::error!(?e, "publish light discovery");
         }
-        let disc_sw = discovery_payload_startup_led_switch(config);
+        let disc_sw = discovery_payload_led_behavior_select(config);
         if let Err(e) = client
-            .publish(config.discovery_topic_startup_led(), qos, true, disc_sw)
+            .publish(config.discovery_topic_led_behavior(), qos, true, disc_sw)
             .await
         {
-            tracing::error!(?e, "publish startup LED switch discovery");
+            tracing::error!(?e, "publish LED behavior select discovery");
         }
     }
     for side in [BedSide::Left, BedSide::Right] {
@@ -2796,17 +2835,14 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
         if let Err(e) = client.subscribe(config.light_command_topic(), qos).await {
             tracing::error!(?e, "subscribe light command topic");
         }
-        if let Err(e) = client
-            .subscribe(config.startup_led_command_topic(), qos)
-            .await
-        {
-            tracing::error!(?e, "subscribe startup LED command topic");
+        if let Err(e) = client.subscribe(config.led_behavior_command_topic(), qos).await {
+            tracing::error!(?e, "subscribe LED behavior command topic");
         }
         if let Err(e) = client
-            .subscribe(config.startup_led_state_topic(), qos)
+            .subscribe(config.led_behavior_state_topic(), qos)
             .await
         {
-            tracing::error!(?e, "subscribe startup LED state topic (retained sync)");
+            tracing::error!(?e, "subscribe LED behavior state topic (retained sync)");
         }
     }
     for side in [BedSide::Left, BedSide::Right] {
@@ -2901,6 +2937,7 @@ async fn handle_light_command(
     client: &AsyncClient,
     config: &BridgeConfig,
     light_state: &Arc<Mutex<LightStateSnapshot>>,
+    led_behavior: &Arc<Mutex<LedBehavior>>,
     payload: &[u8],
 ) {
     let Some(cmd) = parse_light_command(payload) else {
@@ -2908,6 +2945,10 @@ async fn handle_light_command(
         return;
     };
     if config.i2c_device.is_none() {
+        return;
+    }
+    if *led_behavior.lock().await == LedBehavior::Status {
+        tracing::info!("ignoring LED light command while LED behavior is Status");
         return;
     }
 
@@ -2936,38 +2977,62 @@ async fn handle_light_command(
     }
 }
 
-async fn handle_startup_led_command(
+async fn handle_led_behavior_command(
     client: &AsyncClient,
     config: &BridgeConfig,
-    startup_led_on: &Arc<Mutex<bool>>,
+    led_behavior: &Arc<Mutex<LedBehavior>>,
+    light_state: &Arc<Mutex<LightStateSnapshot>>,
     payload: &[u8],
 ) {
-    let Some(on) = parse_mqtt_on_off(payload) else {
-        tracing::warn!("startup LED switch: ignored payload (expected ON or OFF)");
+    let Some(new_behavior) = parse_led_behavior(payload) else {
+        tracing::warn!("LED behavior select: ignored payload (expected Manual, Status, or Startup)");
         return;
     };
-    *startup_led_on.lock().await = on;
-    publish_startup_led_state(client, config, on).await;
-    if on {
-        tracing::info!("Startup LED preference ON (green LED applies on next lunaris start)");
-    } else {
-        tracing::info!("Startup LED preference OFF");
+    *led_behavior.lock().await = new_behavior;
+    publish_led_behavior_state(client, config, new_behavior).await;
+
+    if config.i2c_device.is_some() {
+        match new_behavior {
+            LedBehavior::Status => {
+                let green = LightStateSnapshot {
+                    on: true,
+                    brightness: 255,
+                    base_r: 0,
+                    base_g: 255,
+                    base_b: 0,
+                };
+                if let Err(e) = commit_light_snapshot(client, config, light_state, green).await {
+                    tracing::error!(%e, "LED behavior status: I²C LED write failed");
+                    publish_json_result(client, config, "led_behavior", "error", &e).await;
+                } else {
+                    tracing::info!("LED behavior set to Status (solid green while lunaris runs)");
+                }
+            }
+            LedBehavior::Manual => {
+                tracing::info!("LED behavior set to Manual (LED controlled by light entity)");
+            }
+            LedBehavior::Startup => {
+                tracing::info!(
+                    "LED behavior set to Startup (green for 5s on next lunaris start, then off)"
+                );
+            }
+        }
     }
 }
 
-/// Inbound sync on `state_topic` — updates internal preference only; hardware is driven after connect from broker-retained payloads.
-async fn handle_startup_led_state_message(
-    startup_led_on: &Arc<Mutex<bool>>,
-    startup_led_broker_retain_seen: &Arc<AtomicBool>,
+/// Inbound sync on `state_topic` — updates internal preference from retained broker state.
+async fn handle_led_behavior_state_message(
+    led_behavior: &Arc<Mutex<LedBehavior>>,
+    led_behavior_broker_retain_seen: &Arc<AtomicBool>,
     payload: &[u8],
     mqtt_retain: bool,
 ) {
-    let Some(on) = parse_mqtt_on_off(payload) else {
+    let Some(parsed_behavior) = parse_led_behavior(payload) else {
         return;
     };
-    *startup_led_on.lock().await = on;
+    *led_behavior.lock().await = parsed_behavior;
     if mqtt_retain {
-        startup_led_broker_retain_seen.store(true, Ordering::SeqCst);
+        led_behavior_broker_retain_seen.store(true, Ordering::SeqCst);
     }
 }
 
@@ -3225,14 +3290,15 @@ async fn handle_publish(
         }
     }
 
-    if config.i2c_device.is_some() && p.topic == config.startup_led_command_topic() {
-        handle_startup_led_command(client, config, &st.startup_led_on, &p.payload).await;
+    if config.i2c_device.is_some() && p.topic == config.led_behavior_command_topic() {
+        handle_led_behavior_command(client, config, &st.led_behavior, &st.light_state, &p.payload)
+            .await;
         return;
     }
-    if config.i2c_device.is_some() && p.topic == config.startup_led_state_topic() {
-        handle_startup_led_state_message(
-            &st.startup_led_on,
-            &st.startup_led_broker_retain_seen,
+    if config.i2c_device.is_some() && p.topic == config.led_behavior_state_topic() {
+        handle_led_behavior_state_message(
+            &st.led_behavior,
+            &st.led_behavior_broker_retain_seen,
             &p.payload,
             p.retain,
         )
@@ -3241,7 +3307,7 @@ async fn handle_publish(
     }
 
     if config.i2c_device.is_some() && p.topic == config.light_command_topic() {
-        handle_light_command(client, config, &st.light_state, &p.payload).await;
+        handle_light_command(client, config, &st.light_state, &st.led_behavior, &p.payload).await;
         return;
     }
     // Like vibration `…/number/…/state`: ignore echoes on `light/led/state`; broker retain is drained only during bootstrap.
@@ -3274,15 +3340,13 @@ pub async fn run(
 
     let handler_state = PublishHandlerState {
         light_state: Arc::new(Mutex::new(LightStateSnapshot::default())),
-        startup_led_on: Arc::new(Mutex::new(false)),
-        startup_led_broker_retain_seen: Arc::new(AtomicBool::new(false)),
+        led_behavior: Arc::new(Mutex::new(LedBehavior::default())),
+        led_behavior_broker_retain_seen: Arc::new(AtomicBool::new(false)),
         mqtt_ha_state_bootstrap: Arc::new(AtomicBool::new(false)),
         climate_left: Arc::new(Mutex::new(ClimateSideState::default())),
         climate_right: Arc::new(Mutex::new(ClimateSideState::default())),
         presence_calibrate_tx: presence_calibrate_tx.clone(),
     };
-
-    let startup_led_hw_once_per_process = Arc::new(AtomicBool::new(false));
 
     let mut opts = MqttOptions::new(
         config.mqtt_client_id.clone(),
@@ -3556,7 +3620,7 @@ pub async fn run(
                         .mqtt_ha_state_bootstrap
                         .store(true, Ordering::SeqCst);
                     handler_state
-                        .startup_led_broker_retain_seen
+                        .led_behavior_broker_retain_seen
                         .store(false, Ordering::SeqCst);
                     // rumqttc: `AsyncClient` requests are only processed while `eventloop.poll()` runs.
                     // Awaiting `publish`/`subscribe` on the same task that calls `poll()` deadlocks the
@@ -3564,11 +3628,10 @@ pub async fn run(
                     let c = client.clone();
                     let cfg = config.clone();
                     let hs = handler_state.clone();
-                    let hw_once = startup_led_hw_once_per_process.clone();
                     tokio::spawn(async move {
                         setup_session(&c, &cfg).await;
 
-                        // Broker retain replay (climate/light/vibration/presence **`state_topic`** + startup_led)
+                        // Broker retain replay (climate/light/vibration/presence **`state_topic`** + led_behavior)
                         // while `mqtt_ha_state_bootstrap` is observed in `handle_publish`.
                         const HA_RETAIN_DRAIN: Duration = Duration::from_millis(850);
                         sleep(HA_RETAIN_DRAIN).await;
@@ -3612,48 +3675,62 @@ pub async fn run(
                         }
 
                         if cfg.i2c_device.is_some() {
-                            let startup_on = *hs.startup_led_on.lock().await;
-                            if startup_on
-                                && hw_once
-                                    .compare_exchange(
-                                        false,
-                                        true,
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
-                                    )
-                                    .is_ok()
-                            {
-                                let green = LightStateSnapshot {
-                                    on: true,
-                                    brightness: 255,
-                                    base_r: 0,
-                                    base_g: 255,
-                                    base_b: 0,
-                                };
-                                match commit_light_snapshot(&c, &cfg, &hs.light_state, green).await {
-                                    Ok(()) => tracing::info!(
-                                        "Startup LED preference ON: green LED applied (this lunaris start)"
-                                    ),
-                                    Err(e) => {
-                                        tracing::error!(%e, "Startup LED on boot: I²C LED write failed");
-                                        publish_json_result(
-                                            &c,
-                                            &cfg,
-                                            "startup_led",
-                                            "error",
-                                            &e,
-                                        )
-                                        .await;
-                                        hw_once.store(false, Ordering::SeqCst);
+                            let led_behavior = *hs.led_behavior.lock().await;
+                            match led_behavior {
+                                LedBehavior::Manual => {
+                                    let off = LightStateSnapshot {
+                                        on: false,
+                                        brightness: 255,
+                                        base_r: 0,
+                                        base_g: 255,
+                                        base_b: 0,
+                                    };
+                                    let _ = commit_light_snapshot(&c, &cfg, &hs.light_state, off).await;
+                                }
+                                LedBehavior::Status => {
+                                    let green = LightStateSnapshot {
+                                        on: true,
+                                        brightness: 255,
+                                        base_r: 0,
+                                        base_g: 255,
+                                        base_b: 0,
+                                    };
+                                    if let Err(e) =
+                                        commit_light_snapshot(&c, &cfg, &hs.light_state, green).await
+                                    {
+                                        tracing::error!(%e, "LED behavior status: I²C LED write failed");
+                                        publish_json_result(&c, &cfg, "led_behavior", "error", &e).await;
                                     }
                                 }
-                            } else {
-                                let mqtt_snap = hs.light_state.lock().await.clone();
-                                let _ = commit_light_snapshot(&c, &cfg, &hs.light_state, mqtt_snap)
-                                    .await;
+                                LedBehavior::Startup => {
+                                    let green = LightStateSnapshot {
+                                        on: true,
+                                        brightness: 255,
+                                        base_r: 0,
+                                        base_g: 255,
+                                        base_b: 0,
+                                    };
+                                    if let Err(e) =
+                                        commit_light_snapshot(&c, &cfg, &hs.light_state, green).await
+                                    {
+                                        tracing::error!(%e, "LED behavior startup: I²C LED write failed");
+                                        publish_json_result(&c, &cfg, "led_behavior", "error", &e).await;
+                                    } else {
+                                        sleep(Duration::from_secs(5)).await;
+                                        let off = LightStateSnapshot {
+                                            on: false,
+                                            brightness: 255,
+                                            base_r: 0,
+                                            base_g: 255,
+                                            base_b: 0,
+                                        };
+                                        let _ = commit_light_snapshot(&c, &cfg, &hs.light_state, off).await;
+                                    }
+                                }
                             }
                             let snap = hs.light_state.lock().await.clone();
                             publish_light_state(&c, &cfg, &snap).await;
+                            publish_led_behavior_state(&c, &cfg, led_behavior).await;
                         }
                     });
                 } else {
@@ -4026,14 +4103,15 @@ mod tests {
     }
 
     #[test]
-    fn startup_led_discovery_is_configuration_entity() {
+    fn led_behavior_discovery_is_configuration_entity() {
         let cli =
             crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
-        let disc = discovery_payload_startup_led_switch(&cfg);
+        let disc = discovery_payload_led_behavior_select(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
         assert_eq!(v["entity_category"].as_str(), Some("config"));
         assert_eq!(v["icon"].as_str(), Some("mdi:lightbulb"));
+        assert_eq!(v["name"].as_str(), Some("LED Behavior"));
     }
 
     #[test]

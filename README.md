@@ -56,7 +56,7 @@ Using custom firmware or low-level hardware control may void warranties, break t
 | Calibrate Presence | button | No | Start learning what an empty mattress looks like (keep the bed clear for ~10 s afterwards). |
 | Presence Baseline Delta | number | Yes | Fine-tune sensitivity after calibration. |
 | Presence Cap Threshold | number | Yes | Fine-tune rough “capacitance” sensitivity before calibration. |
-| Startup LED | switch | No | If on, lunaris flashes the green indicator once each time it starts. |
+| LED Behavior | select | No | Chooses LED startup/runtime behavior: **Manual** (off at boot, only light entity controls it), **Status** (solid green while lunaris runs), **Startup** (green for 5s on boot, then off and manual control). |
 | Vibration Cancel Preamble | switch | Yes | Tweaks vibration behaviour — leave as-is unless troubleshooting. |
 | Vibration Duration | number | No | How long vibrations last when you press a vibrate button. |
 | Vibration Intensity | number | No | How strong vibrations feel (percentage). |
