@@ -213,6 +213,7 @@ The **Water Tank** binary sensor often shows **`unknown`** briefly at startup un
 ## 🙏 Special Thanks
 - [LiamSnow](https://github.com/LiamSnow/) for the great research and groundwork on the protocol ([opensleep](https://github.com/LiamSnow/opensleep)).
 - [throwaway31265](https://github.com/throwaway31265) for [free-sleep](https://github.com/throwaway31265/free-sleep) and the instructions on how to root.
+- [OsirisSpectrum](https://github.com/OsirisSpectrum) for the naming idea of this project.
 
 ## ⚖️ License
 
