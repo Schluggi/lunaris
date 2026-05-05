@@ -150,8 +150,7 @@ fn parse_capacitance(payload: &[u8]) -> Option<SensorCapacitanceZones> {
 /// lines that plausibly explain alarm / vibration behaviour.
 fn mcu_text_is_vibration_hint(t: &str) -> bool {
     let s = t.to_ascii_lowercase();
-    let fw_failure_hint =
-        s.contains("fw:") && (s.contains("error") || fw_line_fail_hint(&s));
+    let fw_failure_hint = s.contains("fw:") && (s.contains("error") || fw_line_fail_hint(&s));
 
     s.contains("alarm")
         || s.contains("vibrat")

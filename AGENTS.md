@@ -55,7 +55,10 @@ Typical MQTT topics: `…/button/prime/set`, `…/button/request_get_temperature
 
 ## Commands
 
+After **any Rust source edit**, run **`cargo fmt --check`** (or `cargo fmt` to apply). CI fails if formatting disagrees with rustfmt — same check as `cargo fmt --check`.
+
 ```bash
+cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
