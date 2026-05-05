@@ -153,6 +153,10 @@ pub struct Cli {
     /// `tracing` filter (e.g. `debug`, `info,lunaris=debug`).
     #[arg(long, default_value = "info")]
     pub log_level: String,
+
+    /// Self-update version poll interval in seconds (`0` disables self-update polling and hides the MQTT update entity entirely).
+    #[arg(long, default_value_t = 12 * 60 * 60)]
+    pub self_update_poll_secs: u64,
 }
 
 impl Cli {
@@ -243,5 +247,25 @@ mod tests {
             PodModel::Five.homeassistant_device_model(),
             "Eight Sleep Pod 5"
         );
+    }
+
+    #[test]
+    fn self_update_poll_default_is_12h() {
+        let cli = Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        assert_eq!(cli.self_update_poll_secs, 12 * 60 * 60);
+    }
+
+    #[test]
+    fn self_update_poll_can_be_disabled_with_zero() {
+        let cli = Cli::parse_from([
+            "lunaris",
+            "--pod",
+            "4",
+            "--mqtt-host",
+            "localhost",
+            "--self-update-poll-secs",
+            "0",
+        ]);
+        assert_eq!(cli.self_update_poll_secs, 0);
     }
 }

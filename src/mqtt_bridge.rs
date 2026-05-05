@@ -125,6 +125,8 @@ pub struct BridgeConfig {
     pub sensor_tx: Option<mpsc::Sender<Vec<Vec<u8>>>>,
     /// Publish MQTT sensors for Frozen inbound temperatures (`0x41` / `0xC1`); set by [`crate::main`] with [`crate::frozen_link`].
     pub frozen_temperature_discovery: bool,
+    /// Self-update poll interval in seconds (`0` disables polling and MQTT update entity).
+    pub self_update_poll_secs: u64,
 }
 
 impl BridgeConfig {
@@ -166,7 +168,12 @@ impl BridgeConfig {
             frozen_tx: None,
             sensor_tx: None,
             frozen_temperature_discovery: false,
+            self_update_poll_secs: cli.self_update_poll_secs,
         }
+    }
+
+    fn self_update_enabled(&self) -> bool {
+        self.self_update_poll_secs > 0
     }
 
     pub fn availability_topic(&self) -> String {
@@ -2264,7 +2271,11 @@ async fn handle_self_update_install(client: &AsyncClient, config: &BridgeConfig)
     }
 }
 
-async fn self_update_version_poll_loop(client: AsyncClient, config: BridgeConfig) {
+async fn self_update_version_poll_loop(
+    client: AsyncClient,
+    config: BridgeConfig,
+    poll_interval: Duration,
+) {
     loop {
         let latest =
             match tokio::task::spawn_blocking(crate::self_update::fetch_latest_version_blocking)
@@ -2281,7 +2292,7 @@ async fn self_update_version_poll_loop(client: AsyncClient, config: BridgeConfig
                 }
             };
         publish_self_update_state(&client, &config, latest.as_deref(), false, None).await;
-        sleep(Duration::from_secs(30 * 60)).await;
+        sleep(poll_interval).await;
     }
 }
 
@@ -2605,37 +2616,39 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     {
         tracing::error!(?e, "publish Frozen firmware message discovery");
     }
-    let disc_update = discovery_payload_self_update(config);
-    if let Err(e) = client
-        .publish(config.discovery_topic_update(), qos, true, disc_update)
+    if config.self_update_enabled() {
+        let disc_update = discovery_payload_self_update(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_update(), qos, true, disc_update)
+            .await
+        {
+            tracing::error!(?e, "publish self-update discovery");
+        }
+        // Fetch GitHub `latest` before the first retained update state so HA can compare
+        // `installed_version` vs `latest_version` immediately (avoids empty/missing latest until poll).
+        let latest_initial = match tokio::task::spawn_blocking(
+            crate::self_update::fetch_latest_version_blocking,
+        )
         .await
-    {
-        tracing::error!(?e, "publish self-update discovery");
+        {
+            Ok(Ok(v)) => Some(v),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    %e,
+                    "self-update: could not fetch latest version for initial update state"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::error!(
+                    ?e,
+                    "self-update: spawn_blocking join failed (initial latest version)"
+                );
+                None
+            }
+        };
+        publish_self_update_state(client, config, latest_initial.as_deref(), false, None).await;
     }
-    // Fetch GitHub `latest` before the first retained update state so HA can compare
-    // `installed_version` vs `latest_version` immediately (avoids empty/missing latest until poll).
-    let latest_initial = match tokio::task::spawn_blocking(
-        crate::self_update::fetch_latest_version_blocking,
-    )
-    .await
-    {
-        Ok(Ok(v)) => Some(v),
-        Ok(Err(e)) => {
-            tracing::warn!(
-                %e,
-                "self-update: could not fetch latest version for initial update state"
-            );
-            None
-        }
-        Err(e) => {
-            tracing::error!(
-                ?e,
-                "self-update: spawn_blocking join failed (initial latest version)"
-            );
-            None
-        }
-    };
-    publish_self_update_state(client, config, latest_initial.as_deref(), false, None).await;
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
         .await
@@ -2655,8 +2668,10 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     {
         tracing::error!(?e, "subscribe request_get_temperatures command topic");
     }
-    if let Err(e) = client.subscribe(config.update_command_topic(), qos).await {
-        tracing::error!(?e, "subscribe self-update command topic");
+    if config.self_update_enabled() {
+        if let Err(e) = client.subscribe(config.update_command_topic(), qos).await {
+            tracing::error!(?e, "subscribe self-update command topic");
+        }
     }
     if config.i2c_device.is_some() {
         if let Err(e) = client.subscribe(config.light_command_topic(), qos).await {
@@ -2753,11 +2768,14 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
         tracing::error!(?e, "subscribe Home Assistant birth topic");
     }
     publish_discovery_and_online(client, config).await;
-    let c = client.clone();
-    let cfg = config.clone();
-    tokio::spawn(async move {
-        self_update_version_poll_loop(c, cfg).await;
-    });
+    if config.self_update_enabled() {
+        let c = client.clone();
+        let cfg = config.clone();
+        let poll_interval = Duration::from_secs(config.self_update_poll_secs);
+        tokio::spawn(async move {
+            self_update_version_poll_loop(c, cfg, poll_interval).await;
+        });
+    }
 }
 
 async fn handle_light_command(
@@ -2884,7 +2902,7 @@ async fn handle_publish(
         return;
     }
 
-    if p.topic == config.update_command_topic() {
+    if config.self_update_enabled() && p.topic == config.update_command_topic() {
         if p.payload.as_ref() == crate::self_update::PAYLOAD_INSTALL.as_bytes() {
             let c = client.clone();
             let cfg = config.clone();
