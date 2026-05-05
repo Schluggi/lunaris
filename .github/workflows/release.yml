@@ -56,9 +56,11 @@ jobs:
           else
             RANGE="HEAD"
           fi
-          LOG="$(git log "$RANGE" --no-merges --format=%B)"
+          # Full commit message per commit (subject + body). Breaking footer must start its line,
+          # matching Conventional Commits — avoids prose like "see BREAKING CHANGE: …" mid-sentence.
+          LOG="$(git log "$RANGE" --no-merges --format='%s%n%b')"
 
-          if printf '%s' "$LOG" | grep -Eq '(^|[[:space:]])BREAKING CHANGE:' ||
+          if printf '%s' "$LOG" | grep -Eq '^[[:space:]]*BREAKING CHANGE:' ||
              git log "$RANGE" --no-merges --extended-regexp --grep='^[a-z]+(\([^)]*\))?!:' -1 -q; then
             echo "release=true" >> "$GITHUB_OUTPUT"
             echo "bump=major" >> "$GITHUB_OUTPUT"
