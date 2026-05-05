@@ -13,6 +13,7 @@ use std::sync::Arc;
 use rumqttc::{AsyncClient, ConnectionError, Event, Incoming, LastWill, MqttOptions, Publish, QoS};
 use serde::Deserialize;
 use serde_json::json;
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio::time::{interval, sleep, Duration, Instant};
@@ -31,6 +32,7 @@ const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "lunaris_deviceinfo_device_la
 const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "lunaris_deviceinfo_device_id";
 const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
+const DISCOVERY_OBJECT_ID_REBOOT: &str = "lunaris_reboot";
 const DISCOVERY_OBJECT_ID_LED: &str = "lunaris_led";
 const DISCOVERY_OBJECT_ID_STARTUP_LED: &str = "lunaris_startup_led";
 const DISCOVERY_OBJECT_ID_CLIMATE_LEFT: &str = "lunaris_climate_left";
@@ -199,6 +201,17 @@ impl BridgeConfig {
         format!(
             "{}/button/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES
+        )
+    }
+
+    pub fn reboot_command_topic(&self) -> String {
+        format!("{}/button/reboot/set", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_reboot(&self) -> String {
+        format!(
+            "{}/button/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_REBOOT
         )
     }
 
@@ -634,6 +647,32 @@ fn discovery_payload_request_get_temperatures_button(config: &BridgeConfig) -> S
         "availability": config.availability_json(),
     })
     .to_string()
+}
+
+fn discovery_payload_reboot_button(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Reboot",
+        "command_topic": config.reboot_command_topic(),
+        "payload_press": config.payload_press,
+        "entity_category": "diagnostic",
+        "icon": "mdi:restart",
+        "unique_id": format!("{}_reboot", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+async fn trigger_pod_reboot() -> Result<(), String> {
+    Command::new("systemctl")
+        .arg("reboot")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to run systemctl reboot: {e}"))
 }
 
 fn discovery_payload_startup_led_switch(config: &BridgeConfig) -> String {
@@ -2317,6 +2356,13 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     {
         tracing::error!(?e, "publish request GetTemperatures button discovery");
     }
+    let disc_reboot = discovery_payload_reboot_button(config);
+    if let Err(e) = client
+        .publish(config.discovery_topic_reboot(), qos, true, disc_reboot)
+        .await
+    {
+        tracing::error!(?e, "publish reboot button discovery");
+    }
     {
         let disc = discovery_payload_deviceinfo_device_label(config);
         if let Err(e) = client
@@ -2668,6 +2714,9 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     {
         tracing::error!(?e, "subscribe request_get_temperatures command topic");
     }
+    if let Err(e) = client.subscribe(config.reboot_command_topic(), qos).await {
+        tracing::error!(?e, "subscribe reboot command topic");
+    }
     if config.self_update_enabled() {
         if let Err(e) = client.subscribe(config.update_command_topic(), qos).await {
             tracing::error!(?e, "subscribe self-update command topic");
@@ -2897,6 +2946,20 @@ async fn handle_publish(
                     publish_json_result(client, config, "request_get_temperatures", "error", &e)
                         .await;
                 }
+            }
+        }
+        return;
+    }
+
+    if p.topic == config.reboot_command_topic() {
+        let expected = config.payload_press.as_bytes();
+        if p.payload.as_ref() == expected {
+            publish_json_result(client, config, "reboot", "success", "pod reboot requested").await;
+            if let Err(e) = trigger_pod_reboot().await {
+                tracing::error!(%e, "pod reboot failed");
+                publish_json_result(client, config, "reboot", "error", &e).await;
+            } else {
+                tracing::warn!("pod reboot command executed");
             }
         }
         return;
@@ -3801,6 +3864,20 @@ mod tests {
         assert_eq!(
             v["command_topic"].as_str(),
             Some(cfg.request_get_temperatures_command_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+    }
+
+    #[test]
+    fn reboot_button_discovery_matches_command_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_reboot_button(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.reboot_command_topic().as_str()),
         );
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
     }
