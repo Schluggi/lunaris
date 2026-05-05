@@ -2173,6 +2173,33 @@ async fn commit_light_snapshot(
     }
 }
 
+async fn apply_led_snapshot_hw_only(
+    config: &BridgeConfig,
+    light_state: &Arc<Mutex<LightStateSnapshot>>,
+    snap: LightStateSnapshot,
+) -> Result<(), String> {
+    let Some(i2c_path) = config.i2c_device.clone() else {
+        return Err("LED disabled".into());
+    };
+    let (cr, cg, cb) = snap.chip_rgb();
+    let path = i2c_path.clone();
+    let on_hw = snap.on && snap.brightness > 0;
+    let set_res = tokio::task::spawn_blocking(move || {
+        let mut dev = Is31fl3194::open(&path)?;
+        dev.set_solid_rgb(on_hw, cr, cg, cb)
+    })
+    .await;
+
+    match set_res {
+        Ok(Ok(())) => {
+            *light_state.lock().await = snap;
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(format!("LED task join failed: {e:?}")),
+    }
+}
+
 async fn publish_light_state(
     client: &AsyncClient,
     config: &BridgeConfig,
@@ -3593,6 +3620,10 @@ pub async fn run(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("install SIGTERM handler");
 
+    let mut mqtt_connected_once = false;
+    let mut mqtt_start_connect_failures: u8 = 0;
+    let mut keep_led_state_on_exit = false;
+
     loop {
         #[cfg(unix)]
         let evt = tokio::select! {
@@ -3612,6 +3643,8 @@ pub async fn run(
         match evt {
             Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
                 if ack.code == rumqttc::ConnectReturnCode::Success {
+                    mqtt_connected_once = true;
+                    mqtt_start_connect_failures = 0;
                     tracing::info!("MQTT connected");
                     // Retained `…/state` replays can arrive on the next `poll()` before the spawned
                     // session task runs — set bootstrap flags here so `handle_publish` ingests them
@@ -3735,6 +3768,35 @@ pub async fn run(
                     });
                 } else {
                     tracing::error!(code = ?ack.code, "MQTT connection refused");
+                    if !mqtt_connected_once {
+                        mqtt_start_connect_failures = mqtt_start_connect_failures.saturating_add(1);
+                        tracing::warn!(
+                            attempt = mqtt_start_connect_failures,
+                            max_attempts = 5,
+                            "MQTT connect attempt failed during startup"
+                        );
+                        if mqtt_start_connect_failures >= 5 {
+                            let red = LightStateSnapshot {
+                                on: true,
+                                brightness: 255,
+                                base_r: 255,
+                                base_g: 0,
+                                base_b: 0,
+                            };
+                            if let Err(e) =
+                                apply_led_snapshot_hw_only(&config, &handler_state.light_state, red)
+                                    .await
+                            {
+                                tracing::error!(%e, "startup MQTT failure: red LED apply failed");
+                            } else {
+                                keep_led_state_on_exit = true;
+                                tracing::error!(
+                                    "MQTT startup failed after 5 attempts; LED set red, terminating"
+                                );
+                            }
+                            break;
+                        }
+                    }
                 }
             }
             Ok(Event::Incoming(Incoming::Publish(p))) => {
@@ -3753,16 +3815,68 @@ pub async fn run(
             }
             Err(e) => {
                 tracing::warn!(?e, "MQTT event loop error; backing off");
+                if !mqtt_connected_once {
+                    mqtt_start_connect_failures = mqtt_start_connect_failures.saturating_add(1);
+                    tracing::warn!(
+                        attempt = mqtt_start_connect_failures,
+                        max_attempts = 5,
+                        "MQTT connect attempt failed during startup"
+                    );
+                    if mqtt_start_connect_failures >= 5 {
+                        let red = LightStateSnapshot {
+                            on: true,
+                            brightness: 255,
+                            base_r: 255,
+                            base_g: 0,
+                            base_b: 0,
+                        };
+                        if let Err(err) =
+                            apply_led_snapshot_hw_only(&config, &handler_state.light_state, red)
+                                .await
+                        {
+                            tracing::error!(%err, "startup MQTT failure: red LED apply failed");
+                        } else {
+                            keep_led_state_on_exit = true;
+                            tracing::error!(
+                                "MQTT startup failed after 5 attempts; LED set red, terminating"
+                            );
+                        }
+                        break;
+                    }
+                } else if config.i2c_device.is_some()
+                    && *handler_state.led_behavior.lock().await == LedBehavior::Status
+                {
+                    let red = LightStateSnapshot {
+                        on: true,
+                        brightness: 255,
+                        base_r: 255,
+                        base_g: 0,
+                        base_b: 0,
+                    };
+                    if let Err(err) =
+                        apply_led_snapshot_hw_only(&config, &handler_state.light_state, red).await
+                    {
+                        tracing::error!(%err, "MQTT disconnect in Status mode: red LED apply failed");
+                    } else {
+                        tracing::warn!(
+                            "MQTT disconnected while running; LED behavior Status -> set LED red"
+                        );
+                    }
+                }
                 sleep(Duration::from_secs(1)).await;
             }
         }
     }
 
-    if let Some(ref path) = config.i2c_device {
-        match shutdown_led(path) {
-            Ok(()) => tracing::info!("LED turned off on exit"),
-            Err(e) => tracing::warn!(error = %e, "LED turn-off on exit failed (I²C)"),
+    if !keep_led_state_on_exit {
+        if let Some(ref path) = config.i2c_device {
+            match shutdown_led(path) {
+                Ok(()) => tracing::info!("LED turned off on exit"),
+                Err(e) => tracing::warn!(error = %e, "LED turn-off on exit failed (I²C)"),
+            }
         }
+    } else {
+        tracing::warn!("keeping LED state on exit (startup MQTT failure)");
     }
 }
 
