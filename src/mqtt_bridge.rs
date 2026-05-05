@@ -1076,9 +1076,8 @@ fn format_local_time_iso8601(secs_since_epoch: i64) -> Option<String> {
         tm_gmtoff: 0,
         tm_zone: std::ptr::null(),
     };
-    let time_val = secs_since_epoch.try_into().ok()?;
-    // SAFETY: `local_tm` and `time_val` are valid pointers for `localtime_r`.
-    let tm_ptr = unsafe { libc::localtime_r(&time_val, &mut local_tm) };
+    // SAFETY: `local_tm` and `secs_since_epoch` are valid for `localtime_r`.
+    let tm_ptr = unsafe { libc::localtime_r(&secs_since_epoch, &mut local_tm) };
     if tm_ptr.is_null() {
         return None;
     }
