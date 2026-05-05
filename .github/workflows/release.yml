@@ -56,9 +56,11 @@ jobs:
           else
             RANGE="HEAD"
           fi
-          LOG="$(git log "$RANGE" --no-merges --format=%B)"
+          # Full commit message per commit (subject + body). Breaking footer must start its line,
+          # matching Conventional Commits — avoids prose like "see BREAKING CHANGE: …" mid-sentence.
+          LOG="$(git log "$RANGE" --no-merges --format='%s%n%b')"
 
-          if printf '%s' "$LOG" | grep -Eq '(^|[[:space:]])BREAKING CHANGE:' ||
+          if printf '%s' "$LOG" | grep -Eq '^[[:space:]]*BREAKING CHANGE:' ||
              git log "$RANGE" --no-merges --extended-regexp --grep='^[a-z]+(\([^)]*\))?!:' -1 -q; then
             echo "release=true" >> "$GITHUB_OUTPUT"
             echo "bump=major" >> "$GITHUB_OUTPUT"
@@ -167,28 +169,128 @@ jobs:
           git push origin "refs/tags/v${VERSION}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Generate release notes (all commits)
+      - name: Generate release notes (by commit type)
         if: steps.gate.outputs.release == 'true'
         run: |
           set -euo pipefail
           PREV="${{ steps.prev.outputs.tag }}"
           NEW="v${{ steps.tag.outputs.version }}"
           REPO="${{ github.repository }}"
-          {
-            echo "## Commits"
-            echo ""
-            if [ -n "$PREV" ]; then
-              git log "${PREV}..${NEW}" --no-merges --invert-grep --grep='^chore(release):' --pretty=format:'- %s (%h)%n'
-            else
-              git log "${NEW}" --no-merges --invert-grep --grep='^chore(release):' --pretty=format:'- %s (%h)%n'
-            fi
-            echo ""
-            if [ -n "$PREV" ]; then
-              echo "**Full Changelog**: https://github.com/${REPO}/compare/${PREV}...${NEW}"
-            else
-              echo "**Full Changelog**: https://github.com/${REPO}/commits/${NEW}"
-            fi
-          } > release_body.md
+          export PREV NEW REPO
+          python3 << 'PY'
+          import os
+          import re
+          import subprocess
+          from collections import defaultdict
+          from pathlib import Path
+
+          prev = os.environ.get("PREV", "")
+          new = os.environ["NEW"]
+          repo = os.environ["REPO"]
+          range_spec = f"{prev}..{new}" if prev else new
+
+          fmt = "%h%x1f%s%x1f%b%x1fENDRECORD%x00"
+          out = subprocess.check_output(
+              [
+                  "git",
+                  "log",
+                  range_spec,
+                  "--no-merges",
+                  "--invert-grep",
+                  "--grep=^chore(release):",
+                  f"--pretty=format:{fmt}",
+              ],
+              text=True,
+          )
+
+          cc = re.compile(r"^([a-z]+)(?:\([^)]*\))?(!)?:\s*(.*)$", re.I)
+          breaking_body = re.compile(r"(?m)^[ \t]*BREAKING CHANGE:")
+
+          # Order of sections in the rendered notes (breaking first).
+          section_meta = (
+              ("breaking", "💥 Breaking changes"),
+              ("feat", "✨ Features"),
+              ("fix", "🐛 Fixes"),
+              ("perf", "⚡ Performance"),
+              ("refactor", "♻️ Refactoring"),
+              ("docs", "📝 Documentation"),
+              ("test", "✅ Tests"),
+              ("ci", "👷 CI"),
+              ("build", "🏗️ Build"),
+              ("chore", "🔧 Maintenance"),
+              ("style", "💄 Style"),
+              ("revert", "⏪ Reverts"),
+              ("other", "📦 Other"),
+          )
+          sections: defaultdict[str, list[str]] = defaultdict(list)
+
+          for raw in out.split("\x00"):
+              raw = raw.strip()
+              if not raw.endswith("ENDRECORD"):
+                  continue
+              core = raw[: -len("ENDRECORD")]
+              if core.endswith("\x1f"):
+                  core = core[:-1]
+              core = core.strip()
+              if core.count("\x1f") < 2:
+                  continue
+              h, subject, body = core.split("\x1f", 2)
+              line = f"- {subject.strip()} ({h.strip()})"
+              body = body or ""
+
+              m = cc.match(subject.strip())
+              ctype = (m.group(1).lower() if m else None)
+              has_bang = bool(m and m.group(2))
+
+              if has_bang or breaking_body.search(body):
+                  key = "breaking"
+              elif ctype == "feat":
+                  key = "feat"
+              elif ctype == "fix":
+                  key = "fix"
+              elif ctype == "perf":
+                  key = "perf"
+              elif ctype == "refactor":
+                  key = "refactor"
+              elif ctype == "docs":
+                  key = "docs"
+              elif ctype == "test":
+                  key = "test"
+              elif ctype == "ci":
+                  key = "ci"
+              elif ctype == "build":
+                  key = "build"
+              elif ctype == "chore":
+                  key = "chore"
+              elif ctype == "style":
+                  key = "style"
+              elif ctype == "revert":
+                  key = "revert"
+              else:
+                  key = "other"
+
+              sections[key].append(line)
+
+          lines_out: list[str] = []
+          for key, heading in section_meta:
+              entries = sections.get(key, [])
+              if not entries:
+                  continue
+              lines_out.append(f"## {heading}")
+              lines_out.append("")
+              lines_out.extend(entries)
+              lines_out.append("")
+
+          if not lines_out:
+              lines_out = ["_(No commits in this release.)_", ""]
+
+          if prev:
+              lines_out.append(f"**Full Changelog**: https://github.com/{repo}/compare/{prev}...{new}")
+          else:
+              lines_out.append(f"**Full Changelog**: https://github.com/{repo}/commits/{new}")
+
+          Path("release_body.md").write_text("\n".join(lines_out).rstrip() + "\n", encoding="utf-8")
+          PY
 
       - name: Publish GitHub Release
         if: steps.gate.outputs.release == 'true'

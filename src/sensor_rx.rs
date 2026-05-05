@@ -150,13 +150,28 @@ fn parse_capacitance(payload: &[u8]) -> Option<SensorCapacitanceZones> {
 /// lines that plausibly explain alarm / vibration behaviour.
 fn mcu_text_is_vibration_hint(t: &str) -> bool {
     let s = t.to_ascii_lowercase();
+    let fw_failure_hint = s.contains("fw:") && (s.contains("error") || fw_line_fail_hint(&s));
+
     s.contains("alarm")
         || s.contains("vibrat")
         || s.contains("setalarm")
-        || s.contains(" piezo ") // word-ish; avoids matching unrelated tokens
+        || s.contains(" piezo ")
         || s.contains("piezo:")
-        || (s.contains("error") && s.contains("fw:"))
-        || (s.contains("fail") && s.contains("fw:"))
+        || fw_failure_hint
+}
+
+/// True if `fail` appears as a stem other than `fails` (MCU `[sampling] crc fails: …` is not a fault hint).
+fn fw_line_fail_hint(s_lower: &str) -> bool {
+    if !s_lower.contains("fw:") {
+        return false;
+    }
+    for (idx, _) in s_lower.match_indices("fail") {
+        if s_lower[idx.saturating_add(4)..].starts_with('s') {
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 fn handle_payload(
@@ -236,6 +251,15 @@ mod tests {
         assert!(!mcu_text_is_vibration_hint(
             "FW: 326217 [sampling] req gain 400 400"
         ));
+        assert!(!mcu_text_is_vibration_hint(
+            "FW: 16231446 [sampling] crc fails: 0 0"
+        ));
+    }
+
+    #[test]
+    fn mcu_text_fw_fail_still_hints_when_not_plural_fails() {
+        assert!(mcu_text_is_vibration_hint("FW: 1 [err] uart fail"));
+        assert!(mcu_text_is_vibration_hint("FW: 1 failed to init piezo"));
     }
 
     #[test]
