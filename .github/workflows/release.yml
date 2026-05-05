@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     branches: [main, master]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
   workflow_dispatch:
 
 concurrency:
