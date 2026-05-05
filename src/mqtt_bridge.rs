@@ -9,10 +9,12 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rumqttc::{AsyncClient, ConnectionError, Event, Incoming, LastWill, MqttOptions, Publish, QoS};
 use serde::Deserialize;
 use serde_json::json;
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio::time::{interval, sleep, Duration, Instant};
@@ -29,10 +31,13 @@ use crate::serial_prime;
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "lunaris_deviceinfo_device_label";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "lunaris_deviceinfo_device_id";
+const DISCOVERY_OBJECT_ID_SYSTEM_UPTIME: &str = "lunaris_system_uptime";
 const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
+const DISCOVERY_OBJECT_ID_REBOOT: &str = "lunaris_reboot";
+const DISCOVERY_OBJECT_ID_SHUTDOWN: &str = "lunaris_shutdown";
 const DISCOVERY_OBJECT_ID_LED: &str = "lunaris_led";
-const DISCOVERY_OBJECT_ID_STARTUP_LED: &str = "lunaris_startup_led";
+const DISCOVERY_OBJECT_ID_LED_BEHAVIOR: &str = "lunaris_led_behavior";
 const DISCOVERY_OBJECT_ID_CLIMATE_LEFT: &str = "lunaris_climate_left";
 const DISCOVERY_OBJECT_ID_CLIMATE_RIGHT: &str = "lunaris_climate_right";
 const DISCOVERY_OBJECT_ID_VIBRATE_LEFT: &str = "lunaris_vibrate_left";
@@ -60,6 +65,38 @@ const DISCOVERY_OBJECT_ID_UPDATE: &str = "lunaris_update";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LedBehavior {
+    #[default]
+    Manual,
+    Status,
+    Startup,
+}
+
+impl LedBehavior {
+    fn as_mqtt_payload(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Status => "Status",
+            Self::Startup => "Startup",
+        }
+    }
+}
+
+fn parse_led_behavior(payload: &[u8]) -> Option<LedBehavior> {
+    let text = std::str::from_utf8(payload).ok()?.trim();
+    if text.eq_ignore_ascii_case("manual") {
+        return Some(LedBehavior::Manual);
+    }
+    if text.eq_ignore_ascii_case("status") {
+        return Some(LedBehavior::Status);
+    }
+    if text.eq_ignore_ascii_case("startup") {
+        return Some(LedBehavior::Startup);
+    }
+    None
+}
 
 /// Runtime vibration / `SetAlarm` parameters (Home Assistant **number** / **select** / **switch**; retained state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +162,8 @@ pub struct BridgeConfig {
     pub sensor_tx: Option<mpsc::Sender<Vec<Vec<u8>>>>,
     /// Publish MQTT sensors for Frozen inbound temperatures (`0x41` / `0xC1`); set by [`crate::main`] with [`crate::frozen_link`].
     pub frozen_temperature_discovery: bool,
+    /// Self-update poll interval in seconds (`0` disables polling and MQTT update entity).
+    pub self_update_poll_secs: u64,
 }
 
 impl BridgeConfig {
@@ -166,7 +205,12 @@ impl BridgeConfig {
             frozen_tx: None,
             sensor_tx: None,
             frozen_temperature_discovery: false,
+            self_update_poll_secs: cli.self_update_poll_secs,
         }
+    }
+
+    fn self_update_enabled(&self) -> bool {
+        self.self_update_poll_secs > 0
     }
 
     pub fn availability_topic(&self) -> String {
@@ -195,6 +239,28 @@ impl BridgeConfig {
         )
     }
 
+    pub fn reboot_command_topic(&self) -> String {
+        format!("{}/button/reboot/set", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_reboot(&self) -> String {
+        format!(
+            "{}/button/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_REBOOT
+        )
+    }
+
+    pub fn shutdown_command_topic(&self) -> String {
+        format!("{}/button/shutdown/set", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_shutdown(&self) -> String {
+        format!(
+            "{}/button/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_SHUTDOWN
+        )
+    }
+
     pub fn discovery_topic_light(&self) -> String {
         format!(
             "{}/light/{}/config",
@@ -210,19 +276,19 @@ impl BridgeConfig {
         format!("{}/light/led/state", self.topic_prefix)
     }
 
-    pub fn discovery_topic_startup_led(&self) -> String {
+    pub fn discovery_topic_led_behavior(&self) -> String {
         format!(
-            "{}/switch/{}/config",
-            self.discovery_prefix, DISCOVERY_OBJECT_ID_STARTUP_LED
+            "{}/select/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_LED_BEHAVIOR
         )
     }
 
-    pub fn startup_led_command_topic(&self) -> String {
-        format!("{}/switch/startup_led/set", self.topic_prefix)
+    pub fn led_behavior_command_topic(&self) -> String {
+        format!("{}/select/led_behavior/set", self.topic_prefix)
     }
 
-    pub fn startup_led_state_topic(&self) -> String {
-        format!("{}/switch/startup_led/state", self.topic_prefix)
+    pub fn led_behavior_state_topic(&self) -> String {
+        format!("{}/select/led_behavior/state", self.topic_prefix)
     }
 
     pub fn climate_discovery_topic(&self, side: BedSide) -> String {
@@ -531,6 +597,10 @@ impl BridgeConfig {
         format!("{}/sensor/deviceinfo_device_id/state", self.topic_prefix)
     }
 
+    pub fn system_uptime_state_topic(&self) -> String {
+        format!("{}/sensor/system_uptime/state", self.topic_prefix)
+    }
+
     pub fn discovery_topic_deviceinfo_device_label(&self) -> String {
         format!(
             "{}/sensor/{}/config",
@@ -542,6 +612,13 @@ impl BridgeConfig {
         format!(
             "{}/sensor/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_DEVICEINFO_ID
+        )
+    }
+
+    pub fn discovery_topic_system_uptime(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_SYSTEM_UPTIME
         )
     }
 
@@ -629,16 +706,67 @@ fn discovery_payload_request_get_temperatures_button(config: &BridgeConfig) -> S
     .to_string()
 }
 
-fn discovery_payload_startup_led_switch(config: &BridgeConfig) -> String {
+fn discovery_payload_reboot_button(config: &BridgeConfig) -> String {
     json!({
-        "name": "Startup LED",
+        "name": "Reboot",
+        "command_topic": config.reboot_command_topic(),
+        "payload_press": config.payload_press,
+        "entity_category": "diagnostic",
+        "icon": "mdi:restart",
+        "unique_id": format!("{}_reboot", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_shutdown_button(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Shutdown",
+        "command_topic": config.shutdown_command_topic(),
+        "payload_press": config.payload_press,
+        "entity_category": "diagnostic",
+        "icon": "mdi:power",
+        "unique_id": format!("{}_shutdown", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+async fn trigger_pod_reboot() -> Result<(), String> {
+    Command::new("systemctl")
+        .arg("reboot")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to run systemctl reboot: {e}"))
+}
+
+async fn trigger_pod_shutdown() -> Result<(), String> {
+    Command::new("systemctl")
+        .arg("poweroff")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to run systemctl poweroff: {e}"))
+}
+
+fn discovery_payload_led_behavior_select(config: &BridgeConfig) -> String {
+    json!({
+        "name": "LED Behavior",
         "icon": "mdi:lightbulb",
-        "command_topic": config.startup_led_command_topic(),
-        "state_topic": config.startup_led_state_topic(),
-        "payload_on": "ON",
-        "payload_off": "OFF",
+        "command_topic": config.led_behavior_command_topic(),
+        "state_topic": config.led_behavior_state_topic(),
+        "options": ["Manual", "Status", "Startup"],
         "entity_category": "config",
-        "unique_id": format!("{}_startup_led", config.device_identifier),
+        "unique_id": format!("{}_led_behavior", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -730,6 +858,7 @@ fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> Str
 fn discovery_payload_vibration_intensity_number(config: &BridgeConfig) -> String {
     json!({
         "name": "Vibration Intensity",
+        "icon": "mdi:vibrate",
         "command_topic": config.vibration_intensity_command_topic(),
         "state_topic": config.vibration_intensity_state_topic(),
         "min": 1,
@@ -751,6 +880,7 @@ fn discovery_payload_vibration_intensity_number(config: &BridgeConfig) -> String
 fn discovery_payload_vibration_duration_number(config: &BridgeConfig) -> String {
     json!({
         "name": "Vibration Duration",
+        "icon": "mdi:vibrate",
         "command_topic": config.vibration_duration_command_topic(),
         "state_topic": config.vibration_duration_state_topic(),
         "min": 1,
@@ -793,6 +923,7 @@ fn discovery_payload_vibration_cancel_preamble_switch(config: &BridgeConfig) -> 
         "name": "Vibration Cancel Preamble",
         "command_topic": config.vibration_cancel_preamble_command_topic(),
         "state_topic": config.vibration_cancel_preamble_state_topic(),
+        "icon": "mdi:vibrate-off",
         "payload_on": "ON",
         "payload_off": "OFF",
         "entity_category": "config",
@@ -812,6 +943,7 @@ fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
     json!({
         "name": "Water Tank",
         "state_topic": config.water_tank_state_topic(),
+        "icon": "mdi:water",
         "payload_on": "ON",
         "payload_off": "OFF",
         "device_class": "plug",
@@ -899,6 +1031,105 @@ fn discovery_payload_deviceinfo_device_id(config: &BridgeConfig) -> String {
         "availability": config.availability_json(),
     })
     .to_string()
+}
+
+fn discovery_payload_system_uptime(config: &BridgeConfig) -> String {
+    json!({
+        "name": "System Up Since",
+        "state_topic": config.system_uptime_state_topic(),
+        "icon": "mdi:clock-start",
+        "entity_category": "diagnostic",
+        "enabled_by_default": false,
+        "device_class": "timestamp",
+        "unique_id": format!("{}_system_uptime", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+async fn read_system_uptime_secs() -> Option<u64> {
+    let content = tokio::fs::read_to_string("/proc/uptime").await.ok()?;
+    let raw = content.split_whitespace().next()?;
+    let secs = raw.parse::<f64>().ok()?;
+    if !secs.is_finite() || secs.is_sign_negative() {
+        return None;
+    }
+    Some(secs.floor() as u64)
+}
+
+fn format_local_time_iso8601(secs_since_epoch: i64) -> Option<String> {
+    let mut local_tm = libc::tm {
+        tm_sec: 0,
+        tm_min: 0,
+        tm_hour: 0,
+        tm_mday: 0,
+        tm_mon: 0,
+        tm_year: 0,
+        tm_wday: 0,
+        tm_yday: 0,
+        tm_isdst: -1,
+        tm_gmtoff: 0,
+        tm_zone: std::ptr::null(),
+    };
+    // SAFETY: `local_tm` and `secs_since_epoch` are valid for `localtime_r`.
+    let tm_ptr = unsafe { libc::localtime_r(&secs_since_epoch, &mut local_tm) };
+    if tm_ptr.is_null() {
+        return None;
+    }
+
+    let mut buf = [0u8; 64];
+    let fmt = c"%Y-%m-%dT%H:%M:%S%z";
+    // SAFETY: `buf` is writable and `fmt` is a valid NUL-terminated format string.
+    let written = unsafe {
+        libc::strftime(
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            fmt.as_ptr(),
+            &local_tm as *const libc::tm,
+        )
+    };
+    if written == 0 {
+        return None;
+    }
+
+    let raw = std::str::from_utf8(&buf[..written]).ok()?;
+    if raw.len() >= 5 {
+        let (head, tail) = raw.split_at(raw.len() - 5);
+        Some(format!("{}{}:{}", head, &tail[..3], &tail[3..]))
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+async fn read_system_up_since_local_iso8601() -> Option<String> {
+    let uptime_secs = read_system_uptime_secs().await?;
+    let now_epoch_secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let boot_epoch_secs = now_epoch_secs.checked_sub(uptime_secs)?;
+    format_local_time_iso8601(boot_epoch_secs.try_into().ok()?)
+}
+
+async fn publish_system_uptime_state(client: &AsyncClient, config: &BridgeConfig) {
+    let qos = QoS::AtLeastOnce;
+    let Some(system_up_since) = read_system_up_since_local_iso8601().await else {
+        tracing::warn!("read /proc/uptime failed; skipping System Uptime publish");
+        return;
+    };
+    if let Err(e) = client
+        .publish(
+            config.system_uptime_state_topic(),
+            qos,
+            true,
+            system_up_since,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish system uptime state");
+    }
 }
 
 fn discovery_payload_presence(config: &BridgeConfig, side: BedSide) -> String {
@@ -1493,9 +1724,9 @@ fn vibrate_action_label(side: BedSide) -> &'static str {
 #[derive(Clone)]
 struct PublishHandlerState {
     light_state: Arc<Mutex<LightStateSnapshot>>,
-    startup_led_on: Arc<Mutex<bool>>,
+    led_behavior: Arc<Mutex<LedBehavior>>,
     /// Set when an inbound `state_topic` message was sent with the MQTT retain flag (broker-stored preference), not a live publish.
-    startup_led_broker_retain_seen: Arc<AtomicBool>,
+    led_behavior_broker_retain_seen: Arc<AtomicBool>,
     /// While **true**, inbound retained **`state_topic`** payloads repopulate UI-facing settings so broker-stored HA choices survive lunaris restarts (climate, MQTT light snapshot, vibration, presence). Ignore after drain — later `…/state` echoes must not overwrite values set via `…/set` (no `unsubscribe`).
     mqtt_ha_state_bootstrap: Arc<AtomicBool>,
     climate_left: Arc<Mutex<ClimateSideState>>,
@@ -1985,14 +2216,22 @@ async fn publish_vibration_mqtt_states(client: &AsyncClient, config: &BridgeConf
     publish_vibration_cancel_preamble_state(client, config, vs.cancel_preamble).await;
 }
 
-async fn publish_startup_led_state(client: &AsyncClient, config: &BridgeConfig, on: bool) {
-    let payload = if on { "ON" } else { "OFF" };
+async fn publish_led_behavior_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    behavior: LedBehavior,
+) {
     let qos = QoS::AtLeastOnce;
     if let Err(e) = client
-        .publish(config.startup_led_state_topic(), qos, true, payload)
+        .publish(
+            config.led_behavior_state_topic(),
+            qos,
+            true,
+            behavior.as_mqtt_payload(),
+        )
         .await
     {
-        tracing::error!(?e, "publish startup LED state");
+        tracing::error!(?e, "publish LED behavior state");
     }
 }
 
@@ -2019,6 +2258,33 @@ async fn commit_light_snapshot(
         Ok(Ok(())) => {
             *light_state.lock().await = snap.clone();
             publish_light_state(client, config, &snap).await;
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(format!("LED task join failed: {e:?}")),
+    }
+}
+
+async fn apply_led_snapshot_hw_only(
+    config: &BridgeConfig,
+    light_state: &Arc<Mutex<LightStateSnapshot>>,
+    snap: LightStateSnapshot,
+) -> Result<(), String> {
+    let Some(i2c_path) = config.i2c_device.clone() else {
+        return Err("LED disabled".into());
+    };
+    let (cr, cg, cb) = snap.chip_rgb();
+    let path = i2c_path.clone();
+    let on_hw = snap.on && snap.brightness > 0;
+    let set_res = tokio::task::spawn_blocking(move || {
+        let mut dev = Is31fl3194::open(&path)?;
+        dev.set_solid_rgb(on_hw, cr, cg, cb)
+    })
+    .await;
+
+    match set_res {
+        Ok(Ok(())) => {
+            *light_state.lock().await = snap;
             Ok(())
         }
         Ok(Err(e)) => Err(e.to_string()),
@@ -2264,7 +2530,11 @@ async fn handle_self_update_install(client: &AsyncClient, config: &BridgeConfig)
     }
 }
 
-async fn self_update_version_poll_loop(client: AsyncClient, config: BridgeConfig) {
+async fn self_update_version_poll_loop(
+    client: AsyncClient,
+    config: BridgeConfig,
+    poll_interval: Duration,
+) {
     loop {
         let latest =
             match tokio::task::spawn_blocking(crate::self_update::fetch_latest_version_blocking)
@@ -2281,7 +2551,7 @@ async fn self_update_version_poll_loop(client: AsyncClient, config: BridgeConfig
                 }
             };
         publish_self_update_state(&client, &config, latest.as_deref(), false, None).await;
-        sleep(Duration::from_secs(30 * 60)).await;
+        sleep(poll_interval).await;
     }
 }
 
@@ -2305,6 +2575,20 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         .await
     {
         tracing::error!(?e, "publish request GetTemperatures button discovery");
+    }
+    let disc_reboot = discovery_payload_reboot_button(config);
+    if let Err(e) = client
+        .publish(config.discovery_topic_reboot(), qos, true, disc_reboot)
+        .await
+    {
+        tracing::error!(?e, "publish reboot button discovery");
+    }
+    let disc_shutdown = discovery_payload_shutdown_button(config);
+    if let Err(e) = client
+        .publish(config.discovery_topic_shutdown(), qos, true, disc_shutdown)
+        .await
+    {
+        tracing::error!(?e, "publish shutdown button discovery");
     }
     {
         let disc = discovery_payload_deviceinfo_device_label(config);
@@ -2354,6 +2638,14 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         {
             tracing::error!(?e, "publish deviceinfo device-id state");
         }
+        let disc = discovery_payload_system_uptime(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_system_uptime(), qos, true, disc)
+            .await
+        {
+            tracing::error!(?e, "publish system uptime discovery");
+        }
+        publish_system_uptime_state(client, config).await;
     }
     if config.i2c_device.is_some() {
         let disc_led = discovery_payload_light(config);
@@ -2363,12 +2655,12 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         {
             tracing::error!(?e, "publish light discovery");
         }
-        let disc_sw = discovery_payload_startup_led_switch(config);
+        let disc_sw = discovery_payload_led_behavior_select(config);
         if let Err(e) = client
-            .publish(config.discovery_topic_startup_led(), qos, true, disc_sw)
+            .publish(config.discovery_topic_led_behavior(), qos, true, disc_sw)
             .await
         {
-            tracing::error!(?e, "publish startup LED switch discovery");
+            tracing::error!(?e, "publish LED behavior select discovery");
         }
     }
     for side in [BedSide::Left, BedSide::Right] {
@@ -2605,37 +2897,38 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     {
         tracing::error!(?e, "publish Frozen firmware message discovery");
     }
-    let disc_update = discovery_payload_self_update(config);
-    if let Err(e) = client
-        .publish(config.discovery_topic_update(), qos, true, disc_update)
-        .await
-    {
-        tracing::error!(?e, "publish self-update discovery");
+    if config.self_update_enabled() {
+        let disc_update = discovery_payload_self_update(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_update(), qos, true, disc_update)
+            .await
+        {
+            tracing::error!(?e, "publish self-update discovery");
+        }
+        // Fetch GitHub `latest` before the first retained update state so HA can compare
+        // `installed_version` vs `latest_version` immediately (avoids empty/missing latest until poll).
+        let latest_initial =
+            match tokio::task::spawn_blocking(crate::self_update::fetch_latest_version_blocking)
+                .await
+            {
+                Ok(Ok(v)) => Some(v),
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        %e,
+                        "self-update: could not fetch latest version for initial update state"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::error!(
+                        ?e,
+                        "self-update: spawn_blocking join failed (initial latest version)"
+                    );
+                    None
+                }
+            };
+        publish_self_update_state(client, config, latest_initial.as_deref(), false, None).await;
     }
-    // Fetch GitHub `latest` before the first retained update state so HA can compare
-    // `installed_version` vs `latest_version` immediately (avoids empty/missing latest until poll).
-    let latest_initial = match tokio::task::spawn_blocking(
-        crate::self_update::fetch_latest_version_blocking,
-    )
-    .await
-    {
-        Ok(Ok(v)) => Some(v),
-        Ok(Err(e)) => {
-            tracing::warn!(
-                %e,
-                "self-update: could not fetch latest version for initial update state"
-            );
-            None
-        }
-        Err(e) => {
-            tracing::error!(
-                ?e,
-                "self-update: spawn_blocking join failed (initial latest version)"
-            );
-            None
-        }
-    };
-    publish_self_update_state(client, config, latest_initial.as_deref(), false, None).await;
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
         .await
@@ -2655,24 +2948,32 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     {
         tracing::error!(?e, "subscribe request_get_temperatures command topic");
     }
-    if let Err(e) = client.subscribe(config.update_command_topic(), qos).await {
-        tracing::error!(?e, "subscribe self-update command topic");
+    if let Err(e) = client.subscribe(config.reboot_command_topic(), qos).await {
+        tracing::error!(?e, "subscribe reboot command topic");
+    }
+    if let Err(e) = client.subscribe(config.shutdown_command_topic(), qos).await {
+        tracing::error!(?e, "subscribe shutdown command topic");
+    }
+    if config.self_update_enabled() {
+        if let Err(e) = client.subscribe(config.update_command_topic(), qos).await {
+            tracing::error!(?e, "subscribe self-update command topic");
+        }
     }
     if config.i2c_device.is_some() {
         if let Err(e) = client.subscribe(config.light_command_topic(), qos).await {
             tracing::error!(?e, "subscribe light command topic");
         }
         if let Err(e) = client
-            .subscribe(config.startup_led_command_topic(), qos)
+            .subscribe(config.led_behavior_command_topic(), qos)
             .await
         {
-            tracing::error!(?e, "subscribe startup LED command topic");
+            tracing::error!(?e, "subscribe LED behavior command topic");
         }
         if let Err(e) = client
-            .subscribe(config.startup_led_state_topic(), qos)
+            .subscribe(config.led_behavior_state_topic(), qos)
             .await
         {
-            tracing::error!(?e, "subscribe startup LED state topic (retained sync)");
+            tracing::error!(?e, "subscribe LED behavior state topic (retained sync)");
         }
     }
     for side in [BedSide::Left, BedSide::Right] {
@@ -2753,17 +3054,21 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
         tracing::error!(?e, "subscribe Home Assistant birth topic");
     }
     publish_discovery_and_online(client, config).await;
-    let c = client.clone();
-    let cfg = config.clone();
-    tokio::spawn(async move {
-        self_update_version_poll_loop(c, cfg).await;
-    });
+    if config.self_update_enabled() {
+        let c = client.clone();
+        let cfg = config.clone();
+        let poll_interval = Duration::from_secs(config.self_update_poll_secs);
+        tokio::spawn(async move {
+            self_update_version_poll_loop(c, cfg, poll_interval).await;
+        });
+    }
 }
 
 async fn handle_light_command(
     client: &AsyncClient,
     config: &BridgeConfig,
     light_state: &Arc<Mutex<LightStateSnapshot>>,
+    led_behavior: &Arc<Mutex<LedBehavior>>,
     payload: &[u8],
 ) {
     let Some(cmd) = parse_light_command(payload) else {
@@ -2771,6 +3076,10 @@ async fn handle_light_command(
         return;
     };
     if config.i2c_device.is_none() {
+        return;
+    }
+    if *led_behavior.lock().await == LedBehavior::Status {
+        tracing::info!("ignoring LED light command while LED behavior is Status");
         return;
     }
 
@@ -2799,38 +3108,64 @@ async fn handle_light_command(
     }
 }
 
-async fn handle_startup_led_command(
+async fn handle_led_behavior_command(
     client: &AsyncClient,
     config: &BridgeConfig,
-    startup_led_on: &Arc<Mutex<bool>>,
+    led_behavior: &Arc<Mutex<LedBehavior>>,
+    light_state: &Arc<Mutex<LightStateSnapshot>>,
     payload: &[u8],
 ) {
-    let Some(on) = parse_mqtt_on_off(payload) else {
-        tracing::warn!("startup LED switch: ignored payload (expected ON or OFF)");
+    let Some(new_behavior) = parse_led_behavior(payload) else {
+        tracing::warn!(
+            "LED behavior select: ignored payload (expected Manual, Status, or Startup)"
+        );
         return;
     };
-    *startup_led_on.lock().await = on;
-    publish_startup_led_state(client, config, on).await;
-    if on {
-        tracing::info!("Startup LED preference ON (green LED applies on next lunaris start)");
-    } else {
-        tracing::info!("Startup LED preference OFF");
+    *led_behavior.lock().await = new_behavior;
+    publish_led_behavior_state(client, config, new_behavior).await;
+
+    if config.i2c_device.is_some() {
+        match new_behavior {
+            LedBehavior::Status => {
+                let green = LightStateSnapshot {
+                    on: true,
+                    brightness: 255,
+                    base_r: 0,
+                    base_g: 255,
+                    base_b: 0,
+                };
+                if let Err(e) = commit_light_snapshot(client, config, light_state, green).await {
+                    tracing::error!(%e, "LED behavior status: I²C LED write failed");
+                    publish_json_result(client, config, "led_behavior", "error", &e).await;
+                } else {
+                    tracing::info!("LED behavior set to Status (solid green while lunaris runs)");
+                }
+            }
+            LedBehavior::Manual => {
+                tracing::info!("LED behavior set to Manual (LED controlled by light entity)");
+            }
+            LedBehavior::Startup => {
+                tracing::info!(
+                    "LED behavior set to Startup (green for 5s on next lunaris start, then off)"
+                );
+            }
+        }
     }
 }
 
-/// Inbound sync on `state_topic` — updates internal preference only; hardware is driven after connect from broker-retained payloads.
-async fn handle_startup_led_state_message(
-    startup_led_on: &Arc<Mutex<bool>>,
-    startup_led_broker_retain_seen: &Arc<AtomicBool>,
+/// Inbound sync on `state_topic` — updates internal preference from retained broker state.
+async fn handle_led_behavior_state_message(
+    led_behavior: &Arc<Mutex<LedBehavior>>,
+    led_behavior_broker_retain_seen: &Arc<AtomicBool>,
     payload: &[u8],
     mqtt_retain: bool,
 ) {
-    let Some(on) = parse_mqtt_on_off(payload) else {
+    let Some(parsed_behavior) = parse_led_behavior(payload) else {
         return;
     };
-    *startup_led_on.lock().await = on;
+    *led_behavior.lock().await = parsed_behavior;
     if mqtt_retain {
-        startup_led_broker_retain_seen.store(true, Ordering::SeqCst);
+        led_behavior_broker_retain_seen.store(true, Ordering::SeqCst);
     }
 }
 
@@ -2884,7 +3219,42 @@ async fn handle_publish(
         return;
     }
 
-    if p.topic == config.update_command_topic() {
+    if p.topic == config.reboot_command_topic() {
+        let expected = config.payload_press.as_bytes();
+        if p.payload.as_ref() == expected {
+            publish_json_result(client, config, "reboot", "success", "pod reboot requested").await;
+            if let Err(e) = trigger_pod_reboot().await {
+                tracing::error!(%e, "pod reboot failed");
+                publish_json_result(client, config, "reboot", "error", &e).await;
+            } else {
+                tracing::warn!("pod reboot command executed");
+            }
+        }
+        return;
+    }
+
+    if p.topic == config.shutdown_command_topic() {
+        let expected = config.payload_press.as_bytes();
+        if p.payload.as_ref() == expected {
+            publish_json_result(
+                client,
+                config,
+                "shutdown",
+                "success",
+                "pod shutdown requested",
+            )
+            .await;
+            if let Err(e) = trigger_pod_shutdown().await {
+                tracing::error!(%e, "pod shutdown failed");
+                publish_json_result(client, config, "shutdown", "error", &e).await;
+            } else {
+                tracing::warn!("pod shutdown command executed");
+            }
+        }
+        return;
+    }
+
+    if config.self_update_enabled() && p.topic == config.update_command_topic() {
         if p.payload.as_ref() == crate::self_update::PAYLOAD_INSTALL.as_bytes() {
             let c = client.clone();
             let cfg = config.clone();
@@ -3074,14 +3444,21 @@ async fn handle_publish(
         }
     }
 
-    if config.i2c_device.is_some() && p.topic == config.startup_led_command_topic() {
-        handle_startup_led_command(client, config, &st.startup_led_on, &p.payload).await;
+    if config.i2c_device.is_some() && p.topic == config.led_behavior_command_topic() {
+        handle_led_behavior_command(
+            client,
+            config,
+            &st.led_behavior,
+            &st.light_state,
+            &p.payload,
+        )
+        .await;
         return;
     }
-    if config.i2c_device.is_some() && p.topic == config.startup_led_state_topic() {
-        handle_startup_led_state_message(
-            &st.startup_led_on,
-            &st.startup_led_broker_retain_seen,
+    if config.i2c_device.is_some() && p.topic == config.led_behavior_state_topic() {
+        handle_led_behavior_state_message(
+            &st.led_behavior,
+            &st.led_behavior_broker_retain_seen,
             &p.payload,
             p.retain,
         )
@@ -3090,7 +3467,14 @@ async fn handle_publish(
     }
 
     if config.i2c_device.is_some() && p.topic == config.light_command_topic() {
-        handle_light_command(client, config, &st.light_state, &p.payload).await;
+        handle_light_command(
+            client,
+            config,
+            &st.light_state,
+            &st.led_behavior,
+            &p.payload,
+        )
+        .await;
         return;
     }
     // Like vibration `…/number/…/state`: ignore echoes on `light/led/state`; broker retain is drained only during bootstrap.
@@ -3123,15 +3507,13 @@ pub async fn run(
 
     let handler_state = PublishHandlerState {
         light_state: Arc::new(Mutex::new(LightStateSnapshot::default())),
-        startup_led_on: Arc::new(Mutex::new(false)),
-        startup_led_broker_retain_seen: Arc::new(AtomicBool::new(false)),
+        led_behavior: Arc::new(Mutex::new(LedBehavior::default())),
+        led_behavior_broker_retain_seen: Arc::new(AtomicBool::new(false)),
         mqtt_ha_state_bootstrap: Arc::new(AtomicBool::new(false)),
         climate_left: Arc::new(Mutex::new(ClimateSideState::default())),
         climate_right: Arc::new(Mutex::new(ClimateSideState::default())),
         presence_calibrate_tx: presence_calibrate_tx.clone(),
     };
-
-    let startup_led_hw_once_per_process = Arc::new(AtomicBool::new(false));
 
     let mut opts = MqttOptions::new(
         config.mqtt_client_id.clone(),
@@ -3181,6 +3563,17 @@ pub async fn run(
     tokio::spawn(async move {
         while let Some(msg) = fw_rx.recv().await {
             publish_firmware_message_state(&c, &cfg, &msg).await;
+        }
+    });
+
+    let c = client.clone();
+    let cfg = config.clone();
+    tokio::spawn(async move {
+        let mut uptime_interval = interval(Duration::from_secs(60));
+        uptime_interval.tick().await;
+        loop {
+            publish_system_uptime_state(&c, &cfg).await;
+            uptime_interval.tick().await;
         }
     });
 
@@ -3367,6 +3760,10 @@ pub async fn run(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("install SIGTERM handler");
 
+    let mut mqtt_connected_once = false;
+    let mut mqtt_start_connect_failures: u8 = 0;
+    let mut keep_led_state_on_exit = false;
+
     loop {
         #[cfg(unix)]
         let evt = tokio::select! {
@@ -3386,6 +3783,8 @@ pub async fn run(
         match evt {
             Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
                 if ack.code == rumqttc::ConnectReturnCode::Success {
+                    mqtt_connected_once = true;
+                    mqtt_start_connect_failures = 0;
                     tracing::info!("MQTT connected");
                     // Retained `…/state` replays can arrive on the next `poll()` before the spawned
                     // session task runs — set bootstrap flags here so `handle_publish` ingests them
@@ -3394,7 +3793,7 @@ pub async fn run(
                         .mqtt_ha_state_bootstrap
                         .store(true, Ordering::SeqCst);
                     handler_state
-                        .startup_led_broker_retain_seen
+                        .led_behavior_broker_retain_seen
                         .store(false, Ordering::SeqCst);
                     // rumqttc: `AsyncClient` requests are only processed while `eventloop.poll()` runs.
                     // Awaiting `publish`/`subscribe` on the same task that calls `poll()` deadlocks the
@@ -3402,11 +3801,10 @@ pub async fn run(
                     let c = client.clone();
                     let cfg = config.clone();
                     let hs = handler_state.clone();
-                    let hw_once = startup_led_hw_once_per_process.clone();
                     tokio::spawn(async move {
                         setup_session(&c, &cfg).await;
 
-                        // Broker retain replay (climate/light/vibration/presence **`state_topic`** + startup_led)
+                        // Broker retain replay (climate/light/vibration/presence **`state_topic`** + led_behavior)
                         // while `mqtt_ha_state_bootstrap` is observed in `handle_publish`.
                         const HA_RETAIN_DRAIN: Duration = Duration::from_millis(850);
                         sleep(HA_RETAIN_DRAIN).await;
@@ -3450,52 +3848,102 @@ pub async fn run(
                         }
 
                         if cfg.i2c_device.is_some() {
-                            let startup_on = *hs.startup_led_on.lock().await;
-                            if startup_on
-                                && hw_once
-                                    .compare_exchange(
-                                        false,
-                                        true,
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
-                                    )
-                                    .is_ok()
-                            {
-                                let green = LightStateSnapshot {
-                                    on: true,
-                                    brightness: 255,
-                                    base_r: 0,
-                                    base_g: 255,
-                                    base_b: 0,
-                                };
-                                match commit_light_snapshot(&c, &cfg, &hs.light_state, green).await {
-                                    Ok(()) => tracing::info!(
-                                        "Startup LED preference ON: green LED applied (this lunaris start)"
-                                    ),
-                                    Err(e) => {
-                                        tracing::error!(%e, "Startup LED on boot: I²C LED write failed");
-                                        publish_json_result(
-                                            &c,
-                                            &cfg,
-                                            "startup_led",
-                                            "error",
-                                            &e,
-                                        )
-                                        .await;
-                                        hw_once.store(false, Ordering::SeqCst);
+                            let led_behavior = *hs.led_behavior.lock().await;
+                            match led_behavior {
+                                LedBehavior::Manual => {
+                                    let off = LightStateSnapshot {
+                                        on: false,
+                                        brightness: 255,
+                                        base_r: 0,
+                                        base_g: 255,
+                                        base_b: 0,
+                                    };
+                                    let _ =
+                                        commit_light_snapshot(&c, &cfg, &hs.light_state, off).await;
+                                }
+                                LedBehavior::Status => {
+                                    let green = LightStateSnapshot {
+                                        on: true,
+                                        brightness: 255,
+                                        base_r: 0,
+                                        base_g: 255,
+                                        base_b: 0,
+                                    };
+                                    if let Err(e) =
+                                        commit_light_snapshot(&c, &cfg, &hs.light_state, green)
+                                            .await
+                                    {
+                                        tracing::error!(%e, "LED behavior status: I²C LED write failed");
+                                        publish_json_result(&c, &cfg, "led_behavior", "error", &e)
+                                            .await;
                                     }
                                 }
-                            } else {
-                                let mqtt_snap = hs.light_state.lock().await.clone();
-                                let _ = commit_light_snapshot(&c, &cfg, &hs.light_state, mqtt_snap)
-                                    .await;
+                                LedBehavior::Startup => {
+                                    let green = LightStateSnapshot {
+                                        on: true,
+                                        brightness: 255,
+                                        base_r: 0,
+                                        base_g: 255,
+                                        base_b: 0,
+                                    };
+                                    if let Err(e) =
+                                        commit_light_snapshot(&c, &cfg, &hs.light_state, green)
+                                            .await
+                                    {
+                                        tracing::error!(%e, "LED behavior startup: I²C LED write failed");
+                                        publish_json_result(&c, &cfg, "led_behavior", "error", &e)
+                                            .await;
+                                    } else {
+                                        sleep(Duration::from_secs(5)).await;
+                                        let off = LightStateSnapshot {
+                                            on: false,
+                                            brightness: 255,
+                                            base_r: 0,
+                                            base_g: 255,
+                                            base_b: 0,
+                                        };
+                                        let _ =
+                                            commit_light_snapshot(&c, &cfg, &hs.light_state, off)
+                                                .await;
+                                    }
+                                }
                             }
                             let snap = hs.light_state.lock().await.clone();
                             publish_light_state(&c, &cfg, &snap).await;
+                            publish_led_behavior_state(&c, &cfg, led_behavior).await;
                         }
                     });
                 } else {
                     tracing::error!(code = ?ack.code, "MQTT connection refused");
+                    if !mqtt_connected_once {
+                        mqtt_start_connect_failures = mqtt_start_connect_failures.saturating_add(1);
+                        tracing::warn!(
+                            attempt = mqtt_start_connect_failures,
+                            max_attempts = 5,
+                            "MQTT connect attempt failed during startup"
+                        );
+                        if mqtt_start_connect_failures >= 5 {
+                            let red = LightStateSnapshot {
+                                on: true,
+                                brightness: 255,
+                                base_r: 255,
+                                base_g: 0,
+                                base_b: 0,
+                            };
+                            if let Err(e) =
+                                apply_led_snapshot_hw_only(&config, &handler_state.light_state, red)
+                                    .await
+                            {
+                                tracing::error!(%e, "startup MQTT failure: red LED apply failed");
+                            } else {
+                                keep_led_state_on_exit = true;
+                                tracing::error!(
+                                    "MQTT startup failed after 5 attempts; LED set red, terminating"
+                                );
+                            }
+                            break;
+                        }
+                    }
                 }
             }
             Ok(Event::Incoming(Incoming::Publish(p))) => {
@@ -3514,16 +3962,68 @@ pub async fn run(
             }
             Err(e) => {
                 tracing::warn!(?e, "MQTT event loop error; backing off");
+                if !mqtt_connected_once {
+                    mqtt_start_connect_failures = mqtt_start_connect_failures.saturating_add(1);
+                    tracing::warn!(
+                        attempt = mqtt_start_connect_failures,
+                        max_attempts = 5,
+                        "MQTT connect attempt failed during startup"
+                    );
+                    if mqtt_start_connect_failures >= 5 {
+                        let red = LightStateSnapshot {
+                            on: true,
+                            brightness: 255,
+                            base_r: 255,
+                            base_g: 0,
+                            base_b: 0,
+                        };
+                        if let Err(err) =
+                            apply_led_snapshot_hw_only(&config, &handler_state.light_state, red)
+                                .await
+                        {
+                            tracing::error!(%err, "startup MQTT failure: red LED apply failed");
+                        } else {
+                            keep_led_state_on_exit = true;
+                            tracing::error!(
+                                "MQTT startup failed after 5 attempts; LED set red, terminating"
+                            );
+                        }
+                        break;
+                    }
+                } else if config.i2c_device.is_some()
+                    && *handler_state.led_behavior.lock().await == LedBehavior::Status
+                {
+                    let red = LightStateSnapshot {
+                        on: true,
+                        brightness: 255,
+                        base_r: 255,
+                        base_g: 0,
+                        base_b: 0,
+                    };
+                    if let Err(err) =
+                        apply_led_snapshot_hw_only(&config, &handler_state.light_state, red).await
+                    {
+                        tracing::error!(%err, "MQTT disconnect in Status mode: red LED apply failed");
+                    } else {
+                        tracing::warn!(
+                            "MQTT disconnected while running; LED behavior Status -> set LED red"
+                        );
+                    }
+                }
                 sleep(Duration::from_secs(1)).await;
             }
         }
     }
 
-    if let Some(ref path) = config.i2c_device {
-        match shutdown_led(path) {
-            Ok(()) => tracing::info!("LED turned off on exit"),
-            Err(e) => tracing::warn!(error = %e, "LED turn-off on exit failed (I²C)"),
+    if !keep_led_state_on_exit {
+        if let Some(ref path) = config.i2c_device {
+            match shutdown_led(path) {
+                Ok(()) => tracing::info!("LED turned off on exit"),
+                Err(e) => tracing::warn!(error = %e, "LED turn-off on exit failed (I²C)"),
+            }
         }
+    } else {
+        tracing::warn!("keeping LED state on exit (startup MQTT failure)");
     }
 }
 
@@ -3774,6 +4274,23 @@ mod tests {
     }
 
     #[test]
+    fn system_uptime_discovery_matches_state_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_system_uptime(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.system_uptime_state_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+        assert_eq!(v["enabled_by_default"].as_bool(), Some(false));
+        assert_eq!(v["device_class"].as_str(), Some("timestamp"));
+        assert_eq!(v["name"].as_str(), Some("System Up Since"));
+    }
+
+    #[test]
     fn request_get_temperatures_button_discovery_matches_command_topic() {
         let cli =
             crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
@@ -3783,6 +4300,34 @@ mod tests {
         assert_eq!(
             v["command_topic"].as_str(),
             Some(cfg.request_get_temperatures_command_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+    }
+
+    #[test]
+    fn reboot_button_discovery_matches_command_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_reboot_button(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.reboot_command_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+    }
+
+    #[test]
+    fn shutdown_button_discovery_matches_command_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_shutdown_button(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.shutdown_command_topic().as_str()),
         );
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
     }
@@ -3833,14 +4378,15 @@ mod tests {
     }
 
     #[test]
-    fn startup_led_discovery_is_configuration_entity() {
+    fn led_behavior_discovery_is_configuration_entity() {
         let cli =
             crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
-        let disc = discovery_payload_startup_led_switch(&cfg);
+        let disc = discovery_payload_led_behavior_select(&cfg);
         let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
         assert_eq!(v["entity_category"].as_str(), Some("config"));
         assert_eq!(v["icon"].as_str(), Some("mdi:lightbulb"));
+        assert_eq!(v["name"].as_str(), Some("LED Behavior"));
     }
 
     #[test]
@@ -3859,6 +4405,7 @@ mod tests {
             "omit entity_category so Water Tank stays with primary entities"
         );
         assert_eq!(v["device_class"].as_str(), Some("plug"));
+        assert_eq!(v["icon"].as_str(), Some("mdi:water"));
         assert_eq!(v["payload_on"].as_str(), Some("ON"));
         assert_eq!(v["payload_off"].as_str(), Some("OFF"));
     }
@@ -3903,12 +4450,19 @@ mod tests {
             Some(false),
             "HA entity disabled by default; runtime still defaults cancel preamble on"
         );
+        assert_eq!(cancel["icon"].as_str(), Some("mdi:vibrate-off"));
         let v: serde_json::Value =
             serde_json::from_str(&discovery_payload_vibration_pattern_select(&cfg)).unwrap();
         let opts = v["options"].as_array().expect("options array");
         assert_eq!(opts.len(), 2);
         assert_eq!(opts[0].as_str(), Some("single"));
         assert_eq!(opts[1].as_str(), Some("double"));
+        let duration: serde_json::Value =
+            serde_json::from_str(&discovery_payload_vibration_duration_number(&cfg)).unwrap();
+        assert_eq!(duration["icon"].as_str(), Some("mdi:vibrate"));
+        let intensity: serde_json::Value =
+            serde_json::from_str(&discovery_payload_vibration_intensity_number(&cfg)).unwrap();
+        assert_eq!(intensity["icon"].as_str(), Some("mdi:vibrate"));
     }
 
     #[test]

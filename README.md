@@ -52,11 +52,11 @@ Using custom firmware or low-level hardware control may void warranties, break t
 
 | Name | Kind | Hidden by default | What it does |
 |:---|:---|:---:|:---|
-| Firmware | update | No | Updates Lunaris itself by pullig the latest version from github releases. |
+| Firmware | update | No | Updates Lunaris itself by pulling the latest version from GitHub releases (disabled entirely when `--self-update-poll-secs 0`). |
 | Calibrate Presence | button | No | Start learning what an empty mattress looks like (keep the bed clear for ~10 s afterwards). |
 | Presence Baseline Delta | number | Yes | Fine-tune sensitivity after calibration. |
 | Presence Cap Threshold | number | Yes | Fine-tune rough “capacitance” sensitivity before calibration. |
-| Startup LED | switch | No | If on, lunaris flashes the green indicator once each time it starts. |
+| LED Behavior | select | No | Chooses LED startup/runtime behavior: **Manual** (off at boot, only light entity controls it), **Status** (solid green while lunaris runs), **Startup** (green for 5s on boot, then off and manual control). |
 | Vibration Cancel Preamble | switch | Yes | Tweaks vibration behaviour — leave as-is unless troubleshooting. |
 | Vibration Duration | number | No | How long vibrations last when you press a vibrate button. |
 | Vibration Intensity | number | No | How strong vibrations feel (percentage). |
@@ -72,6 +72,9 @@ Using custom firmware or low-level hardware control may void warranties, break t
 | Device Label | sensor | Yes | Human-readable pod name from disk when available; mostly for support. |
 | Firmware Message | sensor | Yes | Occasionally shows one-line status chatter from the bed’s controller. |
 | Presence Baseline Zones | sensor | Yes | Raw saved calibration snapshot for nerds/support; not usually needed daily. |
+| System Uptime | sensor | Yes | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
+| Reboot | button | No | Restarts the pod. |
+| Shutdown | button | No | Powers off the pod. |
 | Request Temperatures | button | No | Ask the pod to refresh its temperature readings (troubleshooting / curiosity). |
 
 ## 📦 Installation
@@ -162,6 +165,7 @@ lunaris \
 | `--mqtt-port` | `1883` | No | Broker port. |
 | `--mqtt-username` | — | No | Broker username, if required. |
 | `--payload-press` | `PRESS` | No | Text Home Assistant sends when you “press” an MQTT button; must match what discovery advertises. |
+| `--self-update-poll-secs` | `43200` | No | How often lunaris checks GitHub for a newer release (`12h` by default). Set to `0` to disable self-update polling and hide the Firmware update entity. |
 | `--topic-prefix` | `lunaris/pod4` | No | Leading part of all topics for this bed (availability, controls, sensors, etc.). |
 
 
