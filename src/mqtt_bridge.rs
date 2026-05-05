@@ -882,6 +882,7 @@ fn discovery_payload_vibration_cancel_preamble_switch(config: &BridgeConfig) -> 
         "name": "Vibration Cancel Preamble",
         "command_topic": config.vibration_cancel_preamble_command_topic(),
         "state_topic": config.vibration_cancel_preamble_state_topic(),
+        "icon": "mdi:vibrate-off",
         "payload_on": "ON",
         "payload_off": "OFF",
         "entity_category": "config",
@@ -901,6 +902,7 @@ fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
     json!({
         "name": "Water Tank",
         "state_topic": config.water_tank_state_topic(),
+        "icon": "mdi:water",
         "payload_on": "ON",
         "payload_off": "OFF",
         "device_class": "plug",
@@ -4244,6 +4246,7 @@ mod tests {
             "omit entity_category so Water Tank stays with primary entities"
         );
         assert_eq!(v["device_class"].as_str(), Some("plug"));
+        assert_eq!(v["icon"].as_str(), Some("mdi:water"));
         assert_eq!(v["payload_on"].as_str(), Some("ON"));
         assert_eq!(v["payload_off"].as_str(), Some("OFF"));
     }
@@ -4288,6 +4291,7 @@ mod tests {
             Some(false),
             "HA entity disabled by default; runtime still defaults cancel preamble on"
         );
+        assert_eq!(cancel["icon"].as_str(), Some("mdi:vibrate-off"));
         let v: serde_json::Value =
             serde_json::from_str(&discovery_payload_vibration_pattern_select(&cfg)).unwrap();
         let opts = v["options"].as_array().expect("options array");
