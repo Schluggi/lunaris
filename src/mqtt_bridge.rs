@@ -1,6 +1,7 @@
 //! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor) + retained **number/select/switch**
 //! vibration tuning, optional capacitance **presence**,
-//! Frozen **water tank** + **Firmware message** from **`0x07`**, mattress climate, JSON light (I²C).
+//! Frozen **water tank** + **Firmware message** from **`0x07`**, mattress climate, JSON light (I²C),
+//! MQTT **update** (self-install from GitHub `releases/latest` asset).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
 //! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
@@ -55,6 +56,7 @@ const DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_ZONES: &str = "lunaris_presence_base
 const DISCOVERY_OBJECT_ID_PRESENCE_CALIBRATION: &str = "lunaris_presence_calibration";
 const DISCOVERY_OBJECT_ID_WATER_TANK: &str = "lunaris_water_tank";
 const DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE: &str = "lunaris_firmware_message";
+const DISCOVERY_OBJECT_ID_UPDATE: &str = "lunaris_update";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
@@ -506,6 +508,21 @@ impl BridgeConfig {
         )
     }
 
+    pub fn update_state_topic(&self) -> String {
+        format!("{}/update/lunaris/state", self.topic_prefix)
+    }
+
+    pub fn update_command_topic(&self) -> String {
+        format!("{}/update/lunaris/set", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_update(&self) -> String {
+        format!(
+            "{}/update/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_UPDATE
+        )
+    }
+
     pub fn deviceinfo_device_label_state_topic(&self) -> String {
         format!("{}/sensor/deviceinfo_device_label/state", self.topic_prefix)
     }
@@ -817,6 +834,27 @@ fn discovery_payload_firmware_message(config: &BridgeConfig) -> String {
         "entity_category": "diagnostic",
         "enabled_by_default": false,
         "unique_id": format!("{}_firmware_message", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_self_update(config: &BridgeConfig) -> String {
+    json!({
+        "platform": "update",
+        "name": "Firmware",
+        "title": "Firmware",
+        "state_topic": config.update_state_topic(),
+        "command_topic": config.update_command_topic(),
+        "payload_install": crate::self_update::PAYLOAD_INSTALL,
+        "device_class": "firmware",
+        "entity_category": "config",
+        "unique_id": format!("{}_lunaris_update", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -2153,6 +2191,100 @@ async fn handle_climate_temperature_command(
     }
 }
 
+async fn publish_self_update_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    latest: Option<&str>,
+    in_progress: bool,
+    update_percentage: Option<f64>,
+) {
+    let body = crate::self_update::update_state_json(
+        crate::self_update::installed_version(),
+        latest,
+        in_progress,
+        update_percentage,
+    );
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(config.update_state_topic(), qos, true, body)
+        .await
+    {
+        tracing::error!(?e, "publish self-update state");
+    }
+}
+
+async fn handle_self_update_install(client: &AsyncClient, config: &BridgeConfig) {
+    let latest = match tokio::task::spawn_blocking(
+        crate::self_update::fetch_latest_version_blocking,
+    )
+    .await
+    {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::warn!(%e, "self-update: could not resolve latest version before install");
+            None
+        }
+        Err(e) => {
+            tracing::error!(?e, "self-update: spawn_blocking join failed (fetch)");
+            None
+        }
+    };
+    publish_self_update_state(client, config, latest.as_deref(), true, None).await;
+
+    match tokio::task::spawn_blocking(crate::self_update::perform_install_blocking).await {
+        Ok(Err(e)) => {
+            tracing::error!(%e, "self-update failed");
+            let latest_after = match tokio::task::spawn_blocking(
+                crate::self_update::fetch_latest_version_blocking,
+            )
+            .await
+            {
+                Ok(Ok(v)) => Some(v),
+                Ok(Err(fetch_err)) => {
+                    tracing::warn!(%fetch_err, "self-update: post-error fetch latest failed");
+                    None
+                }
+                Err(join_err) => {
+                    tracing::error!(
+                        ?join_err,
+                        "self-update: spawn_blocking join failed (post-error fetch)"
+                    );
+                    None
+                }
+            };
+            publish_self_update_state(client, config, latest_after.as_deref(), false, None).await;
+            publish_json_result(client, config, "self_update", "error", &e.to_string()).await;
+        }
+        Ok(Ok(())) => {}
+        Err(e) => {
+            tracing::error!(?e, "self-update: spawn_blocking join failed (install)");
+            publish_self_update_state(client, config, None, false, None).await;
+            publish_json_result(client, config, "self_update", "error", &e.to_string()).await;
+        }
+    }
+}
+
+async fn self_update_version_poll_loop(client: AsyncClient, config: BridgeConfig) {
+    loop {
+        let latest =
+            match tokio::task::spawn_blocking(crate::self_update::fetch_latest_version_blocking)
+                .await
+            {
+                Ok(Ok(v)) => Some(v),
+                Ok(Err(e)) => {
+                    tracing::warn!(%e, "self-update: poll fetch failed");
+                    None
+                }
+                Err(e) => {
+                    tracing::error!(?e, "self-update: spawn_blocking join failed (poll)");
+                    None
+                }
+            };
+        publish_self_update_state(&client, &config, latest.as_deref(), false, None).await;
+        sleep(Duration::from_secs(30 * 60)).await;
+    }
+}
+
 async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfig) {
     let qos = QoS::AtLeastOnce;
     let disc_btn = discovery_payload_button(config);
@@ -2473,6 +2605,37 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     {
         tracing::error!(?e, "publish Frozen firmware message discovery");
     }
+    let disc_update = discovery_payload_self_update(config);
+    if let Err(e) = client
+        .publish(config.discovery_topic_update(), qos, true, disc_update)
+        .await
+    {
+        tracing::error!(?e, "publish self-update discovery");
+    }
+    // Fetch GitHub `latest` before the first retained update state so HA can compare
+    // `installed_version` vs `latest_version` immediately (avoids empty/missing latest until poll).
+    let latest_initial = match tokio::task::spawn_blocking(
+        crate::self_update::fetch_latest_version_blocking,
+    )
+    .await
+    {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::warn!(
+                %e,
+                "self-update: could not fetch latest version for initial update state"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::error!(
+                ?e,
+                "self-update: spawn_blocking join failed (initial latest version)"
+            );
+            None
+        }
+    };
+    publish_self_update_state(client, config, latest_initial.as_deref(), false, None).await;
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
         .await
@@ -2491,6 +2654,9 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
         .await
     {
         tracing::error!(?e, "subscribe request_get_temperatures command topic");
+    }
+    if let Err(e) = client.subscribe(config.update_command_topic(), qos).await {
+        tracing::error!(?e, "subscribe self-update command topic");
     }
     if config.i2c_device.is_some() {
         if let Err(e) = client.subscribe(config.light_command_topic(), qos).await {
@@ -2587,6 +2753,11 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
         tracing::error!(?e, "subscribe Home Assistant birth topic");
     }
     publish_discovery_and_online(client, config).await;
+    let c = client.clone();
+    let cfg = config.clone();
+    tokio::spawn(async move {
+        self_update_version_poll_loop(c, cfg).await;
+    });
 }
 
 async fn handle_light_command(
@@ -2709,6 +2880,17 @@ async fn handle_publish(
                         .await;
                 }
             }
+        }
+        return;
+    }
+
+    if p.topic == config.update_command_topic() {
+        if p.payload.as_ref() == crate::self_update::PAYLOAD_INSTALL.as_bytes() {
+            let c = client.clone();
+            let cfg = config.clone();
+            tokio::spawn(async move {
+                handle_self_update_install(&c, &cfg).await;
+            });
         }
         return;
     }
@@ -3537,6 +3719,31 @@ mod tests {
             Some(false),
             "disabled in HA registry by default — enable under device entities if desired"
         );
+    }
+
+    #[test]
+    fn self_update_discovery_matches_mqtt_update_topics() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_self_update(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(v["platform"].as_str(), Some("update"));
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.update_state_topic().as_str()),
+        );
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.update_command_topic().as_str()),
+        );
+        assert_eq!(
+            v["payload_install"].as_str(),
+            Some(crate::self_update::PAYLOAD_INSTALL),
+        );
+        assert_eq!(v["device_class"].as_str(), Some("firmware"));
+        assert_eq!(v["name"].as_str(), Some("Firmware"));
+        assert_eq!(v["title"].as_str(), Some("Firmware"));
     }
 
     #[test]

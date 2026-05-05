@@ -81,15 +81,18 @@ async fn open_sensor_port(
             "Sensor: bootloader handshake (Ping + JumpToFirmware, opensleep order)"
         );
         let mut bl = tokio_serial::new(path.to_string(), BOOTLOADER_BAUD).open_native_async()?;
+        crate::serial_prime::set_serial_cloexec(&bl)?;
         bl.write_all(&ping_frame()).await?;
         sleep(Duration::from_millis(200)).await;
         bl.write_all(&jump_to_firmware_frame()).await?;
         sleep(Duration::from_millis(700)).await;
         drop(bl);
     }
-    tokio_serial::new(path.to_string(), fw_baud)
+    let p = tokio_serial::new(path.to_string(), fw_baud)
         .open_native_async()
-        .map_err(Into::into)
+        .map_err(SensorLinkError::from)?;
+    crate::serial_prime::set_serial_cloexec(&p)?;
+    Ok(p)
 }
 
 /// Opensleep’s sensor [`CommandScheduler`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/manager.rs)

@@ -72,11 +72,18 @@ jobs:
         if: steps.gate.outputs.release == 'true'
         with:
           toolchain: 1.84.0
-          targets: aarch64-unknown-linux-gnu
+          targets: aarch64-unknown-linux-musl
 
-      - name: Install AArch64 GNU toolchain (linker)
+      # Static musl binary — avoids GLIBC version mismatch on the Pod (gnu target links a newer glibc than older Pod OS).
+      - name: Install Zig (cargo-zigbuild)
         if: steps.gate.outputs.release == 'true'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Install cargo-zigbuild
+        if: steps.gate.outputs.release == 'true'
+        run: cargo install cargo-zigbuild --version 0.20.1 --locked
 
       - name: Bump patch version in Cargo.toml
         if: steps.gate.outputs.release == 'true'
@@ -110,15 +117,15 @@ jobs:
           print(f"Bumped version to {new_ver}")
           PY
 
-      - name: Build release (aarch64)
+      - name: Build release (aarch64 musl, static)
         if: steps.gate.outputs.release == 'true'
-        run: cargo build --release --verbose --target aarch64-unknown-linux-gnu
+        run: cargo zigbuild --release --verbose --target aarch64-unknown-linux-musl
 
       - name: Stage binaries
         if: steps.gate.outputs.release == 'true'
         run: |
           mkdir -p dist
-          cp target/aarch64-unknown-linux-gnu/release/lunaris "dist/lunaris"
+          cp target/aarch64-unknown-linux-musl/release/lunaris "dist/lunaris"
           sha256sum dist/* > dist/SHA256SUMS
 
       - name: Commit version bump and tag

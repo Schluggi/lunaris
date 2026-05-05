@@ -66,6 +66,7 @@ async fn run(
 ) -> Result<(), FrozenLinkError> {
     let path = device.to_string_lossy().to_string();
     let port = tokio_serial::new(path, baud).open_native_async()?;
+    crate::serial_prime::set_serial_cloexec(&port)?;
     let (mut read_half, mut write_half) = tokio::io::split(port);
 
     let awake_reader = awake.clone();

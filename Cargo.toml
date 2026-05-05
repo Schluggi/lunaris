@@ -22,5 +22,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-serial = "5.4"
 i2cdev = "0.6"
+# Sync HTTP: `native-tls` + invalid certs (Pod has no CA bundle); not default rustls/webpki.
+# Pin `url` so transitive `idna` stays off versions that need Cargo edition2024 (Rust 1.84 CI).
+ureq = { version = "2.9", default-features = false, features = ["json", "native-tls", "gzip"] }
+native-tls = "0.2"
+# `native-tls` → `openssl-sys`: avoid system OpenSSL (CI/cross); compile OpenSSL from source.
+openssl-sys = { version = "0.9.115", features = ["vendored"] }
+sha2 = "0.10"
+libc = "0.2"
+url = "=2.4.1"
 
 [dev-dependencies]
