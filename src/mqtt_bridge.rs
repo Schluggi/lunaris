@@ -2908,27 +2908,26 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         }
         // Fetch GitHub `latest` before the first retained update state so HA can compare
         // `installed_version` vs `latest_version` immediately (avoids empty/missing latest until poll).
-        let latest_initial = match tokio::task::spawn_blocking(
-            crate::self_update::fetch_latest_version_blocking,
-        )
-        .await
-        {
-            Ok(Ok(v)) => Some(v),
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    %e,
-                    "self-update: could not fetch latest version for initial update state"
-                );
-                None
-            }
-            Err(e) => {
-                tracing::error!(
-                    ?e,
-                    "self-update: spawn_blocking join failed (initial latest version)"
-                );
-                None
-            }
-        };
+        let latest_initial =
+            match tokio::task::spawn_blocking(crate::self_update::fetch_latest_version_blocking)
+                .await
+            {
+                Ok(Ok(v)) => Some(v),
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        %e,
+                        "self-update: could not fetch latest version for initial update state"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::error!(
+                        ?e,
+                        "self-update: spawn_blocking join failed (initial latest version)"
+                    );
+                    None
+                }
+            };
         publish_self_update_state(client, config, latest_initial.as_deref(), false, None).await;
     }
     if let Err(e) = client
@@ -2965,7 +2964,10 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
         if let Err(e) = client.subscribe(config.light_command_topic(), qos).await {
             tracing::error!(?e, "subscribe light command topic");
         }
-        if let Err(e) = client.subscribe(config.led_behavior_command_topic(), qos).await {
+        if let Err(e) = client
+            .subscribe(config.led_behavior_command_topic(), qos)
+            .await
+        {
             tracing::error!(?e, "subscribe LED behavior command topic");
         }
         if let Err(e) = client
@@ -3115,7 +3117,9 @@ async fn handle_led_behavior_command(
     payload: &[u8],
 ) {
     let Some(new_behavior) = parse_led_behavior(payload) else {
-        tracing::warn!("LED behavior select: ignored payload (expected Manual, Status, or Startup)");
+        tracing::warn!(
+            "LED behavior select: ignored payload (expected Manual, Status, or Startup)"
+        );
         return;
     };
     *led_behavior.lock().await = new_behavior;
@@ -3233,8 +3237,14 @@ async fn handle_publish(
     if p.topic == config.shutdown_command_topic() {
         let expected = config.payload_press.as_bytes();
         if p.payload.as_ref() == expected {
-            publish_json_result(client, config, "shutdown", "success", "pod shutdown requested")
-                .await;
+            publish_json_result(
+                client,
+                config,
+                "shutdown",
+                "success",
+                "pod shutdown requested",
+            )
+            .await;
             if let Err(e) = trigger_pod_shutdown().await {
                 tracing::error!(%e, "pod shutdown failed");
                 publish_json_result(client, config, "shutdown", "error", &e).await;
@@ -3436,8 +3446,14 @@ async fn handle_publish(
     }
 
     if config.i2c_device.is_some() && p.topic == config.led_behavior_command_topic() {
-        handle_led_behavior_command(client, config, &st.led_behavior, &st.light_state, &p.payload)
-            .await;
+        handle_led_behavior_command(
+            client,
+            config,
+            &st.led_behavior,
+            &st.light_state,
+            &p.payload,
+        )
+        .await;
         return;
     }
     if config.i2c_device.is_some() && p.topic == config.led_behavior_state_topic() {
@@ -3452,7 +3468,14 @@ async fn handle_publish(
     }
 
     if config.i2c_device.is_some() && p.topic == config.light_command_topic() {
-        handle_light_command(client, config, &st.light_state, &st.led_behavior, &p.payload).await;
+        handle_light_command(
+            client,
+            config,
+            &st.light_state,
+            &st.led_behavior,
+            &p.payload,
+        )
+        .await;
         return;
     }
     // Like vibration `…/number/…/state`: ignore echoes on `light/led/state`; broker retain is drained only during bootstrap.
@@ -3836,7 +3859,8 @@ pub async fn run(
                                         base_g: 255,
                                         base_b: 0,
                                     };
-                                    let _ = commit_light_snapshot(&c, &cfg, &hs.light_state, off).await;
+                                    let _ =
+                                        commit_light_snapshot(&c, &cfg, &hs.light_state, off).await;
                                 }
                                 LedBehavior::Status => {
                                     let green = LightStateSnapshot {
@@ -3847,10 +3871,12 @@ pub async fn run(
                                         base_b: 0,
                                     };
                                     if let Err(e) =
-                                        commit_light_snapshot(&c, &cfg, &hs.light_state, green).await
+                                        commit_light_snapshot(&c, &cfg, &hs.light_state, green)
+                                            .await
                                     {
                                         tracing::error!(%e, "LED behavior status: I²C LED write failed");
-                                        publish_json_result(&c, &cfg, "led_behavior", "error", &e).await;
+                                        publish_json_result(&c, &cfg, "led_behavior", "error", &e)
+                                            .await;
                                     }
                                 }
                                 LedBehavior::Startup => {
@@ -3862,10 +3888,12 @@ pub async fn run(
                                         base_b: 0,
                                     };
                                     if let Err(e) =
-                                        commit_light_snapshot(&c, &cfg, &hs.light_state, green).await
+                                        commit_light_snapshot(&c, &cfg, &hs.light_state, green)
+                                            .await
                                     {
                                         tracing::error!(%e, "LED behavior startup: I²C LED write failed");
-                                        publish_json_result(&c, &cfg, "led_behavior", "error", &e).await;
+                                        publish_json_result(&c, &cfg, "led_behavior", "error", &e)
+                                            .await;
                                     } else {
                                         sleep(Duration::from_secs(5)).await;
                                         let off = LightStateSnapshot {
@@ -3875,7 +3903,9 @@ pub async fn run(
                                             base_g: 255,
                                             base_b: 0,
                                         };
-                                        let _ = commit_light_snapshot(&c, &cfg, &hs.light_state, off).await;
+                                        let _ =
+                                            commit_light_snapshot(&c, &cfg, &hs.light_state, off)
+                                                .await;
                                     }
                                 }
                             }
