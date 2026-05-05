@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rumqttc::{AsyncClient, ConnectionError, Event, Incoming, LastWill, MqttOptions, Publish, QoS};
 use serde::Deserialize;
@@ -994,14 +995,12 @@ fn discovery_payload_deviceinfo_device_id(config: &BridgeConfig) -> String {
 
 fn discovery_payload_system_uptime(config: &BridgeConfig) -> String {
     json!({
-        "name": "System Uptime",
+        "name": "System Up Since",
         "state_topic": config.system_uptime_state_topic(),
-        "icon": "mdi:timer-outline",
+        "icon": "mdi:clock-start",
         "entity_category": "diagnostic",
         "enabled_by_default": false,
-        "unit_of_measurement": "s",
-        "device_class": "duration",
-        "state_class": "measurement",
+        "device_class": "timestamp",
         "unique_id": format!("{}_system_uptime", config.device_identifier),
         "device": config.device_json(),
         "origin": {
@@ -1023,9 +1022,61 @@ async fn read_system_uptime_secs() -> Option<u64> {
     Some(secs.floor() as u64)
 }
 
+fn format_local_time_iso8601(secs_since_epoch: i64) -> Option<String> {
+    let mut local_tm = libc::tm {
+        tm_sec: 0,
+        tm_min: 0,
+        tm_hour: 0,
+        tm_mday: 0,
+        tm_mon: 0,
+        tm_year: 0,
+        tm_wday: 0,
+        tm_yday: 0,
+        tm_isdst: -1,
+        tm_gmtoff: 0,
+        tm_zone: std::ptr::null(),
+    };
+    let time_val: libc::time_t = secs_since_epoch.try_into().ok()?;
+    // SAFETY: `local_tm` and `time_val` are valid pointers for `localtime_r`.
+    let tm_ptr = unsafe { libc::localtime_r(&time_val, &mut local_tm) };
+    if tm_ptr.is_null() {
+        return None;
+    }
+
+    let mut buf = [0u8; 64];
+    let fmt = c"%Y-%m-%dT%H:%M:%S%z";
+    // SAFETY: `buf` is writable and `fmt` is a valid NUL-terminated format string.
+    let written = unsafe {
+        libc::strftime(
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            fmt.as_ptr(),
+            &local_tm as *const libc::tm,
+        )
+    };
+    if written == 0 {
+        return None;
+    }
+
+    let raw = std::str::from_utf8(&buf[..written]).ok()?;
+    if raw.len() >= 5 {
+        let (head, tail) = raw.split_at(raw.len() - 5);
+        Some(format!("{}{}:{}", head, &tail[..3], &tail[3..]))
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+async fn read_system_up_since_local_iso8601() -> Option<String> {
+    let uptime_secs = read_system_uptime_secs().await?;
+    let now_epoch_secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let boot_epoch_secs = now_epoch_secs.checked_sub(uptime_secs)?;
+    format_local_time_iso8601(boot_epoch_secs.try_into().ok()?)
+}
+
 async fn publish_system_uptime_state(client: &AsyncClient, config: &BridgeConfig) {
     let qos = QoS::AtLeastOnce;
-    let Some(uptime_secs) = read_system_uptime_secs().await else {
+    let Some(system_up_since) = read_system_up_since_local_iso8601().await else {
         tracing::warn!("read /proc/uptime failed; skipping System Uptime publish");
         return;
     };
@@ -1034,7 +1085,7 @@ async fn publish_system_uptime_state(client: &AsyncClient, config: &BridgeConfig
             config.system_uptime_state_topic(),
             qos,
             true,
-            uptime_secs.to_string(),
+            system_up_since,
         )
         .await
     {
@@ -4141,8 +4192,8 @@ mod tests {
         );
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
         assert_eq!(v["enabled_by_default"].as_bool(), Some(false));
-        assert_eq!(v["device_class"].as_str(), Some("duration"));
-        assert_eq!(v["unit_of_measurement"].as_str(), Some("s"));
+        assert_eq!(v["device_class"].as_str(), Some("timestamp"));
+        assert_eq!(v["name"].as_str(), Some("System Up Since"));
     }
 
     #[test]

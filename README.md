@@ -72,7 +72,7 @@ Using custom firmware or low-level hardware control may void warranties, break t
 | Device Label | sensor | Yes | Human-readable pod name from disk when available; mostly for support. |
 | Firmware Message | sensor | Yes | Occasionally shows one-line status chatter from the bed’s controller. |
 | Presence Baseline Zones | sensor | Yes | Raw saved calibration snapshot for nerds/support; not usually needed daily. |
-| System Uptime | sensor | Yes | Shows how long the pod OS has been running since the last reboot (in seconds). |
+| System Uptime | sensor | Yes | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
 | Reboot | button | No | Restarts the pod. |
 | Request Temperatures | button | No | Ask the pod to refresh its temperature readings (troubleshooting / curiosity). |
 
