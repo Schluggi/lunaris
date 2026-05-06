@@ -22,6 +22,7 @@ Using custom firmware or low-level hardware control may void warranties, break t
 
 ## 🎉 Highlights
 - ✅ Full Home Assistant integration
+- ✅ Single all-in-one replacement
 - ✅ Cover buttons
 - ✅ Vibration
 - ✅ Temperature control
@@ -38,9 +39,9 @@ How **Lunaris** differs from other local-control projects ([free-sleep](https://
 | **Topic** | **Lunaris** | **[free-sleep](https://github.com/throwaway31265/free-sleep)** | **[opensleep](https://github.com/LiamSnow/opensleep)** | **[ninesleep](https://github.com/bobobo1618/ninesleep)** |
 |:---|:---|:---|:---|:---|
 | **Goal** | MQTT + Home Assistant for Pod hardware over USART | Jailbreak Pod + LAN web app and REST API | Replace vendor SOM apps; full Rust firmware on Pod | Replace `dac` only; HTTP API to frankenfirmware |
-| **Stack** | Rust, single binary | Node/Express + React (+ optional Python biometrics) | Rust | Rust |
+| **Stack** | Rust | Node/Express + React (+ optional Python biometrics) | Rust | Rust |
 | **License** | GPL-3.0 | MIT | GPL-3.0 | MIT |
-| **Automation / HA** | Native MQTT discovery, no extra config | REST / custom integration | MQTT + RON config | `rest_command` / HTTP |
+| **Automation / HA** | Native MQTT discovery, no extra config | REST / custom integration | MQTT + RON config | REST / HTTP |
 | **Built-in web UI** | No (HA is the UI) | Yes | No | No |
 | **Configuration** | CLI flags (ports, broker, pod model) | App + JSON storage | `.ron` files | Driven by HTTP clients |
 | **Pod generations** | **Pod 4** focus; Pod 3/5 best-effort | Pod 3–5 documented | Pod 3 tested; Pod 4/5 untested | Pod 3 documented |
