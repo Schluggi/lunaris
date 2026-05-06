@@ -3136,8 +3136,8 @@ async fn publish_discovery_and_online(
             tracing::error!(?e, side = ?side, "publish climate discovery");
         }
         let (name, suffix) = match side {
-            BedSide::Left => ("Target Temperature Left", "target_temp_left"),
-            BedSide::Right => ("Target Temperature Right", "target_temp_right"),
+            BedSide::Left => ("Target Cover Temperature Left", "target_temp_left"),
+            BedSide::Right => ("Target Cover Temperature Right", "target_temp_right"),
         };
         let disc_target = discovery_payload_frozen_temperature(
             config,
@@ -3355,10 +3355,14 @@ async fn publish_discovery_and_online(
     }
     if config.frozen_temperature_discovery {
         for (side, name, suffix) in [
-            (BedSide::Left, "Current Temperature Left", "cover_temp_left"),
+            (
+                BedSide::Left,
+                "Current Cover Temperature Left",
+                "cover_temp_left",
+            ),
             (
                 BedSide::Right,
-                "Current Temperature Right",
+                "Current Cover Temperature Right",
                 "cover_temp_right",
             ),
         ] {
@@ -4749,8 +4753,8 @@ mod tests {
         let cfg = BridgeConfig::from_cli(&cli);
         for side in [BedSide::Left, BedSide::Right] {
             let (name, suffix) = match side {
-                BedSide::Left => ("Target Temperature Left", "target_temp_left"),
-                BedSide::Right => ("Target Temperature Right", "target_temp_right"),
+                BedSide::Left => ("Target Cover Temperature Left", "target_temp_left"),
+                BedSide::Right => ("Target Cover Temperature Right", "target_temp_right"),
             };
             let disc = discovery_payload_frozen_temperature(
                 &cfg,
