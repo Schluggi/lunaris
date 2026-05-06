@@ -55,7 +55,7 @@ fn set_cloexec_on_open_tty_fds() {
 #[cfg(not(target_os = "linux"))]
 fn set_cloexec_on_open_tty_fds() {}
 
-/// Re-`exec` this binary with the same argv (MQTT **Restart**). On success the process is replaced
+/// Re-`exec` this binary with the same argv (MQTT **Restart Lunaris**). On success the process is replaced
 /// and this function does not return.
 #[cfg(unix)]
 pub(crate) fn restart_current_exe_blocking() -> Result<(), String> {

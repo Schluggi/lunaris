@@ -1,4 +1,4 @@
-//! MQTT: Home Assistant discovery, prime, MQTT **Restart** (re-`exec` lunaris; **diagnostic**), per-side vibration (Sensor) + retained **number/select/switch**
+//! MQTT: Home Assistant discovery, prime, MQTT **Restart Lunaris** (re-`exec` lunaris; **diagnostic**), per-side vibration (Sensor) + retained **number/select/switch**
 //! vibration tuning, optional capacitance **presence**,
 //! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`) plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
 //! mattress climate, JSON light (I²C),
@@ -757,7 +757,7 @@ fn discovery_payload_request_get_temperatures_button(config: &BridgeConfig) -> S
 
 fn discovery_payload_reboot_button(config: &BridgeConfig) -> String {
     json!({
-        "name": "Reboot",
+        "name": "Reboot Pod",
         "command_topic": config.reboot_command_topic(),
         "payload_press": config.payload_press,
         "entity_category": "diagnostic",
@@ -775,7 +775,7 @@ fn discovery_payload_reboot_button(config: &BridgeConfig) -> String {
 
 fn discovery_payload_shutdown_button(config: &BridgeConfig) -> String {
     json!({
-        "name": "Shutdown",
+        "name": "Shutdown Pod",
         "command_topic": config.shutdown_command_topic(),
         "payload_press": config.payload_press,
         "entity_category": "diagnostic",
@@ -793,7 +793,7 @@ fn discovery_payload_shutdown_button(config: &BridgeConfig) -> String {
 
 fn discovery_payload_restart_lunaris_button(config: &BridgeConfig) -> String {
     json!({
-        "name": "Restart",
+        "name": "Restart Lunaris",
         "command_topic": config.restart_lunaris_command_topic(),
         "payload_press": config.payload_press,
         "entity_category": "diagnostic",
