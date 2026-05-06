@@ -17,6 +17,7 @@ mod sensor_rx;
 mod serial_prime;
 mod wire_buffer;
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use tracing_subscriber::EnvFilter;
@@ -79,6 +80,8 @@ async fn main() {
 
     let mut presence_cap_rx =
         None::<tokio::sync::mpsc::Receiver<sensor_rx::SensorCapacitanceZones>>;
+    let mut sensor_message_rx = None::<tokio::sync::mpsc::Receiver<String>>;
+    let mut sensor_rx_framing = None::<Arc<AtomicBool>>;
 
     if let Err(e) =
         serial_prime::check_device_accessible(&cli.sensor_device, cli.effective_sensor_baud()).await
@@ -108,6 +111,8 @@ async fn main() {
             presence_cap_parse_diag,
         );
         config.sensor_tx = Some(sensor.tx.clone());
+        sensor_message_rx = Some(sensor.sensor_message_rx);
+        sensor_rx_framing = Some(sensor.sensor_rx_framing);
     }
 
     let frame = frozen_frame::prime_frame();
@@ -119,6 +124,9 @@ async fn main() {
         frozen_link.water_tank_rx,
         frozen_link.firmware_message_rx,
         presence_cap_rx,
+        sensor_message_rx,
+        frozen_link.frozen_mcu_connected.clone(),
+        sensor_rx_framing,
     )
     .await;
 }

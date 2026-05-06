@@ -1,4 +1,4 @@
-# 🌙 Lunaris
+ 🌙 Lunaris
 <a href="https://www.buymeacoffee.com/schluggi" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/white_img.png" alt="Buy Me A Coffee" style="height: auto !important;width: auto !important;" ></a>
 
 This is a replacement firmware for Eight Sleep pods. It's local, cloud-less and communicates directly with the serial devices. 
@@ -27,10 +27,10 @@ Using custom firmware or low-level hardware control may void warranties, break t
 
 | Name | Kind | Hidden by default | What it does |
 |:---|:---|:---:|:---|
-| Cover Left / Cover Right | climate | No | Set how warm or cool each side of the bed should feel. |
+| Cover Left / Right | climate | No | Set how warm or cool each side of the bed should feel. |
 | LED | light | No | Colour and brightness for the indicator LED on the bed. |
 | Prime | button | No | Tell the pod to prepare / prime its water system before use. |
-| Vibrate Cover Left / Vibrate Cover Right | button | No | Run a vibration on that side (alarm-style buzz). |
+| Vibrate Cover Left / Right | button | No | Run a vibration on that side. |
 
 ### Sensors
 
@@ -38,12 +38,15 @@ Using custom firmware or low-level hardware control may void warranties, break t
 
 | Name | Kind | Hidden by default | What it does |
 |:---|:---|:---:|:---|
-| Current Temperature Left / Current Temperature Right | sensor | No | Roughly how warm each side of the mattress is right now. |
+| Ambient Humidity | sensor | No | Relative ambien humidity send by the cover sensor. |
+| Ambient Temperature | sensor | No | Ambient temperature send by the cover sensor. |
+| Cover Button Left / Right | sensor | No | Tap count `1`-`5`, `0` when idle. |
+| Current Cover Temperature Left / Right | sensor | No | How warm each side of the mattress is right now. |
 | Heatsink Temperature | sensor | No | Temperature of the cooling hardware. |
 | Presence Any | binary_sensor | No | Someone is detected on either side of the bed. |
-| Presence Calibration | binary_sensor | No | On while lunaris is learning an “empty bed” baseline. |
-| Presence Left / Presence Right | binary_sensor | No | Someone is detected on that side of the mattress. |
-| Target Temperature Left / Target Temperature Right | sensor | No | Same target you set on the climate control, shown as plain numbers for dashboards or cards. |
+| [Presence Calibration](#presence-calibration) | binary_sensor | No | On while lunaris is learning an “empty bed” baseline. |
+| Presence Left / Right | binary_sensor | No | Someone is detected on that side of the mattress. |
+| Target Temperature Left / Right | sensor | No | Same target you set on the climate control, shown as plain numbers for dashboards or cards. |
 | [Water Tank](#water-tank) | binary_sensor | No | Shows whether the water tank is plugged in. |
 
 ### Configuration
@@ -52,11 +55,11 @@ Using custom firmware or low-level hardware control may void warranties, break t
 
 | Name | Kind | Hidden by default | What it does |
 |:---|:---|:---:|:---|
-| Firmware | update | No | Updates Lunaris itself by pulling the latest version from GitHub releases (disabled entirely when `--self-update-poll-secs 0`). |
-| Calibrate Presence | button | No | Start learning what an empty mattress looks like (keep the bed clear for ~10 s afterwards). |
-| Presence Baseline Delta | number | Yes | Fine-tune sensitivity after calibration. |
-| Presence Cap Threshold | number | Yes | Fine-tune rough “capacitance” sensitivity before calibration. |
-| LED Behavior | select | No | Chooses LED startup/runtime behavior: **Manual** (off at boot, only light entity controls it), **Status** (solid green while lunaris runs), **Startup** (green for 5s on boot, then off and manual control). |
+| Firmware | update | No | Updates Lunaris itself by pulling the latest version from GitHub releases. |
+| Calibrate Presence | button | No | Start learning what an empty mattress looks like (keep the bed clear for ~10s afterwards). |
+| [Presence Baseline Delta](#presence-calibration) | number | Yes | Fine-tune sensitivity after calibration. |
+| [Presence Cap Threshold](#presence-calibration) | number | Yes | Fine-tune rough “capacitance” sensitivity before calibration. |
+| LED Behavior | select | No | Chooses LED startup/runtime behavior:<br>- `Manual` (off at boot, only light entity controls it)<br>- `Status` (solid green while lunaris runs)<br>- `Startup` (green for 5s on boot, then off and manual control). |
 | Vibration Cancel Preamble | switch | Yes | Tweaks vibration behaviour — leave as-is unless troubleshooting. |
 | Vibration Duration | number | No | How long vibrations last when you press a vibrate button. |
 | Vibration Intensity | number | No | How strong vibrations feel (percentage). |
@@ -70,11 +73,15 @@ Using custom firmware or low-level hardware control may void warranties, break t
 |:---|:---|:---:|:---|
 | Device ID | sensor | Yes | Short internal id taken from pod files when available; mostly for support. |
 | Device Label | sensor | Yes | Human-readable pod name from disk when available; mostly for support. |
-| Firmware Message | sensor | Yes | Occasionally shows one-line status chatter from the bed’s controller. |
+| Frozen Message | sensor | Yes | Text, send by the Frozen MCU. |
+| Sensor Message | sensor | Yes | Text, send by the Sensor MCU. |
 | Presence Baseline Zones | sensor | Yes | Raw saved calibration snapshot for nerds/support; not usually needed daily. |
-| System Uptime | sensor | Yes | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
-| Reboot | button | No | Restarts the pod. |
-| Shutdown | button | No | Powers off the pod. |
+| System Uptime | sensor | No | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
+| Frozen Link | binary_sensor | No | `ON` when valid Frozen MCU traffic was decoded. |
+| Sensor Link | binary_sensor | No | `ON` when valid Sensor MCU traffic was decoded. |
+| Reboot Pod | button | No | Restarts the pod. |
+| Restart Lunaris | button | No | Restarts the lunaris process. |
+| Shutdown Pod | button | No | Powers off the pod. |
 | Request Temperatures | button | No | Ask the pod to refresh its temperature readings (troubleshooting / curiosity). |
 
 ## 📦 Installation
@@ -215,8 +222,9 @@ Output: `./target/aarch64-unknown-linux-musl/release/lunaris`.
 
 ### Presence Calibration
 When lunaris starts and the MQTT topic does not exist yet (this is normally the first start ever), it will automatically calibrate the presence sensors.
-You can also calibrate manually with the discovered **Calibrate Presence** MQTT button—the entity.
-For fine-tuning, use **Presence Baseline Delta** and **Presence Cap Threshold** on the device (same naming caveat—copy IDs from HA, not static examples).
+You can also calibrate manually via the `Calibrate Presence` button entity.
+For fine-tuning, use `Presence Baseline Delta` and `Presence Cap Threshold` on the device.  
+> **Hint**: Increase the `Presence Baseline Delta` by 150 after pressing `Calibrate Presence`. This fixes it for me.
 
 ### Water Tank
 The Water Tank binary sensor often shows `unknown` briefly at startup until the bridge has parsed reservoir state. You can usually refresh it by pulling the tank out and plugging it back in.

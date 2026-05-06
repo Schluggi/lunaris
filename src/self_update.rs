@@ -55,6 +55,25 @@ fn set_cloexec_on_open_tty_fds() {
 #[cfg(not(target_os = "linux"))]
 fn set_cloexec_on_open_tty_fds() {}
 
+/// Re-`exec` this binary with the same argv (MQTT **Restart Lunaris**). On success the process is replaced
+/// and this function does not return.
+#[cfg(unix)]
+pub(crate) fn restart_current_exe_blocking() -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let argv_rest: Vec<String> = std::env::args().skip(1).collect();
+    set_cloexec_on_open_tty_fds();
+    let err = Command::new(&exe).args(&argv_rest).exec();
+    Err(err.to_string())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn restart_current_exe_blocking() -> Result<(), String> {
+    Err("lunaris restart is only supported on Unix".into())
+}
+
 const GITHUB_API_LATEST: &str = "https://api.github.com/repos/Schluggi/lunaris/releases/latest";
 const ASSET_LUNARIS: &str = "lunaris";
 const ASSET_SHA256SUMS: &str = "SHA256SUMS";

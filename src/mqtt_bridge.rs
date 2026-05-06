@@ -1,6 +1,7 @@
-//! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor) + retained **number/select/switch**
+//! MQTT: Home Assistant discovery, prime, MQTT **Restart Lunaris** (re-`exec` lunaris; **diagnostic**), per-side vibration (Sensor) + retained **number/select/switch**
 //! vibration tuning, optional capacitance **presence**,
-//! Frozen **water tank** + **Firmware message** from **`0x07`**, mattress climate, JSON light (I²C),
+//! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`), **Cover Button Left / Right** (**`0`..=`5`** taps from **`dismissing alarm (N taps)`**), plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
+//! mattress climate, JSON light (I²C),
 //! MQTT **update** (self-install from GitHub `releases/latest` asset).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
@@ -25,17 +26,23 @@ use crate::frozen_frame::{get_temperatures_frame, set_target_temperature_frame, 
 use crate::frozen_rx::FrozenTemperatureUpdate;
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
 use crate::sensor_frame::{vibration_sequence_frames, AlarmPattern};
-use crate::sensor_rx::SensorCapacitanceZones;
+use crate::sensor_rx::{
+    ambient_from_sensor_message_line, cover_button_dismiss_tap_count_from_sensor_message,
+    CoverButtonTapSide, SensorCapacitanceZones,
+};
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "lunaris_deviceinfo_device_label";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "lunaris_deviceinfo_device_id";
 const DISCOVERY_OBJECT_ID_SYSTEM_UPTIME: &str = "lunaris_system_uptime";
+const DISCOVERY_OBJECT_ID_FROZEN_USART_LINK: &str = "lunaris_frozen_usart_link";
+const DISCOVERY_OBJECT_ID_SENSOR_USART_FRAMING: &str = "lunaris_sensor_usart_framing";
 const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
 const DISCOVERY_OBJECT_ID_REBOOT: &str = "lunaris_reboot";
 const DISCOVERY_OBJECT_ID_SHUTDOWN: &str = "lunaris_shutdown";
+const DISCOVERY_OBJECT_ID_RESTART_LUNARIS: &str = "lunaris_restart_lunaris";
 const DISCOVERY_OBJECT_ID_LED: &str = "lunaris_led";
 const DISCOVERY_OBJECT_ID_LED_BEHAVIOR: &str = "lunaris_led_behavior";
 const DISCOVERY_OBJECT_ID_CLIMATE_LEFT: &str = "lunaris_climate_left";
@@ -61,10 +68,17 @@ const DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_ZONES: &str = "lunaris_presence_base
 const DISCOVERY_OBJECT_ID_PRESENCE_CALIBRATION: &str = "lunaris_presence_calibration";
 const DISCOVERY_OBJECT_ID_WATER_TANK: &str = "lunaris_water_tank";
 const DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE: &str = "lunaris_firmware_message";
+const DISCOVERY_OBJECT_ID_SENSOR_MESSAGE: &str = "lunaris_sensor_message";
+const DISCOVERY_OBJECT_ID_COVER_BUTTON_LEFT: &str = "lunaris_cover_button_left";
+const DISCOVERY_OBJECT_ID_COVER_BUTTON_RIGHT: &str = "lunaris_cover_button_right";
+const DISCOVERY_OBJECT_ID_AMBIENT_TEMPERATURE: &str = "lunaris_ambient_temperature";
+const DISCOVERY_OBJECT_ID_AMBIENT_HUMIDITY: &str = "lunaris_ambient_humidity";
 const DISCOVERY_OBJECT_ID_UPDATE: &str = "lunaris_update";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
+/// Resting MQTT state for **Cover Button** sensors (**no recent dismissal**).
+const COVER_BUTTON_SENSOR_STATE_REST: &str = "0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LedBehavior {
@@ -258,6 +272,17 @@ impl BridgeConfig {
         format!(
             "{}/button/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_SHUTDOWN
+        )
+    }
+
+    pub fn restart_lunaris_command_topic(&self) -> String {
+        format!("{}/button/restart_lunaris/set", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_restart_lunaris(&self) -> String {
+        format!(
+            "{}/button/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_RESTART_LUNARIS
         )
     }
 
@@ -574,6 +599,61 @@ impl BridgeConfig {
         )
     }
 
+    pub fn sensor_message_state_topic(&self) -> String {
+        format!("{}/sensor/sensor_message/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_sensor_message(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_SENSOR_MESSAGE
+        )
+    }
+
+    pub fn cover_button_left_state_topic(&self) -> String {
+        format!("{}/sensor/cover_button_left/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_cover_button_left(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_COVER_BUTTON_LEFT
+        )
+    }
+
+    pub fn cover_button_right_state_topic(&self) -> String {
+        format!("{}/sensor/cover_button_right/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_cover_button_right(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_COVER_BUTTON_RIGHT
+        )
+    }
+
+    pub fn ambient_temperature_state_topic(&self) -> String {
+        format!("{}/sensor/ambient_temperature/state", self.topic_prefix)
+    }
+
+    pub fn ambient_humidity_state_topic(&self) -> String {
+        format!("{}/sensor/ambient_humidity/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_ambient_temperature(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_AMBIENT_TEMPERATURE
+        )
+    }
+
+    pub fn discovery_topic_ambient_humidity(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_AMBIENT_HUMIDITY
+        )
+    }
+
     pub fn update_state_topic(&self) -> String {
         format!("{}/update/lunaris/state", self.topic_prefix)
     }
@@ -619,6 +699,34 @@ impl BridgeConfig {
         format!(
             "{}/sensor/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_SYSTEM_UPTIME
+        )
+    }
+
+    pub fn frozen_usart_link_state_topic(&self) -> String {
+        format!(
+            "{}/binary_sensor/frozen_usart_link/state",
+            self.topic_prefix
+        )
+    }
+
+    pub fn discovery_topic_frozen_usart_link(&self) -> String {
+        format!(
+            "{}/binary_sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_FROZEN_USART_LINK
+        )
+    }
+
+    pub fn sensor_usart_framing_state_topic(&self) -> String {
+        format!(
+            "{}/binary_sensor/sensor_usart_framing/state",
+            self.topic_prefix
+        )
+    }
+
+    pub fn discovery_topic_sensor_usart_framing(&self) -> String {
+        format!(
+            "{}/binary_sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_SENSOR_USART_FRAMING
         )
     }
 
@@ -708,7 +816,7 @@ fn discovery_payload_request_get_temperatures_button(config: &BridgeConfig) -> S
 
 fn discovery_payload_reboot_button(config: &BridgeConfig) -> String {
     json!({
-        "name": "Reboot",
+        "name": "Reboot Pod",
         "command_topic": config.reboot_command_topic(),
         "payload_press": config.payload_press,
         "entity_category": "diagnostic",
@@ -726,12 +834,31 @@ fn discovery_payload_reboot_button(config: &BridgeConfig) -> String {
 
 fn discovery_payload_shutdown_button(config: &BridgeConfig) -> String {
     json!({
-        "name": "Shutdown",
+        "name": "Shutdown Pod",
         "command_topic": config.shutdown_command_topic(),
         "payload_press": config.payload_press,
         "entity_category": "diagnostic",
         "icon": "mdi:power",
         "unique_id": format!("{}_shutdown", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_restart_lunaris_button(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Restart Lunaris",
+        "command_topic": config.restart_lunaris_command_topic(),
+        "payload_press": config.payload_press,
+        "entity_category": "diagnostic",
+        "enabled_by_default": true,
+        "icon": "mdi:cached",
+        "unique_id": format!("{}_restart_lunaris", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -960,12 +1087,102 @@ fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
 
 fn discovery_payload_firmware_message(config: &BridgeConfig) -> String {
     json!({
-        "name": "Firmware Message",
+        "name": "Frozen Message",
         "state_topic": config.firmware_message_state_topic(),
         "icon": "mdi:message-text",
         "entity_category": "diagnostic",
         "enabled_by_default": false,
         "unique_id": format!("{}_firmware_message", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_sensor_message(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Sensor Message",
+        "state_topic": config.sensor_message_state_topic(),
+        "icon": "mdi:message-text-outline",
+        "entity_category": "diagnostic",
+        "enabled_by_default": false,
+        "unique_id": format!("{}_sensor_message", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_cover_button_left(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Cover Button Left",
+        "state_topic": config.cover_button_left_state_topic(),
+        "icon": "mdi:gesture-tap-button",
+        "state_class": "measurement",
+        "unit_of_measurement": "taps",
+        "unique_id": format!("{}_cover_button_left", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_cover_button_right(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Cover Button Right",
+        "state_topic": config.cover_button_right_state_topic(),
+        "icon": "mdi:gesture-tap-button",
+        "state_class": "measurement",
+        "unit_of_measurement": "taps",
+        "unique_id": format!("{}_cover_button_right", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_ambient_temperature(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Ambient Temperature",
+        "state_topic": config.ambient_temperature_state_topic(),
+        "unit_of_measurement": "°C",
+        "device_class": "temperature",
+        "state_class": "measurement",
+        "unique_id": format!("{}_ambient_temperature", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_ambient_humidity(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Ambient Humidity",
+        "state_topic": config.ambient_humidity_state_topic(),
+        "unit_of_measurement": "%",
+        "device_class": "humidity",
+        "state_class": "measurement",
+        "unique_id": format!("{}_ambient_humidity", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -1039,9 +1256,49 @@ fn discovery_payload_system_uptime(config: &BridgeConfig) -> String {
         "state_topic": config.system_uptime_state_topic(),
         "icon": "mdi:clock-start",
         "entity_category": "diagnostic",
-        "enabled_by_default": false,
+        "enabled_by_default": true,
         "device_class": "timestamp",
         "unique_id": format!("{}_system_uptime", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_frozen_usart_link(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Frozen Link",
+        "state_topic": config.frozen_usart_link_state_topic(),
+        "icon": "mdi:connection",
+        "entity_category": "diagnostic",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device_class": "connectivity",
+        "unique_id": format!("{}_frozen_usart_link", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_sensor_usart_framing(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Sensor Link",
+        "state_topic": config.sensor_usart_framing_state_topic(),
+        "icon": "mdi:connection",
+        "entity_category": "diagnostic",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device_class": "connectivity",
+        "unique_id": format!("{}_sensor_usart_framing", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -1129,6 +1386,57 @@ async fn publish_system_uptime_state(client: &AsyncClient, config: &BridgeConfig
         .await
     {
         tracing::error!(?e, "publish system uptime state");
+    }
+}
+
+async fn publish_frozen_usart_link_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    frozen_mcu_connected: &AtomicBool,
+) {
+    let payload = if frozen_mcu_connected.load(Ordering::Relaxed) {
+        "ON"
+    } else {
+        "OFF"
+    };
+    if let Err(e) = client
+        .publish(
+            config.frozen_usart_link_state_topic(),
+            QoS::AtLeastOnce,
+            false,
+            payload,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Frozen USART link state");
+    }
+}
+
+async fn publish_sensor_usart_framing_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    sensor_rx_framing: Option<&Arc<AtomicBool>>,
+) {
+    let payload = match sensor_rx_framing {
+        Some(a) => {
+            if a.load(Ordering::Relaxed) {
+                "ON"
+            } else {
+                "OFF"
+            }
+        }
+        None => "OFF",
+    };
+    if let Err(e) = client
+        .publish(
+            config.sensor_usart_framing_state_topic(),
+            QoS::AtLeastOnce,
+            false,
+            payload,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Sensor USART framing state");
     }
 }
 
@@ -1279,6 +1587,9 @@ const PRESENCE_BASELINE_DELTA_MAX: u16 = 2000;
 
 /// opensleep [`PresenceConfig.debounce_count`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/presence.rs) (`DEFAULT_DEBOUNCE`).
 const PRESENCE_DEBOUNCE_FRAMES: u8 = 5;
+
+/// Home Assistant MQTT `binary_sensor`: `payload == "None"` → state **unknown** (`PAYLOAD_NONE` in HA Core).
+const PRESENCE_BINARY_SENSOR_STATE_UNKNOWN: &str = "None";
 
 #[derive(Clone, Copy, Debug, Default)]
 struct PresenceInferenceState {
@@ -1460,14 +1771,14 @@ async fn handle_presence_calibrate_press(
         tracing::warn!("presence calibration: no Sensor/presence bridge (ignored)");
         return;
     };
-    if let Err(e) = tx.try_send(()) {
-        tracing::warn!(?e, "presence calibration notify dropped (MQTT handler lag)");
+    if let Err(e) = tx.send(()).await {
+        tracing::warn!(?e, "presence calibration notify failed (channel closed)");
         publish_json_result(
             client,
             config,
             "calibrate_presence",
             "error",
-            &format!("calibration channel saturated: {e:?}"),
+            &format!("calibration notify failed: {e:?}"),
         )
         .await;
         return;
@@ -1558,6 +1869,20 @@ async fn publish_presence_readings(
     }
 }
 
+async fn publish_presence_readings_unknown(client: &AsyncClient, config: &BridgeConfig) {
+    let qos = QoS::AtLeastOnce;
+    let payload = PRESENCE_BINARY_SENSOR_STATE_UNKNOWN;
+    for topic in [
+        config.presence_state_topic(BedSide::Left),
+        config.presence_state_topic(BedSide::Right),
+        config.presence_any_state_topic(),
+    ] {
+        if let Err(e) = client.publish(topic, qos, true, payload.as_bytes()).await {
+            tracing::error!(?e, "publish presence occupancy unknown state");
+        }
+    }
+}
+
 async fn publish_water_tank_state(client: &AsyncClient, config: &BridgeConfig, present: bool) {
     let qos = QoS::AtLeastOnce;
     let payload = if present { "ON" } else { "OFF" };
@@ -1581,6 +1906,117 @@ async fn publish_firmware_message_state(client: &AsyncClient, config: &BridgeCon
         .await
     {
         tracing::error!(?e, "publish Frozen firmware message sensor state");
+    }
+}
+
+async fn publish_sensor_message_state(client: &AsyncClient, config: &BridgeConfig, msg: &str) {
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(
+            config.sensor_message_state_topic(),
+            qos,
+            false,
+            msg.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Sensor MCU message sensor state");
+    }
+}
+
+async fn publish_cover_button_sensors_rest(client: &AsyncClient, config: &BridgeConfig) {
+    let qos = QoS::AtLeastOnce;
+    // Retained so HA (re)connects with a known idle value (`0` + unit **taps** → **0 taps**), not **unknown**.
+    let retain = true;
+    if let Err(e) = client
+        .publish(
+            config.cover_button_left_state_topic(),
+            qos,
+            retain,
+            COVER_BUTTON_SENSOR_STATE_REST.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Cover Button Left resting state");
+    }
+    if let Err(e) = client
+        .publish(
+            config.cover_button_right_state_topic(),
+            qos,
+            retain,
+            COVER_BUTTON_SENSOR_STATE_REST.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Cover Button Right resting state");
+    }
+}
+
+/// Publishes tap count (**`1`..=`5`**), then **`0`** so repeated runs still produce state changes in HA.
+async fn pulse_cover_button_tap_count(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    side: CoverButtonTapSide,
+    taps: u8,
+) {
+    let topic = match side {
+        CoverButtonTapSide::Left => config.cover_button_left_state_topic(),
+        CoverButtonTapSide::Right => config.cover_button_right_state_topic(),
+    };
+    let qos = QoS::AtLeastOnce;
+    let count = taps.to_string();
+    if let Err(e) = client
+        .publish(topic.as_str(), qos, false, count.as_bytes())
+        .await
+    {
+        tracing::error!(?e, ?side, taps, "publish cover button tap count");
+        return;
+    }
+    tracing::debug!(?side, taps, "cover button sensor: published tap count");
+    sleep(Duration::from_millis(400)).await;
+    if let Err(e) = client
+        .publish(
+            topic.as_str(),
+            qos,
+            true,
+            COVER_BUTTON_SENSOR_STATE_REST.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, ?side, "publish cover button rest after tap count");
+    }
+}
+
+async fn publish_ambient_from_sensor_message(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    msg: &str,
+) {
+    let Some((temp, rh)) = ambient_from_sensor_message_line(msg) else {
+        return;
+    };
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(
+            config.ambient_temperature_state_topic(),
+            qos,
+            true,
+            temp.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish ambient temperature state");
+    }
+    if let Err(e) = client
+        .publish(
+            config.ambient_humidity_state_topic(),
+            qos,
+            true,
+            rh.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish ambient humidity state");
     }
 }
 
@@ -1733,6 +2169,10 @@ struct PublishHandlerState {
     climate_right: Arc<Mutex<ClimateSideState>>,
     /// Notify presence task to start baseline sampling (MQTT **Calibrate presence**).
     presence_calibrate_tx: Option<mpsc::Sender<()>>,
+    /// Shared with [`crate::frozen_link`] — `true` when CRC‑valid Frozen firmware traffic was decoded.
+    frozen_mcu_connected: Arc<AtomicBool>,
+    /// Shared with [`crate::sensor_link`] when the Sensor UART is open — `true` after `0x7E` appears on RX.
+    sensor_rx_framing: Option<Arc<AtomicBool>>,
 }
 
 async fn apply_vibration_intensity_mqtt(
@@ -2555,7 +2995,12 @@ async fn self_update_version_poll_loop(
     }
 }
 
-async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfig) {
+async fn publish_discovery_and_online(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    frozen_mcu_connected: &AtomicBool,
+    sensor_rx_framing: Option<&Arc<AtomicBool>>,
+) {
     let qos = QoS::AtLeastOnce;
     let disc_btn = discovery_payload_button(config);
     if let Err(e) = client
@@ -2589,6 +3034,18 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         .await
     {
         tracing::error!(?e, "publish shutdown button discovery");
+    }
+    let disc_restart_lunaris = discovery_payload_restart_lunaris_button(config);
+    if let Err(e) = client
+        .publish(
+            config.discovery_topic_restart_lunaris(),
+            qos,
+            true,
+            disc_restart_lunaris,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish restart lunaris button discovery");
     }
     {
         let disc = discovery_payload_deviceinfo_device_label(config);
@@ -2646,6 +3103,27 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             tracing::error!(?e, "publish system uptime discovery");
         }
         publish_system_uptime_state(client, config).await;
+        let disc = discovery_payload_frozen_usart_link(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_frozen_usart_link(), qos, true, disc)
+            .await
+        {
+            tracing::error!(?e, "publish Frozen USART link discovery");
+        }
+        let disc = discovery_payload_sensor_usart_framing(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_sensor_usart_framing(),
+                qos,
+                true,
+                disc,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish Sensor USART framing discovery");
+        }
+        publish_frozen_usart_link_state(client, config, frozen_mcu_connected).await;
+        publish_sensor_usart_framing_state(client, config, sensor_rx_framing).await;
     }
     if config.i2c_device.is_some() {
         let disc_led = discovery_payload_light(config);
@@ -2677,8 +3155,8 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             tracing::error!(?e, side = ?side, "publish climate discovery");
         }
         let (name, suffix) = match side {
-            BedSide::Left => ("Target Temperature Left", "target_temp_left"),
-            BedSide::Right => ("Target Temperature Right", "target_temp_right"),
+            BedSide::Left => ("Target Cover Temperature Left", "target_temp_left"),
+            BedSide::Right => ("Target Cover Temperature Right", "target_temp_right"),
         };
         let disc_target = discovery_payload_frozen_temperature(
             config,
@@ -2755,6 +3233,62 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             .await
         {
             tracing::error!(?e, "publish vibration cancel preamble discovery");
+        }
+        let disc_sm = discovery_payload_sensor_message(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_sensor_message(), qos, true, disc_sm)
+            .await
+        {
+            tracing::error!(?e, "publish Sensor MCU message discovery");
+        }
+        let disc_cbl = discovery_payload_cover_button_left(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_cover_button_left(),
+                qos,
+                true,
+                disc_cbl,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish Cover Button Left discovery");
+        }
+        let disc_cbr = discovery_payload_cover_button_right(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_cover_button_right(),
+                qos,
+                true,
+                disc_cbr,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish Cover Button Right discovery");
+        }
+        publish_cover_button_sensors_rest(client, config).await;
+        let disc_at = discovery_payload_ambient_temperature(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_ambient_temperature(),
+                qos,
+                true,
+                disc_at,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish ambient temperature discovery");
+        }
+        let disc_ah = discovery_payload_ambient_humidity(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_ambient_humidity(),
+                qos,
+                true,
+                disc_ah,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish ambient humidity discovery");
         }
     }
     if config.sensor_device.is_some() && config.presence_discovery {
@@ -2840,10 +3374,14 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     }
     if config.frozen_temperature_discovery {
         for (side, name, suffix) in [
-            (BedSide::Left, "Current Temperature Left", "cover_temp_left"),
+            (
+                BedSide::Left,
+                "Current Cover Temperature Left",
+                "cover_temp_left",
+            ),
             (
                 BedSide::Right,
-                "Current Temperature Right",
+                "Current Cover Temperature Right",
                 "cover_temp_right",
             ),
         ] {
@@ -2937,7 +3475,7 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     }
 }
 
-async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
+async fn setup_session(client: &AsyncClient, config: &BridgeConfig, st: &PublishHandlerState) {
     let qos = QoS::AtLeastOnce;
     if let Err(e) = client.subscribe(config.command_topic(), qos).await {
         tracing::error!(?e, "subscribe prime command topic");
@@ -2953,6 +3491,12 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     }
     if let Err(e) = client.subscribe(config.shutdown_command_topic(), qos).await {
         tracing::error!(?e, "subscribe shutdown command topic");
+    }
+    if let Err(e) = client
+        .subscribe(config.restart_lunaris_command_topic(), qos)
+        .await
+    {
+        tracing::error!(?e, "subscribe restart_lunaris command topic");
     }
     if config.self_update_enabled() {
         if let Err(e) = client.subscribe(config.update_command_topic(), qos).await {
@@ -3053,7 +3597,13 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     if let Err(e) = client.subscribe(HA_STATUS_TOPIC, qos).await {
         tracing::error!(?e, "subscribe Home Assistant birth topic");
     }
-    publish_discovery_and_online(client, config).await;
+    publish_discovery_and_online(
+        client,
+        config,
+        st.frozen_mcu_connected.as_ref(),
+        st.sensor_rx_framing.as_ref(),
+    )
+    .await;
     if config.self_update_enabled() {
         let c = client.clone();
         let cfg = config.clone();
@@ -3250,6 +3800,47 @@ async fn handle_publish(
             } else {
                 tracing::warn!("pod shutdown command executed");
             }
+        }
+        return;
+    }
+
+    if p.topic == config.restart_lunaris_command_topic() {
+        let expected = config.payload_press.as_bytes();
+        if p.payload.as_ref() == expected {
+            publish_json_result(
+                client,
+                config,
+                "restart_lunaris",
+                "success",
+                "lunaris restart requested",
+            )
+            .await;
+            let c = client.clone();
+            let cfg = config.clone();
+            tokio::spawn(async move {
+                match tokio::task::spawn_blocking(crate::self_update::restart_current_exe_blocking)
+                    .await
+                {
+                    Ok(Ok(())) => {
+                        tracing::warn!("lunaris restart returned without exec (unexpected)");
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(%e, "lunaris restart failed");
+                        publish_json_result(&c, &cfg, "restart_lunaris", "error", &e).await;
+                    }
+                    Err(e) => {
+                        tracing::error!(?e, "lunaris restart join failed");
+                        publish_json_result(
+                            &c,
+                            &cfg,
+                            "restart_lunaris",
+                            "error",
+                            &format!("task join failed: {e:?}"),
+                        )
+                        .await;
+                    }
+                }
+            });
         }
         return;
     }
@@ -3484,11 +4075,18 @@ async fn handle_publish(
 
     if p.topic == HA_STATUS_TOPIC && p.payload.as_ref() == b"online" {
         tracing::debug!("Home Assistant online; republishing discovery");
-        publish_discovery_and_online(client, config).await;
+        publish_discovery_and_online(
+            client,
+            config,
+            st.frozen_mcu_connected.as_ref(),
+            st.sensor_rx_framing.as_ref(),
+        )
+        .await;
     }
 }
 
 /// Run the MQTT event loop until a fatal error (or process kill).
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: BridgeConfig,
     prime_frame: Arc<[u8]>,
@@ -3496,6 +4094,9 @@ pub async fn run(
     frozen_water_tank_rx: mpsc::Receiver<bool>,
     frozen_firmware_message_rx: mpsc::Receiver<String>,
     capacitance_rx: Option<mpsc::Receiver<SensorCapacitanceZones>>,
+    sensor_message_rx: Option<mpsc::Receiver<String>>,
+    frozen_mcu_connected: Arc<AtomicBool>,
+    sensor_rx_framing: Option<Arc<AtomicBool>>,
 ) {
     let (presence_calibrate_tx, presence_calibrate_rx) =
         if config.presence_discovery && capacitance_rx.is_some() {
@@ -3513,6 +4114,8 @@ pub async fn run(
         climate_left: Arc::new(Mutex::new(ClimateSideState::default())),
         climate_right: Arc::new(Mutex::new(ClimateSideState::default())),
         presence_calibrate_tx: presence_calibrate_tx.clone(),
+        frozen_mcu_connected,
+        sensor_rx_framing,
     };
 
     let mut opts = MqttOptions::new(
@@ -3566,6 +4169,21 @@ pub async fn run(
         }
     });
 
+    if let Some(mut sensor_msg_rx) = sensor_message_rx {
+        let c = client.clone();
+        let cfg = config.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = sensor_msg_rx.recv().await {
+                if let Some((side, taps)) = cover_button_dismiss_tap_count_from_sensor_message(&msg)
+                {
+                    pulse_cover_button_tap_count(&c, &cfg, side, taps).await;
+                }
+                publish_sensor_message_state(&c, &cfg, &msg).await;
+                publish_ambient_from_sensor_message(&c, &cfg, &msg).await;
+            }
+        });
+    }
+
     let c = client.clone();
     let cfg = config.clone();
     tokio::spawn(async move {
@@ -3574,6 +4192,19 @@ pub async fn run(
         loop {
             publish_system_uptime_state(&c, &cfg).await;
             uptime_interval.tick().await;
+        }
+    });
+
+    let c = client.clone();
+    let cfg = config.clone();
+    let hs_usart = handler_state.clone();
+    tokio::spawn(async move {
+        let mut tick = interval(Duration::from_secs(5));
+        tick.tick().await;
+        loop {
+            publish_frozen_usart_link_state(&c, &cfg, hs_usart.frozen_mcu_connected.as_ref()).await;
+            publish_sensor_usart_framing_state(&c, &cfg, hs_usart.sensor_rx_framing.as_ref()).await;
+            tick.tick().await;
         }
     });
 
@@ -3620,6 +4251,7 @@ pub async fn run(
                             cal_until = Some(Instant::now() + cal_wait);
                             cal_samples.clear();
                             publish_presence_calibration_running_state(&c, &cfg, true).await;
+                            publish_presence_readings_unknown(&c, &cfg).await;
                         }
                         z_opt = cap_rx.recv() => {
                             let Some(z) = z_opt else {
@@ -3655,18 +4287,7 @@ pub async fn run(
                                                 *g = Some(nb);
                                             }
                                             inference.set_baselines(nb);
-                                            publish_presence_cap_threshold_state(
-                                                &c, &cfg, tuned_cap,
-                                            )
-                                            .await;
-                                            publish_presence_baseline_delta_state(
-                                                &c, &cfg, tuned_delta,
-                                            )
-                                            .await;
-                                            publish_presence_baseline_zones_state(
-                                                &c, &cfg, &nb,
-                                            )
-                                            .await;
+                                            publish_presence_bootstrap_finalize(&c, &cfg).await;
                                             tracing::info!(
                                                 baseline = ?nb,
                                                 frames = cal_samples.len(),
@@ -3683,6 +4304,7 @@ pub async fn run(
                                             tracing::error!(
                                                 "presence calibration window ended without capacitance samples — MCU quiet or wrong baud; baseline unchanged"
                                             );
+                                            prev_publish = None;
                                         }
                                     }
                                     cal_samples.clear();
@@ -3708,6 +4330,9 @@ pub async fn run(
                                     right_on,
                                     calibrating,
                                 );
+                            }
+                            if calibrating {
+                                continue;
                             }
                             if prev_publish == Some((left_on, right_on)) {
                                 continue;
@@ -3802,7 +4427,7 @@ pub async fn run(
                     let cfg = config.clone();
                     let hs = handler_state.clone();
                     tokio::spawn(async move {
-                        setup_session(&c, &cfg).await;
+                        setup_session(&c, &cfg, &hs).await;
 
                         // Broker retain replay (climate/light/vibration/presence **`state_topic`** + led_behavior)
                         // while `mqtt_ha_state_bootstrap` is observed in `handle_publish`.
@@ -4141,8 +4766,8 @@ mod tests {
         let cfg = BridgeConfig::from_cli(&cli);
         for side in [BedSide::Left, BedSide::Right] {
             let (name, suffix) = match side {
-                BedSide::Left => ("Target Temperature Left", "target_temp_left"),
-                BedSide::Right => ("Target Temperature Right", "target_temp_right"),
+                BedSide::Left => ("Target Cover Temperature Left", "target_temp_left"),
+                BedSide::Right => ("Target Cover Temperature Right", "target_temp_right"),
             };
             let disc = discovery_payload_frozen_temperature(
                 &cfg,
@@ -4213,12 +4838,76 @@ mod tests {
             v["state_topic"].as_str(),
             Some(cfg.firmware_message_state_topic().as_str()),
         );
+        assert_eq!(v["name"].as_str(), Some("Frozen Message"));
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
         assert_eq!(
             v["enabled_by_default"].as_bool(),
             Some(false),
             "disabled in HA registry by default — enable under device entities if desired"
         );
+    }
+
+    #[test]
+    fn sensor_message_discovery_matches_state_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_sensor_message(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Sensor Message"));
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.sensor_message_state_topic().as_str()),
+        );
+        assert_eq!(v["enabled_by_default"].as_bool(), Some(false),);
+    }
+
+    #[test]
+    fn cover_button_discovery_matches_state_topics() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc_l = discovery_payload_cover_button_left(&cfg);
+        let vl: serde_json::Value = serde_json::from_str(&disc_l).unwrap();
+        assert_eq!(vl["name"].as_str(), Some("Cover Button Left"));
+        assert_eq!(
+            vl["state_topic"].as_str(),
+            Some(cfg.cover_button_left_state_topic().as_str()),
+        );
+        assert_eq!(vl["state_class"].as_str(), Some("measurement"));
+        assert_eq!(vl["unit_of_measurement"].as_str(), Some("taps"));
+        let disc_r = discovery_payload_cover_button_right(&cfg);
+        let vr: serde_json::Value = serde_json::from_str(&disc_r).unwrap();
+        assert_eq!(vr["name"].as_str(), Some("Cover Button Right"));
+        assert_eq!(
+            vr["state_topic"].as_str(),
+            Some(cfg.cover_button_right_state_topic().as_str()),
+        );
+        assert_eq!(vr["state_class"].as_str(), Some("measurement"));
+        assert_eq!(vr["unit_of_measurement"].as_str(), Some("taps"));
+    }
+
+    #[test]
+    fn ambient_discovery_matches_state_topics() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc_t = discovery_payload_ambient_temperature(&cfg);
+        let vt: serde_json::Value = serde_json::from_str(&disc_t).unwrap();
+        assert_eq!(vt["name"].as_str(), Some("Ambient Temperature"));
+        assert_eq!(
+            vt["state_topic"].as_str(),
+            Some(cfg.ambient_temperature_state_topic().as_str()),
+        );
+        assert_eq!(vt["device_class"].as_str(), Some("temperature"));
+        let disc_h = discovery_payload_ambient_humidity(&cfg);
+        let vh: serde_json::Value = serde_json::from_str(&disc_h).unwrap();
+        assert_eq!(vh["name"].as_str(), Some("Ambient Humidity"));
+        assert_eq!(
+            vh["state_topic"].as_str(),
+            Some(cfg.ambient_humidity_state_topic().as_str()),
+        );
+        assert_eq!(vh["device_class"].as_str(), Some("humidity"));
     }
 
     #[test]
@@ -4285,9 +4974,36 @@ mod tests {
             Some(cfg.system_uptime_state_topic().as_str()),
         );
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
-        assert_eq!(v["enabled_by_default"].as_bool(), Some(false));
+        assert_eq!(v["enabled_by_default"].as_bool(), Some(true));
         assert_eq!(v["device_class"].as_str(), Some("timestamp"));
         assert_eq!(v["name"].as_str(), Some("System Up Since"));
+    }
+
+    #[test]
+    fn usart_link_diagnostic_discovery_matches_state_topics() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc_f = discovery_payload_frozen_usart_link(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc_f).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.frozen_usart_link_state_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+        assert_eq!(v["device_class"].as_str(), Some("connectivity"));
+        assert_eq!(v["name"].as_str(), Some("Frozen Link"));
+        assert_eq!(v["icon"].as_str(), Some("mdi:connection"));
+        let disc_s = discovery_payload_sensor_usart_framing(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc_s).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.sensor_usart_framing_state_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+        assert_eq!(v["device_class"].as_str(), Some("connectivity"));
+        assert_eq!(v["name"].as_str(), Some("Sensor Link"));
+        assert_eq!(v["icon"].as_str(), Some("mdi:connection"));
     }
 
     #[test]
@@ -4329,6 +5045,21 @@ mod tests {
             v["command_topic"].as_str(),
             Some(cfg.shutdown_command_topic().as_str()),
         );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+    }
+
+    #[test]
+    fn restart_lunaris_button_discovery_matches_command_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_restart_lunaris_button(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.restart_lunaris_command_topic().as_str()),
+        );
+        assert_eq!(v["enabled_by_default"].as_bool(), Some(true));
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
     }
 
@@ -4541,6 +5272,11 @@ mod tests {
             Some([200, 201, 202, 203, 204, 205])
         );
         assert!(parse_presence_baseline_zones_payload(b"").is_none());
+    }
+
+    #[test]
+    fn presence_binary_unknown_payload_matches_ha_mqtt_payload_none() {
+        assert_eq!(PRESENCE_BINARY_SENSOR_STATE_UNKNOWN, "None");
     }
 
     #[test]
