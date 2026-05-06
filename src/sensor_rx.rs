@@ -49,6 +49,90 @@ pub fn ambient_from_sensor_message_line(line: &str) -> Option<(String, String)> 
     Some((format!("{:.2}", temp_raw), format!("{:.2}", humidity_raw)))
 }
 
+/// Bed-side cover control (`[lisL]` / `[lisR]`) tap count from Sensor MCU dismissal text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoverButtonTapSide {
+    Left,
+    Right,
+}
+
+/// Substring before the tap digit(s), matched **ASCII case-insensitive** (`Dismissing`, …).
+const COVER_BTN_DISMISS_PHRASE: &[u8] = b"dismissing alarm (";
+
+fn find_cover_button_lis_tag(line: &[u8]) -> Option<(CoverButtonTapSide, usize)> {
+    /// Byte offset **after** the closing `]` of **`[lisL]` / `[lisR]`** (fixed **6** ASCII bytes, case-insensitive tag).
+    const TAG_LEN: usize = 6;
+
+    #[inline]
+    fn find_window_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len())
+            .position(|w| w.eq_ignore_ascii_case(needle))
+    }
+
+    let left = find_window_ci(line, b"[lisl]").map(|i| (CoverButtonTapSide::Left, i));
+    let right = find_window_ci(line, b"[lisr]").map(|i| (CoverButtonTapSide::Right, i));
+    let (side, start) = match (left, right) {
+        (Some(l), Some(r)) => {
+            if l.1 <= r.1 {
+                l
+            } else {
+                r
+            }
+        }
+        (Some(x), None) | (None, Some(x)) => x,
+        (None, None) => return None,
+    };
+    Some((side, start + TAG_LEN))
+}
+
+fn parse_cover_button_taps_after_open_paren(rest: &str) -> Option<u8> {
+    let rest = rest.trim_start();
+    let digit_end = rest
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map(|(i, _)| i)
+        .unwrap_or(rest.len());
+    if digit_end == 0 {
+        return None;
+    }
+    let n: u32 = rest.get(..digit_end)?.parse().ok()?;
+    if !(1..=5).contains(&n) {
+        return None;
+    }
+    let after_digits = rest.get(digit_end..)?.trim_start();
+    let after_bytes = after_digits.as_bytes();
+    let ok_taps = after_bytes.len() >= 5 && after_bytes[..5].eq_ignore_ascii_case(b"taps)");
+    let ok_tap = after_bytes.len() >= 4 && after_bytes[..4].eq_ignore_ascii_case(b"tap)");
+    if !ok_taps && !ok_tap {
+        return None;
+    }
+    Some(n as u8)
+}
+
+/// Parsed tap count **`1..=5`** from Sensor MCU lines such as
+/// `FW: 20628 [lisR] dismissing alarm (1 taps)` (phrase + digits are matched resiliently).
+///
+/// If both **`[lisL]`** and **`[lisR]`** appear, the **[leftmost]** tag wins.
+#[must_use]
+pub fn cover_button_dismiss_tap_count_from_sensor_message(
+    line: &str,
+) -> Option<(CoverButtonTapSide, u8)> {
+    let bytes = line.as_bytes();
+    let (side, after_tag) = find_cover_button_lis_tag(bytes)?;
+    let rest = line.get(after_tag..)?.trim_start();
+    if rest.len() < COVER_BTN_DISMISS_PHRASE.len() {
+        return None;
+    }
+    if !rest.as_bytes()[..COVER_BTN_DISMISS_PHRASE.len()]
+        .eq_ignore_ascii_case(COVER_BTN_DISMISS_PHRASE)
+    {
+        return None;
+    }
+    let after_phrase = rest.get(COVER_BTN_DISMISS_PHRASE.len()..)?;
+    let taps = parse_cover_button_taps_after_open_paren(after_phrase)?;
+    Some((side, taps))
+}
+
 fn maybe_send_sensor_message(tx: Option<&mpsc::Sender<String>>, text: &str) {
     let Some(t) = tx else {
         return;
@@ -59,9 +143,9 @@ fn maybe_send_sensor_message(tx: Option<&mpsc::Sender<String>>, text: &str) {
     }
     let body = truncate_utf8_sensor_message(text);
     if let Err(e) = t.try_send(body) {
-        tracing::trace!(
+        tracing::warn!(
             ?e,
-            "Sensor MCU message (0x07) dropped (MQTT Sensor Message channel lag)"
+            "Sensor MCU message (0x07) dropped — MQTT bridge not keeping up; cover button / sensor text may miss lines"
         );
     }
 }
@@ -386,6 +470,91 @@ mod tests {
     #[test]
     fn ambient_line_requires_humidity_keyword() {
         assert!(ambient_from_sensor_message_line("[ambient] temp 1.234 junk 5").is_none());
+    }
+
+    #[test]
+    fn cover_button_dismiss_tap_counts_parsed() {
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message(
+                "changed to FW: 99 [lisL] dismissing alarm (1 taps)"
+            ),
+            Some((CoverButtonTapSide::Left, 1))
+        );
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message(
+                "FW: 20628 [lisR] dismissing alarm (1 taps)"
+            ),
+            Some((CoverButtonTapSide::Right, 1)),
+            "exact Pod log-style line",
+        );
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message(
+                "FW: 26303 [lisR] dismissing alarm (4 taps)"
+            ),
+            Some((CoverButtonTapSide::Right, 4))
+        );
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message("[lisR] dismissing alarm (5 taps)"),
+            Some((CoverButtonTapSide::Right, 5))
+        );
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message("[lisR] dismissing alarm (3 taps)x"),
+            Some((CoverButtonTapSide::Right, 3))
+        );
+    }
+
+    #[test]
+    fn cover_button_dismiss_phrase_is_ascii_case_insensitive() {
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message(
+                "FW: 1 [lisR] DiSmIsSiNg AlArM (3 taps)",
+            ),
+            Some((CoverButtonTapSide::Right, 3))
+        );
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message(
+                "prefix [lisL] DISMISSING ALARM (2 taps)"
+            ),
+            Some((CoverButtonTapSide::Left, 2))
+        );
+    }
+
+    #[test]
+    fn cover_button_dismiss_tag_is_ascii_case_insensitive() {
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message("[LISR] dismissing alarm (1 taps)",),
+            Some((CoverButtonTapSide::Right, 1))
+        );
+    }
+
+    #[test]
+    fn cover_button_dismiss_accepts_singular_tap() {
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message("[lisL] dismissing alarm (2 tap)",),
+            Some((CoverButtonTapSide::Left, 2))
+        );
+    }
+
+    #[test]
+    fn cover_button_dismiss_rejects_bad_counts_and_other_lines() {
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message("[lisL] dismissing alarm (0 taps)"),
+            None
+        );
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message("[lisL] dismissing alarm (6 taps)"),
+            None
+        );
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message("[lisL] saw single tap"),
+            None
+        );
+        assert_eq!(
+            cover_button_dismiss_tap_count_from_sensor_message(
+                "FW: 1 [ambient] temp 22 humidity 40"
+            ),
+            None
+        );
     }
 
     #[tokio::test]

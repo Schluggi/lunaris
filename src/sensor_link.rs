@@ -46,7 +46,7 @@ pub fn spawn(
     capacitance_parse_diag: Option<std::sync::Arc<PresenceCapDiag>>,
 ) -> SensorLinkHandle {
     let (tx, rx) = mpsc::channel::<Vec<Vec<u8>>>(32);
-    let (sensor_mcu_tx, sensor_mcu_rx) = mpsc::channel::<String>(128);
+    let (sensor_mcu_tx, sensor_mcu_rx) = mpsc::channel::<String>(512);
     let sensor_rx_framing = Arc::new(AtomicBool::new(false));
     let sensor_rx_framing_reader = sensor_rx_framing.clone();
     tokio::spawn(async move {

@@ -1,6 +1,6 @@
 //! MQTT: Home Assistant discovery, prime, MQTT **Restart Lunaris** (re-`exec` lunaris; **diagnostic**), per-side vibration (Sensor) + retained **number/select/switch**
 //! vibration tuning, optional capacitance **presence**,
-//! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`) plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
+//! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`), **Cover Button Left / Right** (**`0`..=`5`** taps from **`dismissing alarm (N taps)`**), plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
 //! mattress climate, JSON light (I²C),
 //! MQTT **update** (self-install from GitHub `releases/latest` asset).
 //!
@@ -26,7 +26,10 @@ use crate::frozen_frame::{get_temperatures_frame, set_target_temperature_frame, 
 use crate::frozen_rx::FrozenTemperatureUpdate;
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
 use crate::sensor_frame::{vibration_sequence_frames, AlarmPattern};
-use crate::sensor_rx::{ambient_from_sensor_message_line, SensorCapacitanceZones};
+use crate::sensor_rx::{
+    ambient_from_sensor_message_line, cover_button_dismiss_tap_count_from_sensor_message,
+    CoverButtonTapSide, SensorCapacitanceZones,
+};
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
@@ -66,12 +69,16 @@ const DISCOVERY_OBJECT_ID_PRESENCE_CALIBRATION: &str = "lunaris_presence_calibra
 const DISCOVERY_OBJECT_ID_WATER_TANK: &str = "lunaris_water_tank";
 const DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE: &str = "lunaris_firmware_message";
 const DISCOVERY_OBJECT_ID_SENSOR_MESSAGE: &str = "lunaris_sensor_message";
+const DISCOVERY_OBJECT_ID_COVER_BUTTON_LEFT: &str = "lunaris_cover_button_left";
+const DISCOVERY_OBJECT_ID_COVER_BUTTON_RIGHT: &str = "lunaris_cover_button_right";
 const DISCOVERY_OBJECT_ID_AMBIENT_TEMPERATURE: &str = "lunaris_ambient_temperature";
 const DISCOVERY_OBJECT_ID_AMBIENT_HUMIDITY: &str = "lunaris_ambient_humidity";
 const DISCOVERY_OBJECT_ID_UPDATE: &str = "lunaris_update";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
+/// Resting MQTT state for **Cover Button** sensors (**no recent dismissal**).
+const COVER_BUTTON_SENSOR_STATE_REST: &str = "0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LedBehavior {
@@ -603,6 +610,28 @@ impl BridgeConfig {
         )
     }
 
+    pub fn cover_button_left_state_topic(&self) -> String {
+        format!("{}/sensor/cover_button_left/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_cover_button_left(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_COVER_BUTTON_LEFT
+        )
+    }
+
+    pub fn cover_button_right_state_topic(&self) -> String {
+        format!("{}/sensor/cover_button_right/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_cover_button_right(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_COVER_BUTTON_RIGHT
+        )
+    }
+
     pub fn ambient_temperature_state_topic(&self) -> String {
         format!("{}/sensor/ambient_temperature/state", self.topic_prefix)
     }
@@ -674,7 +703,10 @@ impl BridgeConfig {
     }
 
     pub fn frozen_usart_link_state_topic(&self) -> String {
-        format!("{}/binary_sensor/frozen_usart_link/state", self.topic_prefix)
+        format!(
+            "{}/binary_sensor/frozen_usart_link/state",
+            self.topic_prefix
+        )
     }
 
     pub fn discovery_topic_frozen_usart_link(&self) -> String {
@@ -685,7 +717,10 @@ impl BridgeConfig {
     }
 
     pub fn sensor_usart_framing_state_topic(&self) -> String {
-        format!("{}/binary_sensor/sensor_usart_framing/state", self.topic_prefix)
+        format!(
+            "{}/binary_sensor/sensor_usart_framing/state",
+            self.topic_prefix
+        )
     }
 
     pub fn discovery_topic_sensor_usart_framing(&self) -> String {
@@ -1076,6 +1111,42 @@ fn discovery_payload_sensor_message(config: &BridgeConfig) -> String {
         "entity_category": "diagnostic",
         "enabled_by_default": false,
         "unique_id": format!("{}_sensor_message", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_cover_button_left(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Cover Button Left",
+        "state_topic": config.cover_button_left_state_topic(),
+        "icon": "mdi:gesture-tap-button",
+        "state_class": "measurement",
+        "unit_of_measurement": "taps",
+        "unique_id": format!("{}_cover_button_left", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_cover_button_right(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Cover Button Right",
+        "state_topic": config.cover_button_right_state_topic(),
+        "icon": "mdi:gesture-tap-button",
+        "state_class": "measurement",
+        "unit_of_measurement": "taps",
+        "unique_id": format!("{}_cover_button_right", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -1833,6 +1904,67 @@ async fn publish_sensor_message_state(client: &AsyncClient, config: &BridgeConfi
         .await
     {
         tracing::error!(?e, "publish Sensor MCU message sensor state");
+    }
+}
+
+async fn publish_cover_button_sensors_rest(client: &AsyncClient, config: &BridgeConfig) {
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(
+            config.cover_button_left_state_topic(),
+            qos,
+            false,
+            COVER_BUTTON_SENSOR_STATE_REST.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Cover Button Left resting state");
+    }
+    if let Err(e) = client
+        .publish(
+            config.cover_button_right_state_topic(),
+            qos,
+            false,
+            COVER_BUTTON_SENSOR_STATE_REST.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Cover Button Right resting state");
+    }
+}
+
+/// Publishes tap count (**`1`..=`5`**), then **`0`** so repeated runs still produce state changes in HA.
+async fn pulse_cover_button_tap_count(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    side: CoverButtonTapSide,
+    taps: u8,
+) {
+    let topic = match side {
+        CoverButtonTapSide::Left => config.cover_button_left_state_topic(),
+        CoverButtonTapSide::Right => config.cover_button_right_state_topic(),
+    };
+    let qos = QoS::AtLeastOnce;
+    let count = taps.to_string();
+    if let Err(e) = client
+        .publish(topic.as_str(), qos, false, count.as_bytes())
+        .await
+    {
+        tracing::error!(?e, ?side, taps, "publish cover button tap count");
+        return;
+    }
+    tracing::debug!(?side, taps, "cover button sensor: published tap count");
+    sleep(Duration::from_millis(400)).await;
+    if let Err(e) = client
+        .publish(
+            topic.as_str(),
+            qos,
+            false,
+            COVER_BUTTON_SENSOR_STATE_REST.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, ?side, "publish cover button rest after tap count");
     }
 }
 
@@ -2961,7 +3093,12 @@ async fn publish_discovery_and_online(
         }
         let disc = discovery_payload_sensor_usart_framing(config);
         if let Err(e) = client
-            .publish(config.discovery_topic_sensor_usart_framing(), qos, true, disc)
+            .publish(
+                config.discovery_topic_sensor_usart_framing(),
+                qos,
+                true,
+                disc,
+            )
             .await
         {
             tracing::error!(?e, "publish Sensor USART framing discovery");
@@ -3085,6 +3222,31 @@ async fn publish_discovery_and_online(
         {
             tracing::error!(?e, "publish Sensor MCU message discovery");
         }
+        let disc_cbl = discovery_payload_cover_button_left(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_cover_button_left(),
+                qos,
+                true,
+                disc_cbl,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish Cover Button Left discovery");
+        }
+        let disc_cbr = discovery_payload_cover_button_right(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_cover_button_right(),
+                qos,
+                true,
+                disc_cbr,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish Cover Button Right discovery");
+        }
+        publish_cover_button_sensors_rest(client, config).await;
         let disc_at = discovery_payload_ambient_temperature(config);
         if let Err(e) = client
             .publish(
@@ -3989,6 +4151,10 @@ pub async fn run(
         let cfg = config.clone();
         tokio::spawn(async move {
             while let Some(msg) = sensor_msg_rx.recv().await {
+                if let Some((side, taps)) = cover_button_dismiss_tap_count_from_sensor_message(&msg)
+                {
+                    pulse_cover_button_tap_count(&c, &cfg, side, taps).await;
+                }
                 publish_sensor_message_state(&c, &cfg, &msg).await;
                 publish_ambient_from_sensor_message(&c, &cfg, &msg).await;
             }
@@ -4013,18 +4179,8 @@ pub async fn run(
         let mut tick = interval(Duration::from_secs(5));
         tick.tick().await;
         loop {
-            publish_frozen_usart_link_state(
-                &c,
-                &cfg,
-                hs_usart.frozen_mcu_connected.as_ref(),
-            )
-            .await;
-            publish_sensor_usart_framing_state(
-                &c,
-                &cfg,
-                hs_usart.sensor_rx_framing.as_ref(),
-            )
-            .await;
+            publish_frozen_usart_link_state(&c, &cfg, hs_usart.frozen_mcu_connected.as_ref()).await;
+            publish_sensor_usart_framing_state(&c, &cfg, hs_usart.sensor_rx_framing.as_ref()).await;
             tick.tick().await;
         }
     });
@@ -4687,6 +4843,31 @@ mod tests {
             Some(cfg.sensor_message_state_topic().as_str()),
         );
         assert_eq!(v["enabled_by_default"].as_bool(), Some(false),);
+    }
+
+    #[test]
+    fn cover_button_discovery_matches_state_topics() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc_l = discovery_payload_cover_button_left(&cfg);
+        let vl: serde_json::Value = serde_json::from_str(&disc_l).unwrap();
+        assert_eq!(vl["name"].as_str(), Some("Cover Button Left"));
+        assert_eq!(
+            vl["state_topic"].as_str(),
+            Some(cfg.cover_button_left_state_topic().as_str()),
+        );
+        assert_eq!(vl["state_class"].as_str(), Some("measurement"));
+        assert_eq!(vl["unit_of_measurement"].as_str(), Some("taps"));
+        let disc_r = discovery_payload_cover_button_right(&cfg);
+        let vr: serde_json::Value = serde_json::from_str(&disc_r).unwrap();
+        assert_eq!(vr["name"].as_str(), Some("Cover Button Right"));
+        assert_eq!(
+            vr["state_topic"].as_str(),
+            Some(cfg.cover_button_right_state_topic().as_str()),
+        );
+        assert_eq!(vr["state_class"].as_str(), Some("measurement"));
+        assert_eq!(vr["unit_of_measurement"].as_str(), Some("taps"));
     }
 
     #[test]

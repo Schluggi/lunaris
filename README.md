@@ -72,6 +72,8 @@ Using custom firmware or low-level hardware control may void warranties, break t
 | Device Label | sensor | Yes | Human-readable pod name from disk when available; mostly for support. |
 | Frozen Message | sensor | Yes | Occasionally shows one-line status from the **Frozen** MCU (`0x7E`‑framed `0x07` text). |
 | Sensor Message | sensor | Yes | Same style of MCU text lines from the **Sensor** UART (not Frozen); needs an open vibration/presence serial port. |
+| Cover Button Left | sensor | No | Tap count **`1`–`5`** (unit **taps**) from **`[lisL] dismissing alarm (N taps)`**; **`0`** when idle. |
+| Cover Button Right | sensor | No | Same from **`[lisR] dismissing alarm (N taps)`**. |
 | Ambient Temperature | sensor | No | Parsed from Sensor MCU **`[ambient] temp … humidity …`** lines (°C, two decimals). |
 | Ambient Humidity | sensor | No | Relative humidity [%] from the same Sensor **`[ambient]`** lines (two decimals). |
 | Presence Baseline Zones | sensor | Yes | Raw saved calibration snapshot for nerds/support; not usually needed daily. |
