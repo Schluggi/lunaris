@@ -17,6 +17,36 @@ use crate::wire_buffer::trim_when_no_sync_byte;
 
 /// If we hold more than this waiting for the rest of a putative frame, drop `0x7E` and resync (false length / truncated stream).
 const MAX_INCOMPLETE_HOLD: usize = 4096;
+/// MQTT text sensor truncation (MCU lines can be long; broker/HA still have practical limits).
+const MAX_SENSOR_MESSAGE_BYTES: usize = 2048;
+
+fn truncate_utf8_sensor_message(s: &str) -> String {
+    if s.len() <= MAX_SENSOR_MESSAGE_BYTES {
+        return s.to_string();
+    }
+    let mut n = MAX_SENSOR_MESSAGE_BYTES;
+    while n > 0 && !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    format!("{}…", &s[..n])
+}
+
+fn maybe_send_sensor_message(tx: Option<&mpsc::Sender<String>>, text: &str) {
+    let Some(t) = tx else {
+        return;
+    };
+    let text = text.trim_end_matches('\0').trim_end();
+    if text.is_empty() {
+        return;
+    }
+    let body = truncate_utf8_sensor_message(text);
+    if let Err(e) = t.try_send(body) {
+        tracing::trace!(
+            ?e,
+            "Sensor MCU message (0x07) dropped (MQTT Sensor Message channel lag)"
+        );
+    }
+}
 
 /// Six capacitance samples from Sensor `0x33` (opensleep `CapacitanceData`), ordered **LTR** along the bed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +109,7 @@ pub fn drain_inbound(
     vibration_enabled: &AtomicBool,
     capacitance_tx: Option<&mpsc::Sender<SensorCapacitanceZones>>,
     capacitance_diag: Option<&PresenceCapDiag>,
+    sensor_message_tx: Option<&mpsc::Sender<String>>,
 ) {
     loop {
         let start = match buffer.iter().position(|&b| b == 0x7E) {
@@ -114,7 +145,13 @@ pub fn drain_inbound(
             buffer.remove(0);
             continue;
         }
-        handle_payload(payload, vibration_enabled, capacitance_tx, capacitance_diag);
+        handle_payload(
+            payload,
+            vibration_enabled,
+            capacitance_tx,
+            capacitance_diag,
+            sensor_message_tx,
+        );
         buffer.drain(..frame_len);
     }
 }
@@ -179,6 +216,7 @@ fn handle_payload(
     vibration_enabled: &AtomicBool,
     capacitance_tx: Option<&mpsc::Sender<SensorCapacitanceZones>>,
     capacitance_diag: Option<&PresenceCapDiag>,
+    sensor_message_tx: Option<&mpsc::Sender<String>>,
 ) {
     if payload.is_empty() {
         return;
@@ -209,6 +247,7 @@ fn handle_payload(
         0x07 if payload.len() >= 3 => match std::str::from_utf8(&payload[2..]) {
             Ok(text) => {
                 let t = text.trim_end_matches('\0');
+                maybe_send_sensor_message(sensor_message_tx, t);
                 if mcu_text_is_vibration_hint(t) {
                     tracing::warn!(msg = %t, "Sensor: MCU text (alarm / vibration hint)");
                 } else if t.contains("FW:") {
@@ -280,7 +319,7 @@ mod tests {
         frame.push(crc as u8);
 
         let mut buf = frame.clone();
-        drain_inbound(&mut buf, &flag, None, None);
+        drain_inbound(&mut buf, &flag, None, None, None);
         assert!(flag.load(Ordering::SeqCst));
         assert!(buf.is_empty());
     }
@@ -291,7 +330,7 @@ mod tests {
     fn vibration_enabled_two_byte_payload_matches_pod4_rx() {
         let flag = AtomicBool::new(false);
         let mut buf = vec![0x7Eu8, 0x02, 0xAE, 0x02, 0x9A, 0xF3];
-        drain_inbound(&mut buf, &flag, None, None);
+        drain_inbound(&mut buf, &flag, None, None, None);
         assert!(flag.load(Ordering::SeqCst));
         assert!(buf.is_empty());
     }
@@ -308,8 +347,25 @@ mod tests {
         frame.push((crc >> 8) as u8);
         frame.push(crc as u8);
         let mut buf = frame;
-        drain_inbound(&mut buf, &flag, None, None);
+        drain_inbound(&mut buf, &flag, None, None, None);
         assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcu_message_try_sends_utf8_body_to_mqtt_bridge_channel() {
+        let flag = AtomicBool::new(false);
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        let mut inner = vec![0x07u8, 0x00];
+        inner.extend_from_slice(b"pump primed");
+        let crc = crate::frozen_frame::crc_ccitt(&inner);
+        let mut frame = vec![0x7E, inner.len() as u8];
+        frame.extend_from_slice(&inner);
+        frame.push((crc >> 8) as u8);
+        frame.push(crc as u8);
+        let mut buf = frame;
+        drain_inbound(&mut buf, &flag, None, None, Some(&tx));
+        assert!(buf.is_empty());
+        assert_eq!(rx.recv().await, Some("pump primed".to_string()));
     }
 
     #[test]
@@ -323,10 +379,10 @@ mod tests {
         frame.push(crc as u8);
 
         let mut buf = vec![0xE0, 0x1C, 0xE0, 0xFE, 0x00];
-        drain_inbound(&mut buf, &flag, None, None);
+        drain_inbound(&mut buf, &flag, None, None, None);
         assert!(!flag.load(Ordering::SeqCst));
         buf.extend_from_slice(&frame);
-        drain_inbound(&mut buf, &flag, None, None);
+        drain_inbound(&mut buf, &flag, None, None, None);
         assert!(
             flag.load(Ordering::SeqCst),
             "0xAE frame after leading noise"
@@ -350,7 +406,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<SensorCapacitanceZones>(4);
         let mut buf = frame;
-        drain_inbound(&mut buf, &flag, Some(&tx), None);
+        drain_inbound(&mut buf, &flag, Some(&tx), None, None);
         let c = rx.recv().await.unwrap();
         assert_eq!(c.sequence, 0x01020304);
         assert_eq!(c.zones, [0x0102, 0x0304, 0x0506, 0x0708, 0x090A, 0x0B0C]);

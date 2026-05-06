@@ -31,7 +31,7 @@ pub struct FrozenLinkHandle {
     pub temperature_rx: mpsc::Receiver<FrozenTemperatureUpdate>,
     /// Frozen `0x07` water tank present / removed (for MQTT **Water Tank**).
     pub water_tank_rx: mpsc::Receiver<bool>,
-    /// UTF‑8 bodies of Frozen `0x07` messages (MQTT **Firmware message** text sensor).
+    /// UTF‑8 bodies of Frozen `0x07` messages (MQTT **Frozen Message** text sensor).
     pub firmware_message_rx: mpsc::Receiver<String>,
 }
 

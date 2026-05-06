@@ -71,7 +71,7 @@ Inbound deframer and handlers: [`src/sensor_rx.rs`](../src/sensor_rx.rs).
 | **`0xAE`** | **VibrationEnabled** — piezo path armed; **`SetAlarm`** typically waits until this has been seen (unless bypassed below) |
 | **`0xAC`** | AlarmSet status (logged; status `0x01` matches opensleep test expectations; first ack may belong to cancel preamble) |
 | **`0x33`** | **Capacitance**: **27‑byte** opensleep layout, six **`u16` BE** zone samples (L→R along the bed) + sequence — drives MQTT **presence** when parse succeeds |
-| **`0x07`** | MCU UTF‑8 text (debug / alarm explanations) |
+| **`0x07`** | MCU UTF‑8 text (debug / alarm explanations) — MQTT **Sensor Message** when the Sensor TTY is open |
 | **`0x81`** | Pong‑style reply (logged at trace) |
 
 **`0x33` caveat:** Strict index checks mirror opensleep Pod 3. Pod 4 firmware may emit a **different layout** — presence stays disabled until parsing matches; with **`--presence-debug`**, the first malformed **`0x33`** emits a **one‑shot WARN**.
@@ -88,7 +88,7 @@ After connect, **`sensor_link`** logs whether the **first** read contains **`0x7
 
 ## MQTT / Home Assistant (summary)
 
-When the Sensor serial opens successfully, discovery includes **vibrate** buttons (**intensity**, **duration**, **pattern** as runtime entities elsewhere in the bridge), **Vibration Cancel Preamble**, optional **presence** binary sensors (**Left** / **Right** / **Any**), calibration **button**, **Presence Cap Threshold**, **Presence Baseline Delta**, retained **Presence Baseline Zones**, etc. Full topic list: [`AGENTS.md`](../AGENTS.md).
+When the Sensor serial opens successfully, discovery includes **vibrate** buttons (**intensity**, **duration**, **pattern** as runtime entities elsewhere in the bridge), **Vibration Cancel Preamble**, diagnostic **Sensor Message** (`0x07` text), optional **presence** binary sensors (**Left** / **Right** / **Any**), calibration **button**, **Presence Cap Threshold**, **Presence Baseline Delta**, retained **Presence Baseline Zones**, etc. Full topic list: [`AGENTS.md`](../AGENTS.md).
 
 ## Source map
 

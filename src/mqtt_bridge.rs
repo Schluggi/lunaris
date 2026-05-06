@@ -1,6 +1,6 @@
 //! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor) + retained **number/select/switch**
 //! vibration tuning, optional capacitance **presence**,
-//! Frozen **water tank** + **Firmware message** from **`0x07`**, mattress climate, JSON light (I²C),
+//! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`), mattress climate, JSON light (I²C),
 //! MQTT **update** (self-install from GitHub `releases/latest` asset).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
@@ -61,6 +61,7 @@ const DISCOVERY_OBJECT_ID_PRESENCE_BASELINE_ZONES: &str = "lunaris_presence_base
 const DISCOVERY_OBJECT_ID_PRESENCE_CALIBRATION: &str = "lunaris_presence_calibration";
 const DISCOVERY_OBJECT_ID_WATER_TANK: &str = "lunaris_water_tank";
 const DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE: &str = "lunaris_firmware_message";
+const DISCOVERY_OBJECT_ID_SENSOR_MESSAGE: &str = "lunaris_sensor_message";
 const DISCOVERY_OBJECT_ID_UPDATE: &str = "lunaris_update";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
@@ -574,6 +575,17 @@ impl BridgeConfig {
         )
     }
 
+    pub fn sensor_message_state_topic(&self) -> String {
+        format!("{}/sensor/sensor_message/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_sensor_message(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_SENSOR_MESSAGE
+        )
+    }
+
     pub fn update_state_topic(&self) -> String {
         format!("{}/update/lunaris/state", self.topic_prefix)
     }
@@ -960,12 +972,30 @@ fn discovery_payload_water_tank(config: &BridgeConfig) -> String {
 
 fn discovery_payload_firmware_message(config: &BridgeConfig) -> String {
     json!({
-        "name": "Firmware Message",
+        "name": "Frozen Message",
         "state_topic": config.firmware_message_state_topic(),
         "icon": "mdi:message-text",
         "entity_category": "diagnostic",
         "enabled_by_default": false,
         "unique_id": format!("{}_firmware_message", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_sensor_message(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Sensor Message",
+        "state_topic": config.sensor_message_state_topic(),
+        "icon": "mdi:message-text-outline",
+        "entity_category": "diagnostic",
+        "enabled_by_default": false,
+        "unique_id": format!("{}_sensor_message", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -1581,6 +1611,21 @@ async fn publish_firmware_message_state(client: &AsyncClient, config: &BridgeCon
         .await
     {
         tracing::error!(?e, "publish Frozen firmware message sensor state");
+    }
+}
+
+async fn publish_sensor_message_state(client: &AsyncClient, config: &BridgeConfig, msg: &str) {
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(
+            config.sensor_message_state_topic(),
+            qos,
+            false,
+            msg.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Sensor MCU message sensor state");
     }
 }
 
@@ -2756,6 +2801,13 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         {
             tracing::error!(?e, "publish vibration cancel preamble discovery");
         }
+        let disc_sm = discovery_payload_sensor_message(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_sensor_message(), qos, true, disc_sm)
+            .await
+        {
+            tracing::error!(?e, "publish Sensor MCU message discovery");
+        }
     }
     if config.sensor_device.is_some() && config.presence_discovery {
         for side in [BedSide::Left, BedSide::Right] {
@@ -3496,6 +3548,7 @@ pub async fn run(
     frozen_water_tank_rx: mpsc::Receiver<bool>,
     frozen_firmware_message_rx: mpsc::Receiver<String>,
     capacitance_rx: Option<mpsc::Receiver<SensorCapacitanceZones>>,
+    sensor_message_rx: Option<mpsc::Receiver<String>>,
 ) {
     let (presence_calibrate_tx, presence_calibrate_rx) =
         if config.presence_discovery && capacitance_rx.is_some() {
@@ -3565,6 +3618,16 @@ pub async fn run(
             publish_firmware_message_state(&c, &cfg, &msg).await;
         }
     });
+
+    if let Some(mut sensor_msg_rx) = sensor_message_rx {
+        let c = client.clone();
+        let cfg = config.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = sensor_msg_rx.recv().await {
+                publish_sensor_message_state(&c, &cfg, &msg).await;
+            }
+        });
+    }
 
     let c = client.clone();
     let cfg = config.clone();
@@ -4213,11 +4276,30 @@ mod tests {
             v["state_topic"].as_str(),
             Some(cfg.firmware_message_state_topic().as_str()),
         );
+        assert_eq!(v["name"].as_str(), Some("Frozen Message"));
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
         assert_eq!(
             v["enabled_by_default"].as_bool(),
             Some(false),
             "disabled in HA registry by default — enable under device entities if desired"
+        );
+    }
+
+    #[test]
+    fn sensor_message_discovery_matches_state_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_sensor_message(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Sensor Message"));
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.sensor_message_state_topic().as_str()),
+        );
+        assert_eq!(
+            v["enabled_by_default"].as_bool(),
+            Some(false),
         );
     }
 

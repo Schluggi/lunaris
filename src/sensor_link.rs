@@ -31,6 +31,8 @@ pub enum SensorLinkError {
 #[derive(Debug)]
 pub struct SensorLinkHandle {
     pub tx: mpsc::Sender<Vec<Vec<u8>>>,
+    /// UTF‑8 bodies of Sensor `0x07` MCU text (MQTT **Sensor Message** text sensor).
+    pub sensor_message_rx: mpsc::Receiver<String>,
 }
 
 pub fn spawn(
@@ -42,6 +44,7 @@ pub fn spawn(
     capacitance_parse_diag: Option<std::sync::Arc<PresenceCapDiag>>,
 ) -> SensorLinkHandle {
     let (tx, rx) = mpsc::channel::<Vec<Vec<u8>>>(32);
+    let (sensor_mcu_tx, sensor_mcu_rx) = mpsc::channel::<String>(128);
     tokio::spawn(async move {
         if let Err(e) = run(
             device,
@@ -51,13 +54,17 @@ pub fn spawn(
             rx,
             capacitance_tx,
             capacitance_parse_diag,
+            sensor_mcu_tx,
         )
         .await
         {
             tracing::error!(error = %e, "Sensor USART task ended");
         }
     });
-    SensorLinkHandle { tx }
+    SensorLinkHandle {
+        tx,
+        sensor_message_rx: sensor_mcu_rx,
+    }
 }
 
 fn hex_prefix(bytes: &[u8]) -> String {
@@ -218,6 +225,7 @@ async fn run(
     mut rx: mpsc::Receiver<Vec<Vec<u8>>>,
     capacitance_tx: Option<mpsc::Sender<crate::sensor_rx::SensorCapacitanceZones>>,
     capacitance_parse_diag: Option<std::sync::Arc<PresenceCapDiag>>,
+    sensor_mcu_tx: mpsc::Sender<String>,
 ) -> Result<(), SensorLinkError> {
     let path = device.to_string_lossy().to_string();
     let port = open_sensor_port(&path, baud, bootloader_handshake).await?;
@@ -257,7 +265,13 @@ async fn run(
                     }
                     buf.extend_from_slice(&chunk[..n]);
                     let diag = parse_diag_for_rx.as_ref().map(|a| a.as_ref());
-                    sensor_rx::drain_inbound(&mut buf, &vib_flag, cap_flag.as_ref(), diag);
+                    sensor_rx::drain_inbound(
+                        &mut buf,
+                        &vib_flag,
+                        cap_flag.as_ref(),
+                        diag,
+                        Some(&sensor_mcu_tx),
+                    );
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Sensor serial read failed");
