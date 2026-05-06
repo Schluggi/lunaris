@@ -1721,7 +1721,11 @@ async fn publish_sensor_message_state(client: &AsyncClient, config: &BridgeConfi
     }
 }
 
-async fn publish_ambient_from_sensor_message(client: &AsyncClient, config: &BridgeConfig, msg: &str) {
+async fn publish_ambient_from_sensor_message(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    msg: &str,
+) {
     let Some((temp, rh)) = ambient_from_sensor_message_line(msg) else {
         return;
     };
@@ -2943,14 +2947,24 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         }
         let disc_at = discovery_payload_ambient_temperature(config);
         if let Err(e) = client
-            .publish(config.discovery_topic_ambient_temperature(), qos, true, disc_at)
+            .publish(
+                config.discovery_topic_ambient_temperature(),
+                qos,
+                true,
+                disc_at,
+            )
             .await
         {
             tracing::error!(?e, "publish ambient temperature discovery");
         }
         let disc_ah = discovery_payload_ambient_humidity(config);
         if let Err(e) = client
-            .publish(config.discovery_topic_ambient_humidity(), qos, true, disc_ah)
+            .publish(
+                config.discovery_topic_ambient_humidity(),
+                qos,
+                true,
+                disc_ah,
+            )
             .await
         {
             tracing::error!(?e, "publish ambient humidity discovery");
@@ -3473,7 +3487,9 @@ async fn handle_publish(
             let c = client.clone();
             let cfg = config.clone();
             tokio::spawn(async move {
-                match tokio::task::spawn_blocking(crate::self_update::restart_current_exe_blocking).await {
+                match tokio::task::spawn_blocking(crate::self_update::restart_current_exe_blocking)
+                    .await
+                {
                     Ok(Ok(())) => {
                         tracing::warn!("lunaris restart returned without exec (unexpected)");
                     }
@@ -4490,10 +4506,7 @@ mod tests {
             v["state_topic"].as_str(),
             Some(cfg.sensor_message_state_topic().as_str()),
         );
-        assert_eq!(
-            v["enabled_by_default"].as_bool(),
-            Some(false),
-        );
+        assert_eq!(v["enabled_by_default"].as_bool(), Some(false),);
     }
 
     #[test]

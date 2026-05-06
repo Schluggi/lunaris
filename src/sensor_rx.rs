@@ -46,10 +46,7 @@ pub fn ambient_from_sensor_message_line(line: &str) -> Option<(String, String)> 
         return None;
     }
     let humidity_raw: f64 = it.next()?.parse().ok()?;
-    Some((
-        format!("{:.2}", temp_raw),
-        format!("{:.2}", humidity_raw),
-    ))
+    Some((format!("{:.2}", temp_raw), format!("{:.2}", humidity_raw)))
 }
 
 fn maybe_send_sensor_message(tx: Option<&mpsc::Sender<String>>, text: &str) {
@@ -379,8 +376,7 @@ mod tests {
             ambient_from_sensor_message_line(line),
             Some(("25.60".to_string(), "38.65".to_string()))
         );
-        let line2 =
-            " changed to FW: 331463 [ambient] temp 25.5261 humidity 38.6937 percent ";
+        let line2 = " changed to FW: 331463 [ambient] temp 25.5261 humidity 38.6937 percent ";
         assert_eq!(
             ambient_from_sensor_message_line(line2),
             Some(("25.53".to_string(), "38.69".to_string()))
