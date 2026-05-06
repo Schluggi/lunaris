@@ -31,6 +31,27 @@ fn truncate_utf8_sensor_message(s: &str) -> String {
     format!("{}…", &s[..n])
 }
 
+/// Parses Sensor MCU text lines that include **`[ambient] temp … humidity …`** (firmware diagnostics).
+///
+/// Returned strings are **`{:.2}`**-rounded for MQTT state topics ([`crate::mqtt_bridge`] publishes them).
+#[must_use]
+pub fn ambient_from_sensor_message_line(line: &str) -> Option<(String, String)> {
+    let base = line.find("[ambient]")?;
+    let sub = line[base..].trim_start();
+    let (_, rest) = sub.split_once("temp ")?;
+    let mut it = rest.split_whitespace();
+    let temp_raw: f64 = it.next()?.parse().ok()?;
+    let hum_kw = it.next()?;
+    if hum_kw != "humidity" {
+        return None;
+    }
+    let humidity_raw: f64 = it.next()?.parse().ok()?;
+    Some((
+        format!("{:.2}", temp_raw),
+        format!("{:.2}", humidity_raw),
+    ))
+}
+
 fn maybe_send_sensor_message(tx: Option<&mpsc::Sender<String>>, text: &str) {
     let Some(t) = tx else {
         return;
@@ -349,6 +370,26 @@ mod tests {
         let mut buf = frame;
         drain_inbound(&mut buf, &flag, None, None, None);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn ambient_line_parsed_and_rounded() {
+        let line = "changed to FW: 421463 [ambient] temp 25.5982 humidity 38.6536 percent ";
+        assert_eq!(
+            ambient_from_sensor_message_line(line),
+            Some(("25.60".to_string(), "38.65".to_string()))
+        );
+        let line2 =
+            " changed to FW: 331463 [ambient] temp 25.5261 humidity 38.6937 percent ";
+        assert_eq!(
+            ambient_from_sensor_message_line(line2),
+            Some(("25.53".to_string(), "38.69".to_string()))
+        );
+    }
+
+    #[test]
+    fn ambient_line_requires_humidity_keyword() {
+        assert!(ambient_from_sensor_message_line("[ambient] temp 1.234 junk 5").is_none());
     }
 
     #[tokio::test]

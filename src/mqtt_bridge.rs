@@ -1,6 +1,7 @@
 //! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor) + retained **number/select/switch**
 //! vibration tuning, optional capacitance **presence**,
-//! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`), mattress climate, JSON light (I²C),
+//! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`) plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
+//! mattress climate, JSON light (I²C),
 //! MQTT **update** (self-install from GitHub `releases/latest` asset).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
@@ -25,7 +26,7 @@ use crate::frozen_frame::{get_temperatures_frame, set_target_temperature_frame, 
 use crate::frozen_rx::FrozenTemperatureUpdate;
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
 use crate::sensor_frame::{vibration_sequence_frames, AlarmPattern};
-use crate::sensor_rx::SensorCapacitanceZones;
+use crate::sensor_rx::{ambient_from_sensor_message_line, SensorCapacitanceZones};
 use crate::serial_prime;
 
 const HA_STATUS_TOPIC: &str = "homeassistant/status";
@@ -62,6 +63,8 @@ const DISCOVERY_OBJECT_ID_PRESENCE_CALIBRATION: &str = "lunaris_presence_calibra
 const DISCOVERY_OBJECT_ID_WATER_TANK: &str = "lunaris_water_tank";
 const DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE: &str = "lunaris_firmware_message";
 const DISCOVERY_OBJECT_ID_SENSOR_MESSAGE: &str = "lunaris_sensor_message";
+const DISCOVERY_OBJECT_ID_AMBIENT_TEMPERATURE: &str = "lunaris_ambient_temperature";
+const DISCOVERY_OBJECT_ID_AMBIENT_HUMIDITY: &str = "lunaris_ambient_humidity";
 const DISCOVERY_OBJECT_ID_UPDATE: &str = "lunaris_update";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
@@ -586,6 +589,28 @@ impl BridgeConfig {
         )
     }
 
+    pub fn ambient_temperature_state_topic(&self) -> String {
+        format!("{}/sensor/ambient_temperature/state", self.topic_prefix)
+    }
+
+    pub fn ambient_humidity_state_topic(&self) -> String {
+        format!("{}/sensor/ambient_humidity/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_ambient_temperature(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_AMBIENT_TEMPERATURE
+        )
+    }
+
+    pub fn discovery_topic_ambient_humidity(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_AMBIENT_HUMIDITY
+        )
+    }
+
     pub fn update_state_topic(&self) -> String {
         format!("{}/update/lunaris/state", self.topic_prefix)
     }
@@ -996,6 +1021,42 @@ fn discovery_payload_sensor_message(config: &BridgeConfig) -> String {
         "entity_category": "diagnostic",
         "enabled_by_default": false,
         "unique_id": format!("{}_sensor_message", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_ambient_temperature(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Ambient Temperature",
+        "state_topic": config.ambient_temperature_state_topic(),
+        "unit_of_measurement": "°C",
+        "device_class": "temperature",
+        "state_class": "measurement",
+        "unique_id": format!("{}_ambient_temperature", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_ambient_humidity(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Ambient Humidity",
+        "state_topic": config.ambient_humidity_state_topic(),
+        "unit_of_measurement": "%",
+        "device_class": "humidity",
+        "state_class": "measurement",
+        "unique_id": format!("{}_ambient_humidity", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -1626,6 +1687,35 @@ async fn publish_sensor_message_state(client: &AsyncClient, config: &BridgeConfi
         .await
     {
         tracing::error!(?e, "publish Sensor MCU message sensor state");
+    }
+}
+
+async fn publish_ambient_from_sensor_message(client: &AsyncClient, config: &BridgeConfig, msg: &str) {
+    let Some((temp, rh)) = ambient_from_sensor_message_line(msg) else {
+        return;
+    };
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(
+            config.ambient_temperature_state_topic(),
+            qos,
+            true,
+            temp.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish ambient temperature state");
+    }
+    if let Err(e) = client
+        .publish(
+            config.ambient_humidity_state_topic(),
+            qos,
+            true,
+            rh.as_bytes(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish ambient humidity state");
     }
 }
 
@@ -2808,6 +2898,20 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
         {
             tracing::error!(?e, "publish Sensor MCU message discovery");
         }
+        let disc_at = discovery_payload_ambient_temperature(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_ambient_temperature(), qos, true, disc_at)
+            .await
+        {
+            tracing::error!(?e, "publish ambient temperature discovery");
+        }
+        let disc_ah = discovery_payload_ambient_humidity(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_ambient_humidity(), qos, true, disc_ah)
+            .await
+        {
+            tracing::error!(?e, "publish ambient humidity discovery");
+        }
     }
     if config.sensor_device.is_some() && config.presence_discovery {
         for side in [BedSide::Left, BedSide::Right] {
@@ -3625,6 +3729,7 @@ pub async fn run(
         tokio::spawn(async move {
             while let Some(msg) = sensor_msg_rx.recv().await {
                 publish_sensor_message_state(&c, &cfg, &msg).await;
+                publish_ambient_from_sensor_message(&c, &cfg, &msg).await;
             }
         });
     }
@@ -4301,6 +4406,29 @@ mod tests {
             v["enabled_by_default"].as_bool(),
             Some(false),
         );
+    }
+
+    #[test]
+    fn ambient_discovery_matches_state_topics() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc_t = discovery_payload_ambient_temperature(&cfg);
+        let vt: serde_json::Value = serde_json::from_str(&disc_t).unwrap();
+        assert_eq!(vt["name"].as_str(), Some("Ambient Temperature"));
+        assert_eq!(
+            vt["state_topic"].as_str(),
+            Some(cfg.ambient_temperature_state_topic().as_str()),
+        );
+        assert_eq!(vt["device_class"].as_str(), Some("temperature"));
+        let disc_h = discovery_payload_ambient_humidity(&cfg);
+        let vh: serde_json::Value = serde_json::from_str(&disc_h).unwrap();
+        assert_eq!(vh["name"].as_str(), Some("Ambient Humidity"));
+        assert_eq!(
+            vh["state_topic"].as_str(),
+            Some(cfg.ambient_humidity_state_topic().as_str()),
+        );
+        assert_eq!(vh["device_class"].as_str(), Some("humidity"));
     }
 
     #[test]
