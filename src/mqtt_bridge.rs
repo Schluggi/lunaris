@@ -1,4 +1,4 @@
-//! MQTT: Home Assistant discovery, prime, per-side vibration (Sensor) + retained **number/select/switch**
+//! MQTT: Home Assistant discovery, prime, MQTT **Restart** (re-`exec` lunaris; **diagnostic**), per-side vibration (Sensor) + retained **number/select/switch**
 //! vibration tuning, optional capacitance **presence**,
 //! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`) plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
 //! mattress climate, JSON light (I²C),
@@ -37,6 +37,7 @@ const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
 const DISCOVERY_OBJECT_ID_REBOOT: &str = "lunaris_reboot";
 const DISCOVERY_OBJECT_ID_SHUTDOWN: &str = "lunaris_shutdown";
+const DISCOVERY_OBJECT_ID_RESTART_LUNARIS: &str = "lunaris_restart_lunaris";
 const DISCOVERY_OBJECT_ID_LED: &str = "lunaris_led";
 const DISCOVERY_OBJECT_ID_LED_BEHAVIOR: &str = "lunaris_led_behavior";
 const DISCOVERY_OBJECT_ID_CLIMATE_LEFT: &str = "lunaris_climate_left";
@@ -262,6 +263,17 @@ impl BridgeConfig {
         format!(
             "{}/button/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_SHUTDOWN
+        )
+    }
+
+    pub fn restart_lunaris_command_topic(&self) -> String {
+        format!("{}/button/restart_lunaris/set", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_restart_lunaris(&self) -> String {
+        format!(
+            "{}/button/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_RESTART_LUNARIS
         )
     }
 
@@ -769,6 +781,25 @@ fn discovery_payload_shutdown_button(config: &BridgeConfig) -> String {
         "entity_category": "diagnostic",
         "icon": "mdi:power",
         "unique_id": format!("{}_shutdown", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_restart_lunaris_button(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Restart",
+        "command_topic": config.restart_lunaris_command_topic(),
+        "payload_press": config.payload_press,
+        "entity_category": "diagnostic",
+        "enabled_by_default": true,
+        "icon": "mdi:cached",
+        "unique_id": format!("{}_restart_lunaris", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -2725,6 +2756,18 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     {
         tracing::error!(?e, "publish shutdown button discovery");
     }
+    let disc_restart_lunaris = discovery_payload_restart_lunaris_button(config);
+    if let Err(e) = client
+        .publish(
+            config.discovery_topic_restart_lunaris(),
+            qos,
+            true,
+            disc_restart_lunaris,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish restart lunaris button discovery");
+    }
     {
         let disc = discovery_payload_deviceinfo_device_label(config);
         if let Err(e) = client
@@ -3110,6 +3153,12 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     if let Err(e) = client.subscribe(config.shutdown_command_topic(), qos).await {
         tracing::error!(?e, "subscribe shutdown command topic");
     }
+    if let Err(e) = client
+        .subscribe(config.restart_lunaris_command_topic(), qos)
+        .await
+    {
+        tracing::error!(?e, "subscribe restart_lunaris command topic");
+    }
     if config.self_update_enabled() {
         if let Err(e) = client.subscribe(config.update_command_topic(), qos).await {
             tracing::error!(?e, "subscribe self-update command topic");
@@ -3406,6 +3455,45 @@ async fn handle_publish(
             } else {
                 tracing::warn!("pod shutdown command executed");
             }
+        }
+        return;
+    }
+
+    if p.topic == config.restart_lunaris_command_topic() {
+        let expected = config.payload_press.as_bytes();
+        if p.payload.as_ref() == expected {
+            publish_json_result(
+                client,
+                config,
+                "restart_lunaris",
+                "success",
+                "lunaris restart requested",
+            )
+            .await;
+            let c = client.clone();
+            let cfg = config.clone();
+            tokio::spawn(async move {
+                match tokio::task::spawn_blocking(crate::self_update::restart_current_exe_blocking).await {
+                    Ok(Ok(())) => {
+                        tracing::warn!("lunaris restart returned without exec (unexpected)");
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(%e, "lunaris restart failed");
+                        publish_json_result(&c, &cfg, "restart_lunaris", "error", &e).await;
+                    }
+                    Err(e) => {
+                        tracing::error!(?e, "lunaris restart join failed");
+                        publish_json_result(
+                            &c,
+                            &cfg,
+                            "restart_lunaris",
+                            "error",
+                            &format!("task join failed: {e:?}"),
+                        )
+                        .await;
+                    }
+                }
+            });
         }
         return;
     }
@@ -4539,6 +4627,21 @@ mod tests {
             v["command_topic"].as_str(),
             Some(cfg.shutdown_command_topic().as_str()),
         );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+    }
+
+    #[test]
+    fn restart_lunaris_button_discovery_matches_command_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_restart_lunaris_button(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.restart_lunaris_command_topic().as_str()),
+        );
+        assert_eq!(v["enabled_by_default"].as_bool(), Some(true));
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
     }
 

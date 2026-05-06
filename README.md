@@ -77,6 +77,7 @@ Using custom firmware or low-level hardware control may void warranties, break t
 | Presence Baseline Zones | sensor | Yes | Raw saved calibration snapshot for nerds/support; not usually needed daily. |
 | System Uptime | sensor | Yes | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
 | Reboot | button | No | Restarts the pod. |
+| Restart | button | No | Restarts the lunaris process (`exec` same binary and arguments; closes serial FDs first). |
 | Shutdown | button | No | Powers off the pod. |
 | Request Temperatures | button | No | Ask the pod to refresh its temperature readings (troubleshooting / curiosity). |
 
