@@ -10,6 +10,8 @@ Target hardware: **Eight Sleep Pod 4** — the protocol is modeled in code/repos
 
 **Deploy target:** Pod OS is **Linux aarch64** (e.g. “Eight Layer”, `uname -m` → `aarch64`). GitHub **releases** build `**aarch64-unknown-linux-musl`** (static musl via `**cargo zigbuild**`) so the binary does **not** depend on the Pod’s **glibc** version — cross-building `**aarch64-unknown-linux-gnu**` on a modern Ubuntu often produces `**GLIBC_2.xx not found**` on older Pod images. See **README** and `[.cargo/config.toml](.cargo/config.toml)`. Running native `x86_64` builds on the Pod → `Exec format error`.
 
+**MQTT TLS:** **`rumqttc` 0.25** pulls **`rustls` 0.23** with **`rustls-webpki` 0.103.x** (Web PKI validation on the TLS connection). **`ureq`** self-update stays **`native-tls`** + **`openssl-sys` vendored**. **`rumqttc`** also depends on **`rustls-webpki` ^0.102** for bundled wire data, so **`Cargo.lock`** may list **two** `rustls-webpki` versions until `rumqttc` widens that range.
+
 ## Architecture (brief)
 
 
@@ -44,7 +46,7 @@ Typical MQTT topics: `…/button/prime/set`, `…/button/request_get_temperature
 
 ## Conventions for changes
 
-- **Git commits (Conventional Commits / semantic-release style):** Use [Conventional Commits](https://www.conventionalcommits.org/) so messages work with **commitlint** and match what **semantic-release** expects — e.g. `feat:`, `fix:`, `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `perf:`; breaking changes via `feat!: …` or a `BREAKING CHANGE:` footer. This repo does **not** run the npm **semantic-release** tool; `[.github/workflows/release.yml](.github/workflows/release.yml)` still requires semver-relevant commits on push to `**main`/`master`** and now bumps by commit type since the previous tag: **major** for breaking changes (`BREAKING CHANGE:` on its own line in the commit message, or `!` in a Conventional Commit header), **minor** for `**feat:**`, **patch** for `**fix:**`. `**workflow_dispatch**` still forces a release and defaults to a patch bump.
+- **Git commits (Conventional Commits / semantic-release style):** Use [Conventional Commits](https://www.conventionalcommits.org/) so messages work with **commitlint** and match what **semantic-release** expects — e.g. `feat:`, `fix:`, `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `perf:`; breaking changes via `feat!: …` or **`feat:`** plus a `BREAKING CHANGE:` footer on that commit. This repo does **not** run the npm **semantic-release** tool; `[.github/workflows/release.yml](.github/workflows/release.yml)` on push to `**main`/`master`** publishes **only** when a commit in the since-tag range has a **`feat:`** or **`fix:`** subject (`**chore:`**, `**docs:`**, etc. do **not** trigger a release); bump rules: **major** only for **feat** breaking (`feat!:`, or `feat:` + footer), **minor** for non-breaking `**feat:**`, **patch** for `**fix:**` (including `fix:` with a `BREAKING CHANGE:` footer — still patch). `**workflow_dispatch**` still forces a release and defaults to a patch bump.
 - **Language:** User-facing text (Home Assistant discovery names, README, `docs/`, CLI help) is **English only**.
 - **License:** GPL-3.0 (`[LICENSE](LICENSE)`). Code/framing traceable to opensleep → keep attribution/source notices in affected files.
 - **Scope:** Stay focused (no large drive-by refactors). Add new features (TLS, more entities) deliberately and document them.
@@ -55,7 +57,10 @@ Typical MQTT topics: `…/button/prime/set`, `…/button/request_get_temperature
 
 ## Commands
 
+After **any Rust source edit**, run **`cargo fmt --check`** (or `cargo fmt` to apply). CI fails if formatting disagrees with rustfmt — same check as `cargo fmt --check`.
+
 ```bash
+cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release

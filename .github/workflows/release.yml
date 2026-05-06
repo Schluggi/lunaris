@@ -59,34 +59,56 @@ jobs:
           PREV="${{ steps.prev.outputs.tag }}"
           if [ -n "$PREV" ]; then
             RANGE="${PREV}..HEAD"
+            REV_RANGE="${PREV}..HEAD"
           else
             RANGE="HEAD"
+            REV_RANGE="HEAD"
           fi
-          # Full commit message per commit (subject + body). Breaking footer must start its line,
-          # matching Conventional Commits — avoids prose like "see BREAKING CHANGE: …" mid-sentence.
-          LOG="$(git log "$RANGE" --no-merges --format='%s%n%b')"
+          # Automated release only when a commit **subject line** is feat: or fix: (Conventional Commits).
+          # chore/docs/ci/etc. never gate a release; `git log --grep` is avoided because Git's multiline
+          # ^ anchor can match body lines (e.g. "fix:" in a chore commit message) and falsely trigger.
+          #
+          # Major bump only for **feat** breaking (feat!: or feat: … + BREAKING CHANGE footer on that
+          # same commit). fix: + BREAKING CHANGE stays patch; other types with ! or footer do not major.
+          HAS_FEAT_BREAKING=false
+          HAS_FEAT_MINOR=false
+          HAS_FIX=false
+          while IFS= read -r rev; do
+            [ -z "$rev" ] && continue
+            subject=$(git log -1 --format='%s' "$rev")
+            body=$(git log -1 --format='%b' "$rev")
+            if printf '%s\n' "$subject" | grep -Eq '^feat(\([^)]*\))?!:'; then
+              HAS_FEAT_BREAKING=true
+            elif printf '%s\n' "$subject" | grep -Eq '^feat(\([^)]*\))?:' &&
+                 printf '%s\n' "$body" | grep -Eq '^[[:space:]]*BREAKING CHANGE:'; then
+              HAS_FEAT_BREAKING=true
+            elif printf '%s\n' "$subject" | grep -Eq '^feat(\([^)]*\))?:'; then
+              HAS_FEAT_MINOR=true
+            elif printf '%s\n' "$subject" | grep -Eq '^fix(\([^)]*\))?:'; then
+              HAS_FIX=true
+            fi
+          done < <(git rev-list --no-merges "$REV_RANGE")
 
-          if printf '%s' "$LOG" | grep -Eq '^[[:space:]]*BREAKING CHANGE:' ||
-             git log "$RANGE" --no-merges --extended-regexp --grep='^[a-z]+(\([^)]*\))?!:' -1 -q; then
+          if [ "$HAS_FEAT_BREAKING" = true ]; then
             echo "release=true" >> "$GITHUB_OUTPUT"
             echo "bump=major" >> "$GITHUB_OUTPUT"
-            echo "Breaking change found in ${RANGE} — major release."
-          elif git log "$RANGE" --no-merges --extended-regexp --grep='^feat(\([^)]*\))?:' -1 -q; then
+            echo "feat breaking change in ${RANGE} — major release."
+          elif [ "$HAS_FEAT_MINOR" = true ]; then
             echo "release=true" >> "$GITHUB_OUTPUT"
             echo "bump=minor" >> "$GITHUB_OUTPUT"
             echo "feat commit(s) found in ${RANGE} — minor release."
-          elif git log "$RANGE" --no-merges --extended-regexp --grep='^fix(\([^)]*\))?:' -1 -q; then
+          elif [ "$HAS_FIX" = true ]; then
             echo "release=true" >> "$GITHUB_OUTPUT"
             echo "bump=patch" >> "$GITHUB_OUTPUT"
             echo "fix commit(s) found in ${RANGE} — patch release."
           else
             echo "release=false" >> "$GITHUB_OUTPUT"
-            echo "No fix/feat/breaking commits in ${RANGE} — skipping release."
+            echo "No fix/feat commits in ${RANGE} — skipping release."
           fi
 
       - name: Skip release (no semver-relevant commits)
         if: steps.gate.outputs.release != 'true'
-        run: echo "::notice::Release skipped — no fix, feat, or breaking change commits since the previous tag."
+        run: echo "::notice::Release skipped — no fix or feat commits since the previous tag."
 
       - uses: dtolnay/rust-toolchain@stable
         if: steps.gate.outputs.release == 'true'
@@ -248,7 +270,10 @@ jobs:
               ctype = (m.group(1).lower() if m else None)
               has_bang = bool(m and m.group(2))
 
-              if has_bang or breaking_body.search(body):
+              feat_breaking = ctype == "feat" and (
+                  has_bang or bool(breaking_body.search(body))
+              )
+              if feat_breaking:
                   key = "breaking"
               elif ctype == "feat":
                   key = "feat"
