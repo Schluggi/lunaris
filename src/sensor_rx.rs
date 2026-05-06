@@ -143,9 +143,9 @@ fn maybe_send_sensor_message(tx: Option<&mpsc::Sender<String>>, text: &str) {
     }
     let body = truncate_utf8_sensor_message(text);
     if let Err(e) = t.try_send(body) {
-        tracing::warn!(
+        tracing::trace!(
             ?e,
-            "Sensor MCU message (0x07) dropped — MQTT bridge not keeping up; cover button / sensor text may miss lines"
+            "Sensor MCU message (0x07) dropped (MQTT Sensor Message channel lag)"
         );
     }
 }
@@ -288,6 +288,9 @@ fn parse_capacitance(payload: &[u8]) -> Option<SensorCapacitanceZones> {
 /// `0x07` MCU strings: routine `FW:` status (sampling, therm, …) is noisy at WARN — reserve WARN for
 /// lines that plausibly explain alarm / vibration behaviour.
 fn mcu_text_is_vibration_hint(t: &str) -> bool {
+    if cover_button_dismiss_tap_count_from_sensor_message(t).is_some() {
+        return false;
+    }
     let s = t.to_ascii_lowercase();
     let fw_failure_hint = s.contains("fw:") && (s.contains("error") || fw_line_fail_hint(&s));
 
@@ -408,6 +411,13 @@ mod tests {
         assert!(mcu_text_is_vibration_hint("FW: alarm [left] off"));
         assert!(mcu_text_is_vibration_hint("something vibration disabled"));
         assert!(mcu_text_is_vibration_hint("SetAlarm rejected"));
+    }
+
+    #[test]
+    fn mcu_text_cover_dismiss_line_is_not_vibration_hint() {
+        assert!(!mcu_text_is_vibration_hint(
+            "FW: 20628 [lisR] dismissing alarm (1 taps)"
+        ));
     }
 
     #[test]
