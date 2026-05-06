@@ -76,7 +76,7 @@ Using custom firmware or low-level hardware control may void warranties, break t
 | Frozen Message | sensor | Yes | Text, send by the Frozen MCU. |
 | Sensor Message | sensor | Yes | Text, send by the Sensor MCU. |
 | Presence Baseline Zones | sensor | Yes | Raw saved calibration snapshot for nerds/support; not usually needed daily. |
-| System Uptime | sensor | Yes | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
+| System Uptime | sensor | No | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
 | Frozen Link | binary_sensor | No | `ON` when valid Frozen MCU traffic was decoded. |
 | Sensor Link | binary_sensor | No | `ON` when valid Sensor MCU traffic was decoded. |
 | Reboot Pod | button | No | Restarts the pod. |

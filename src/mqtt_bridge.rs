@@ -1256,7 +1256,7 @@ fn discovery_payload_system_uptime(config: &BridgeConfig) -> String {
         "state_topic": config.system_uptime_state_topic(),
         "icon": "mdi:clock-start",
         "entity_category": "diagnostic",
-        "enabled_by_default": false,
+        "enabled_by_default": true,
         "device_class": "timestamp",
         "unique_id": format!("{}_system_uptime", config.device_identifier),
         "device": config.device_json(),
@@ -4961,7 +4961,7 @@ mod tests {
             Some(cfg.system_uptime_state_topic().as_str()),
         );
         assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
-        assert_eq!(v["enabled_by_default"].as_bool(), Some(false));
+        assert_eq!(v["enabled_by_default"].as_bool(), Some(true));
         assert_eq!(v["device_class"].as_str(), Some("timestamp"));
         assert_eq!(v["name"].as_str(), Some("System Up Since"));
     }
