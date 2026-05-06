@@ -1588,6 +1588,9 @@ const PRESENCE_BASELINE_DELTA_MAX: u16 = 2000;
 /// opensleep [`PresenceConfig.debounce_count`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/presence.rs) (`DEFAULT_DEBOUNCE`).
 const PRESENCE_DEBOUNCE_FRAMES: u8 = 5;
 
+/// Home Assistant MQTT `binary_sensor`: `payload == "None"` → state **unknown** (`PAYLOAD_NONE` in HA Core).
+const PRESENCE_BINARY_SENSOR_STATE_UNKNOWN: &str = "None";
+
 #[derive(Clone, Copy, Debug, Default)]
 struct PresenceInferenceState {
     baselines: Option<[u16; 6]>,
@@ -1768,14 +1771,14 @@ async fn handle_presence_calibrate_press(
         tracing::warn!("presence calibration: no Sensor/presence bridge (ignored)");
         return;
     };
-    if let Err(e) = tx.try_send(()) {
-        tracing::warn!(?e, "presence calibration notify dropped (MQTT handler lag)");
+    if let Err(e) = tx.send(()).await {
+        tracing::warn!(?e, "presence calibration notify failed (channel closed)");
         publish_json_result(
             client,
             config,
             "calibrate_presence",
             "error",
-            &format!("calibration channel saturated: {e:?}"),
+            &format!("calibration notify failed: {e:?}"),
         )
         .await;
         return;
@@ -1862,6 +1865,20 @@ async fn publish_presence_readings(
     for (topic, payload) in publishes {
         if let Err(e) = client.publish(topic, qos, true, payload).await {
             tracing::error!(?e, "publish presence occupancy state");
+        }
+    }
+}
+
+async fn publish_presence_readings_unknown(client: &AsyncClient, config: &BridgeConfig) {
+    let qos = QoS::AtLeastOnce;
+    let payload = PRESENCE_BINARY_SENSOR_STATE_UNKNOWN;
+    for topic in [
+        config.presence_state_topic(BedSide::Left),
+        config.presence_state_topic(BedSide::Right),
+        config.presence_any_state_topic(),
+    ] {
+        if let Err(e) = client.publish(topic, qos, true, payload.as_bytes()).await {
+            tracing::error!(?e, "publish presence occupancy unknown state");
         }
     }
 }
@@ -4234,6 +4251,7 @@ pub async fn run(
                             cal_until = Some(Instant::now() + cal_wait);
                             cal_samples.clear();
                             publish_presence_calibration_running_state(&c, &cfg, true).await;
+                            publish_presence_readings_unknown(&c, &cfg).await;
                         }
                         z_opt = cap_rx.recv() => {
                             let Some(z) = z_opt else {
@@ -4269,18 +4287,7 @@ pub async fn run(
                                                 *g = Some(nb);
                                             }
                                             inference.set_baselines(nb);
-                                            publish_presence_cap_threshold_state(
-                                                &c, &cfg, tuned_cap,
-                                            )
-                                            .await;
-                                            publish_presence_baseline_delta_state(
-                                                &c, &cfg, tuned_delta,
-                                            )
-                                            .await;
-                                            publish_presence_baseline_zones_state(
-                                                &c, &cfg, &nb,
-                                            )
-                                            .await;
+                                            publish_presence_bootstrap_finalize(&c, &cfg).await;
                                             tracing::info!(
                                                 baseline = ?nb,
                                                 frames = cal_samples.len(),
@@ -4297,6 +4304,7 @@ pub async fn run(
                                             tracing::error!(
                                                 "presence calibration window ended without capacitance samples — MCU quiet or wrong baud; baseline unchanged"
                                             );
+                                            prev_publish = None;
                                         }
                                     }
                                     cal_samples.clear();
@@ -4322,6 +4330,9 @@ pub async fn run(
                                     right_on,
                                     calibrating,
                                 );
+                            }
+                            if calibrating {
+                                continue;
                             }
                             if prev_publish == Some((left_on, right_on)) {
                                 continue;
@@ -5261,6 +5272,11 @@ mod tests {
             Some([200, 201, 202, 203, 204, 205])
         );
         assert!(parse_presence_baseline_zones_payload(b"").is_none());
+    }
+
+    #[test]
+    fn presence_binary_unknown_payload_matches_ha_mqtt_payload_none() {
+        assert_eq!(PRESENCE_BINARY_SENSOR_STATE_UNKNOWN, "None");
     }
 
     #[test]
