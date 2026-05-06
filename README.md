@@ -76,6 +76,8 @@ Using custom firmware or low-level hardware control may void warranties, break t
 | Ambient Humidity | sensor | No | Relative humidity [%] from the same Sensor **`[ambient]`** lines (two decimals). |
 | Presence Baseline Zones | sensor | Yes | Raw saved calibration snapshot for nerds/support; not usually needed daily. |
 | System Uptime | sensor | Yes | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
+| Frozen Link | binary_sensor | No | **ON** when valid Frozen MCU traffic was decoded (firmware wake). |
+| Sensor Link | binary_sensor | No | **ON** after `0x7E` framing appears on Sensor RX (or **OFF** if the Sensor UART did not open). |
 | Reboot Pod | button | No | Restarts the pod. |
 | Restart Lunaris | button | No | Restarts the lunaris process (`exec` same binary and arguments; closes serial FDs first). |
 | Shutdown Pod | button | No | Powers off the pod. |

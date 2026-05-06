@@ -31,6 +31,8 @@ pub enum SensorLinkError {
 #[derive(Debug)]
 pub struct SensorLinkHandle {
     pub tx: mpsc::Sender<Vec<Vec<u8>>>,
+    /// `true` after inbound Sensor bytes include `0x7E` (opensleep‑style frame sync on RX at this baud).
+    pub sensor_rx_framing: Arc<AtomicBool>,
     /// UTF‑8 bodies of Sensor `0x07` MCU text (MQTT **Sensor Message** text sensor).
     pub sensor_message_rx: mpsc::Receiver<String>,
 }
@@ -45,6 +47,8 @@ pub fn spawn(
 ) -> SensorLinkHandle {
     let (tx, rx) = mpsc::channel::<Vec<Vec<u8>>>(32);
     let (sensor_mcu_tx, sensor_mcu_rx) = mpsc::channel::<String>(128);
+    let sensor_rx_framing = Arc::new(AtomicBool::new(false));
+    let sensor_rx_framing_reader = sensor_rx_framing.clone();
     tokio::spawn(async move {
         if let Err(e) = run(
             device,
@@ -55,6 +59,7 @@ pub fn spawn(
             capacitance_tx,
             capacitance_parse_diag,
             sensor_mcu_tx,
+            sensor_rx_framing_reader,
         )
         .await
         {
@@ -63,6 +68,7 @@ pub fn spawn(
     });
     SensorLinkHandle {
         tx,
+        sensor_rx_framing,
         sensor_message_rx: sensor_mcu_rx,
     }
 }
@@ -226,6 +232,7 @@ async fn run(
     capacitance_tx: Option<mpsc::Sender<crate::sensor_rx::SensorCapacitanceZones>>,
     capacitance_parse_diag: Option<std::sync::Arc<PresenceCapDiag>>,
     sensor_mcu_tx: mpsc::Sender<String>,
+    sensor_rx_framing: Arc<AtomicBool>,
 ) -> Result<(), SensorLinkError> {
     let path = device.to_string_lossy().to_string();
     let port = open_sensor_port(&path, baud, bootloader_handshake).await?;
@@ -246,6 +253,9 @@ async fn run(
                     break;
                 }
                 Ok(n) => {
+                    if chunk[..n].iter().any(|&b| b == 0x7E) {
+                        sensor_rx_framing.store(true, Ordering::SeqCst);
+                    }
                     if n > 0 && log_first_rx {
                         log_first_rx = false;
                         let has_7e = chunk[..n].iter().any(|&b| b == 0x7E);

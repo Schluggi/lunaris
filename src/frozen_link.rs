@@ -27,6 +27,8 @@ pub enum FrozenLinkError {
 #[derive(Debug)]
 pub struct FrozenLinkHandle {
     pub tx: mpsc::Sender<Vec<u8>>,
+    /// `true` once the Frozen MCU answers with CRC‑valid frames in firmware mode (`0x81` pong, `0x90` jump ack, etc.).
+    pub frozen_mcu_connected: Arc<AtomicBool>,
     /// Current water-side and heatsink temperatures from inbound Frozen frames (`0x41` / `0xC1`).
     pub temperature_rx: mpsc::Receiver<FrozenTemperatureUpdate>,
     /// Frozen `0x07` water tank present / removed (for MQTT **Water Tank**).
@@ -49,6 +51,7 @@ pub fn spawn(device: PathBuf, baud: u32) -> FrozenLinkHandle {
     });
     FrozenLinkHandle {
         tx,
+        frozen_mcu_connected: awake,
         temperature_rx: temp_rx,
         water_tank_rx: water_rx,
         firmware_message_rx: fw_rx,

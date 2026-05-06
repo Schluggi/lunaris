@@ -33,6 +33,8 @@ const HA_STATUS_TOPIC: &str = "homeassistant/status";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_LABEL: &str = "lunaris_deviceinfo_device_label";
 const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "lunaris_deviceinfo_device_id";
 const DISCOVERY_OBJECT_ID_SYSTEM_UPTIME: &str = "lunaris_system_uptime";
+const DISCOVERY_OBJECT_ID_FROZEN_USART_LINK: &str = "lunaris_frozen_usart_link";
+const DISCOVERY_OBJECT_ID_SENSOR_USART_FRAMING: &str = "lunaris_sensor_usart_framing";
 const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
 const DISCOVERY_OBJECT_ID_REBOOT: &str = "lunaris_reboot";
@@ -671,6 +673,28 @@ impl BridgeConfig {
         )
     }
 
+    pub fn frozen_usart_link_state_topic(&self) -> String {
+        format!("{}/binary_sensor/frozen_usart_link/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_frozen_usart_link(&self) -> String {
+        format!(
+            "{}/binary_sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_FROZEN_USART_LINK
+        )
+    }
+
+    pub fn sensor_usart_framing_state_topic(&self) -> String {
+        format!("{}/binary_sensor/sensor_usart_framing/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_sensor_usart_framing(&self) -> String {
+        format!(
+            "{}/binary_sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_SENSOR_USART_FRAMING
+        )
+    }
+
     pub fn result_topic(&self) -> String {
         format!("{}/result", self.topic_prefix)
     }
@@ -1174,6 +1198,46 @@ fn discovery_payload_system_uptime(config: &BridgeConfig) -> String {
     .to_string()
 }
 
+fn discovery_payload_frozen_usart_link(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Frozen Link",
+        "state_topic": config.frozen_usart_link_state_topic(),
+        "icon": "mdi:connection",
+        "entity_category": "diagnostic",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device_class": "connectivity",
+        "unique_id": format!("{}_frozen_usart_link", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn discovery_payload_sensor_usart_framing(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Sensor Link",
+        "state_topic": config.sensor_usart_framing_state_topic(),
+        "icon": "mdi:connection",
+        "entity_category": "diagnostic",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device_class": "connectivity",
+        "unique_id": format!("{}_sensor_usart_framing", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 async fn read_system_uptime_secs() -> Option<u64> {
     let content = tokio::fs::read_to_string("/proc/uptime").await.ok()?;
     let raw = content.split_whitespace().next()?;
@@ -1251,6 +1315,57 @@ async fn publish_system_uptime_state(client: &AsyncClient, config: &BridgeConfig
         .await
     {
         tracing::error!(?e, "publish system uptime state");
+    }
+}
+
+async fn publish_frozen_usart_link_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    frozen_mcu_connected: &AtomicBool,
+) {
+    let payload = if frozen_mcu_connected.load(Ordering::Relaxed) {
+        "ON"
+    } else {
+        "OFF"
+    };
+    if let Err(e) = client
+        .publish(
+            config.frozen_usart_link_state_topic(),
+            QoS::AtLeastOnce,
+            false,
+            payload,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Frozen USART link state");
+    }
+}
+
+async fn publish_sensor_usart_framing_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    sensor_rx_framing: Option<&Arc<AtomicBool>>,
+) {
+    let payload = match sensor_rx_framing {
+        Some(a) => {
+            if a.load(Ordering::Relaxed) {
+                "ON"
+            } else {
+                "OFF"
+            }
+        }
+        None => "OFF",
+    };
+    if let Err(e) = client
+        .publish(
+            config.sensor_usart_framing_state_topic(),
+            QoS::AtLeastOnce,
+            false,
+            payload,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Sensor USART framing state");
     }
 }
 
@@ -1903,6 +2018,10 @@ struct PublishHandlerState {
     climate_right: Arc<Mutex<ClimateSideState>>,
     /// Notify presence task to start baseline sampling (MQTT **Calibrate presence**).
     presence_calibrate_tx: Option<mpsc::Sender<()>>,
+    /// Shared with [`crate::frozen_link`] — `true` when CRC‑valid Frozen firmware traffic was decoded.
+    frozen_mcu_connected: Arc<AtomicBool>,
+    /// Shared with [`crate::sensor_link`] when the Sensor UART is open — `true` after `0x7E` appears on RX.
+    sensor_rx_framing: Option<Arc<AtomicBool>>,
 }
 
 async fn apply_vibration_intensity_mqtt(
@@ -2725,7 +2844,12 @@ async fn self_update_version_poll_loop(
     }
 }
 
-async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfig) {
+async fn publish_discovery_and_online(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    frozen_mcu_connected: &AtomicBool,
+    sensor_rx_framing: Option<&Arc<AtomicBool>>,
+) {
     let qos = QoS::AtLeastOnce;
     let disc_btn = discovery_payload_button(config);
     if let Err(e) = client
@@ -2828,6 +2952,22 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
             tracing::error!(?e, "publish system uptime discovery");
         }
         publish_system_uptime_state(client, config).await;
+        let disc = discovery_payload_frozen_usart_link(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_frozen_usart_link(), qos, true, disc)
+            .await
+        {
+            tracing::error!(?e, "publish Frozen USART link discovery");
+        }
+        let disc = discovery_payload_sensor_usart_framing(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_sensor_usart_framing(), qos, true, disc)
+            .await
+        {
+            tracing::error!(?e, "publish Sensor USART framing discovery");
+        }
+        publish_frozen_usart_link_state(client, config, frozen_mcu_connected).await;
+        publish_sensor_usart_framing_state(client, config, sensor_rx_framing).await;
     }
     if config.i2c_device.is_some() {
         let disc_led = discovery_payload_light(config);
@@ -3150,7 +3290,7 @@ async fn publish_discovery_and_online(client: &AsyncClient, config: &BridgeConfi
     }
 }
 
-async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
+async fn setup_session(client: &AsyncClient, config: &BridgeConfig, st: &PublishHandlerState) {
     let qos = QoS::AtLeastOnce;
     if let Err(e) = client.subscribe(config.command_topic(), qos).await {
         tracing::error!(?e, "subscribe prime command topic");
@@ -3272,7 +3412,13 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig) {
     if let Err(e) = client.subscribe(HA_STATUS_TOPIC, qos).await {
         tracing::error!(?e, "subscribe Home Assistant birth topic");
     }
-    publish_discovery_and_online(client, config).await;
+    publish_discovery_and_online(
+        client,
+        config,
+        st.frozen_mcu_connected.as_ref(),
+        st.sensor_rx_framing.as_ref(),
+    )
+    .await;
     if config.self_update_enabled() {
         let c = client.clone();
         let cfg = config.clone();
@@ -3744,11 +3890,18 @@ async fn handle_publish(
 
     if p.topic == HA_STATUS_TOPIC && p.payload.as_ref() == b"online" {
         tracing::debug!("Home Assistant online; republishing discovery");
-        publish_discovery_and_online(client, config).await;
+        publish_discovery_and_online(
+            client,
+            config,
+            st.frozen_mcu_connected.as_ref(),
+            st.sensor_rx_framing.as_ref(),
+        )
+        .await;
     }
 }
 
 /// Run the MQTT event loop until a fatal error (or process kill).
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: BridgeConfig,
     prime_frame: Arc<[u8]>,
@@ -3757,6 +3910,8 @@ pub async fn run(
     frozen_firmware_message_rx: mpsc::Receiver<String>,
     capacitance_rx: Option<mpsc::Receiver<SensorCapacitanceZones>>,
     sensor_message_rx: Option<mpsc::Receiver<String>>,
+    frozen_mcu_connected: Arc<AtomicBool>,
+    sensor_rx_framing: Option<Arc<AtomicBool>>,
 ) {
     let (presence_calibrate_tx, presence_calibrate_rx) =
         if config.presence_discovery && capacitance_rx.is_some() {
@@ -3774,6 +3929,8 @@ pub async fn run(
         climate_left: Arc::new(Mutex::new(ClimateSideState::default())),
         climate_right: Arc::new(Mutex::new(ClimateSideState::default())),
         presence_calibrate_tx: presence_calibrate_tx.clone(),
+        frozen_mcu_connected,
+        sensor_rx_framing,
     };
 
     let mut opts = MqttOptions::new(
@@ -3846,6 +4003,29 @@ pub async fn run(
         loop {
             publish_system_uptime_state(&c, &cfg).await;
             uptime_interval.tick().await;
+        }
+    });
+
+    let c = client.clone();
+    let cfg = config.clone();
+    let hs_usart = handler_state.clone();
+    tokio::spawn(async move {
+        let mut tick = interval(Duration::from_secs(5));
+        tick.tick().await;
+        loop {
+            publish_frozen_usart_link_state(
+                &c,
+                &cfg,
+                hs_usart.frozen_mcu_connected.as_ref(),
+            )
+            .await;
+            publish_sensor_usart_framing_state(
+                &c,
+                &cfg,
+                hs_usart.sensor_rx_framing.as_ref(),
+            )
+            .await;
+            tick.tick().await;
         }
     });
 
@@ -4074,7 +4254,7 @@ pub async fn run(
                     let cfg = config.clone();
                     let hs = handler_state.clone();
                     tokio::spawn(async move {
-                        setup_session(&c, &cfg).await;
+                        setup_session(&c, &cfg, &hs).await;
 
                         // Broker retain replay (climate/light/vibration/presence **`state_topic`** + led_behavior)
                         // while `mqtt_ha_state_bootstrap` is observed in `handle_publish`.
@@ -4599,6 +4779,33 @@ mod tests {
         assert_eq!(v["enabled_by_default"].as_bool(), Some(false));
         assert_eq!(v["device_class"].as_str(), Some("timestamp"));
         assert_eq!(v["name"].as_str(), Some("System Up Since"));
+    }
+
+    #[test]
+    fn usart_link_diagnostic_discovery_matches_state_topics() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc_f = discovery_payload_frozen_usart_link(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc_f).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.frozen_usart_link_state_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+        assert_eq!(v["device_class"].as_str(), Some("connectivity"));
+        assert_eq!(v["name"].as_str(), Some("Frozen Link"));
+        assert_eq!(v["icon"].as_str(), Some("mdi:connection"));
+        let disc_s = discovery_payload_sensor_usart_framing(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc_s).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.sensor_usart_framing_state_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+        assert_eq!(v["device_class"].as_str(), Some("connectivity"));
+        assert_eq!(v["name"].as_str(), Some("Sensor Link"));
+        assert_eq!(v["icon"].as_str(), Some("mdi:connection"));
     }
 
     #[test]
