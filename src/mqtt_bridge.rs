@@ -1909,11 +1909,13 @@ async fn publish_sensor_message_state(client: &AsyncClient, config: &BridgeConfi
 
 async fn publish_cover_button_sensors_rest(client: &AsyncClient, config: &BridgeConfig) {
     let qos = QoS::AtLeastOnce;
+    // Retained so HA (re)connects with a known idle value (`0` + unit **taps** → **0 taps**), not **unknown**.
+    let retain = true;
     if let Err(e) = client
         .publish(
             config.cover_button_left_state_topic(),
             qos,
-            false,
+            retain,
             COVER_BUTTON_SENSOR_STATE_REST.as_bytes(),
         )
         .await
@@ -1924,7 +1926,7 @@ async fn publish_cover_button_sensors_rest(client: &AsyncClient, config: &Bridge
         .publish(
             config.cover_button_right_state_topic(),
             qos,
-            false,
+            retain,
             COVER_BUTTON_SENSOR_STATE_REST.as_bytes(),
         )
         .await
@@ -1959,7 +1961,7 @@ async fn pulse_cover_button_tap_count(
         .publish(
             topic.as_str(),
             qos,
-            false,
+            true,
             COVER_BUTTON_SENSOR_STATE_REST.as_bytes(),
         )
         .await
