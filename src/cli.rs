@@ -157,6 +157,14 @@ pub struct Cli {
     /// Self-update version poll interval in seconds (`0` disables self-update polling and hides the MQTT update entity entirely).
     #[arg(long, default_value_t = 12 * 60 * 60)]
     pub self_update_poll_secs: u64,
+
+    /// URL used by the MQTT **Internet Access** diagnostic sensor to probe reachability (HTTP **2xx** → `ON`). Default: the lunaris GitHub project page.
+    #[arg(
+        long,
+        value_name = "URL",
+        default_value = "https://github.com/Schluggi/lunaris"
+    )]
+    pub internet_access_url: String,
 }
 
 impl Cli {

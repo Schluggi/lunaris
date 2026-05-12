@@ -2,7 +2,7 @@
 //! vibration tuning, optional capacitance **presence**,
 //! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`), **Cover Button Left / Right** (**`0`..=`5`** taps from **`dismissing alarm (N taps)`**), plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
 //! mattress climate, JSON light (I²C),
-//! MQTT **update** (self-install from GitHub `releases/latest` asset), diagnostic **Internet Access** (GitHub API reachability).
+//! MQTT **update** (self-install from GitHub `releases/latest` asset), diagnostic **Internet Access** (HTTP `2xx` reachability of [`Cli::internet_access_url`](crate::cli::Cli::internet_access_url); default the lunaris GitHub project page).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
 //! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
@@ -39,7 +39,7 @@ const DISCOVERY_OBJECT_ID_SYSTEM_UPTIME: &str = "lunaris_system_uptime";
 const DISCOVERY_OBJECT_ID_FROZEN_USART_LINK: &str = "lunaris_frozen_usart_link";
 const DISCOVERY_OBJECT_ID_SENSOR_USART_FRAMING: &str = "lunaris_sensor_usart_framing";
 const DISCOVERY_OBJECT_ID_INTERNET_ACCESS: &str = "lunaris_internet_access";
-/// Interval between GitHub update-endpoint reachability checks for MQTT **Internet Access**.
+/// Interval between reachability checks for MQTT **Internet Access** (target URL configurable via [`Cli::internet_access_url`](crate::cli::Cli::internet_access_url)).
 const INTERNET_ACCESS_PROBE_INTERVAL_SECS: u64 = 60;
 const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
@@ -181,6 +181,8 @@ pub struct BridgeConfig {
     pub frozen_temperature_discovery: bool,
     /// Self-update poll interval in seconds (`0` disables polling and MQTT update entity).
     pub self_update_poll_secs: u64,
+    /// URL used by the MQTT **Internet Access** diagnostic sensor for reachability probes (HTTP **2xx** → `ON`).
+    pub internet_access_url: String,
 }
 
 impl BridgeConfig {
@@ -223,6 +225,7 @@ impl BridgeConfig {
             sensor_tx: None,
             frozen_temperature_discovery: false,
             self_update_poll_secs: cli.self_update_poll_secs,
+            internet_access_url: cli.internet_access_url.clone(),
         }
     }
 
@@ -3043,9 +3046,10 @@ async fn self_update_version_poll_loop(
 async fn internet_access_probe_loop(client: AsyncClient, config: BridgeConfig) {
     loop {
         sleep(Duration::from_secs(INTERNET_ACCESS_PROBE_INTERVAL_SECS)).await;
-        let reachable = match tokio::task::spawn_blocking(
-            crate::self_update::probe_self_update_upstream_reachable_blocking,
-        )
+        let url = config.internet_access_url.clone();
+        let reachable = match tokio::task::spawn_blocking(move || {
+            crate::self_update::probe_url_reachable_blocking(&url)
+        })
         .await
         {
             Ok(r) => r,
@@ -3197,9 +3201,10 @@ async fn publish_discovery_and_online(
         let c_net0 = client.clone();
         let cfg_net0 = config.clone();
         tokio::spawn(async move {
-            let initial_internet = match tokio::task::spawn_blocking(
-                crate::self_update::probe_self_update_upstream_reachable_blocking,
-            )
+            let url = cfg_net0.internet_access_url.clone();
+            let initial_internet = match tokio::task::spawn_blocking(move || {
+                crate::self_update::probe_url_reachable_blocking(&url)
+            })
             .await
             {
                 Ok(r) => r,
