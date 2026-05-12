@@ -28,7 +28,7 @@ ureq = { version = "2.9", default-features = false, features = ["json", "native-
 native-tls = "0.2"
 # `native-tls` → `openssl-sys`: avoid system OpenSSL (CI/cross); compile OpenSSL from source.
 openssl-sys = { version = "0.9.115", features = ["vendored"] }
-sha2 = "0.10"
+sha2 = "0.11"
 libc = "0.2"
 
 [dev-dependencies]
