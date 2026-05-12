@@ -24,7 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-serial = "5.4"
 i2cdev = "0.6"
 # Sync HTTP: `native-tls` + invalid certs (Pod has no CA bundle); not default rustls/webpki.
-ureq = { version = "2.9", default-features = false, features = ["json", "native-tls", "gzip"] }
+ureq = { version = "3.0", default-features = false, features = ["json", "native-tls", "gzip"] }
 native-tls = "0.2"
 # `native-tls` → `openssl-sys`: avoid system OpenSSL (CI/cross); compile OpenSSL from source.
 openssl-sys = { version = "0.9.115", features = ["vendored"] }
