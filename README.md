@@ -8,7 +8,7 @@ Home Assistant first approach. It supports MQTT discovery so no need for manual 
 This is an AI-fork of [opensleep](https://github.com/LiamSnow/opensleep).
 
 ## ⚠️ Disclaimer
-This project is for personal, educational, and research use. It is **not** affiliated with, endorsed by, or sponsored by Eight Sleep. “Eight Sleep” and related names are trademarks of Eight Sleep, Inc.
+This project is for personal, educational, and research use. It is not affiliated with, endorsed by, or sponsored by Eight Sleep. “Eight Sleep” and related names are trademarks of Eight Sleep, Inc.
 
 Using custom firmware or low-level hardware control may void warranties, break the vendor app, or in rare cases damage hardware. Use at your own risk!
 
@@ -34,17 +34,17 @@ Using custom firmware or low-level hardware control may void warranties, break t
 
 ## 🤔 Comparison
 
-How **Lunaris** differs from other local-control projects ([free-sleep](https://github.com/throwaway31265/free-sleep), [opensleep](https://github.com/LiamSnow/opensleep), [ninesleep](https://github.com/bobobo1618/ninesleep)):
+How Lunaris differs from other local-control projects ([free-sleep](https://github.com/throwaway31265/free-sleep), [opensleep](https://github.com/LiamSnow/opensleep), [ninesleep](https://github.com/bobobo1618/ninesleep)):
 
-| **Topic** | **Lunaris** | **[free-sleep](https://github.com/throwaway31265/free-sleep)** | **[opensleep](https://github.com/LiamSnow/opensleep)** | **[ninesleep](https://github.com/bobobo1618/ninesleep)** |
+| Topic | Lunaris | [free-sleep](https://github.com/throwaway31265/free-sleep) | [opensleep](https://github.com/LiamSnow/opensleep) | [ninesleep](https://github.com/bobobo1618/ninesleep) |
 |:---|:---|:---|:---|:---|
-| **Goal** | MQTT + Home Assistant for Pod hardware over USART | Jailbreak Pod + LAN web app and REST API | Replace vendor SOM apps; full Rust firmware on Pod | Replace `dac` only; HTTP API to frankenfirmware |
-| **Stack** | Rust | Node/Express + React (+ optional Python biometrics) | Rust | Rust |
-| **License** | GPL-3.0 | MIT | GPL-3.0 | MIT |
-| **Automation / HA** | Native MQTT discovery, no extra config | REST / custom integration | MQTT + RON config | REST / HTTP |
-| **Built-in web UI** | No (HA is the UI) | Yes | No | No |
-| **Configuration** | CLI flags (ports, broker, pod model) | App + JSON storage | `.ron` files | Driven by HTTP clients |
-| **Pod generations** | **Pod 4** focus; Pod 3/5 best-effort | Pod 3–5 documented | Pod 3 tested; Pod 4/5 untested | Pod 3 documented |
+| Goal | MQTT + Home Assistant for Pod hardware over USART | Jailbreak Pod + LAN web app and REST API | Replace vendor SOM apps; full Rust firmware on Pod | Replace `dac` only; HTTP API to frankenfirmware |
+| Stack | Rust | Node/Express + React (+ optional Python biometrics) | Rust | Rust |
+| License | GPL-3.0 | MIT | GPL-3.0 | MIT |
+| Automation / HA | Native MQTT discovery, no extra config | REST / custom integration | MQTT + RON config | REST / HTTP |
+| Built-in web UI | No (HA is the UI) | Yes | No | No |
+| Configuration | CLI flags (ports, broker, pod model) | App + JSON storage | `.ron` files | Driven by HTTP clients |
+| Pod generations | Pod 4 focus; Pod 3/5 best-effort | Pod 3–5 documented | Pod 3 tested; Pod 4/5 untested | Pod 3 documented |
 
 
 ## 🏠 Entities
@@ -107,6 +107,7 @@ How **Lunaris** differs from other local-control projects ([free-sleep](https://
 | System Uptime | sensor | No | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
 | Frozen Link | binary_sensor | No | `ON` when valid Frozen MCU traffic was decoded. |
 | Sensor Link | binary_sensor | No | `ON` when valid Sensor MCU traffic was decoded. |
+| Internet Access | binary_sensor | No | `ON` when the GitHub is reachable (checked every 60s). |
 | Reboot Pod | button | No | Restarts the pod. |
 | Restart Lunaris | button | No | Restarts the lunaris process. |
 | Shutdown Pod | button | No | Powers off the pod. |
@@ -160,7 +161,7 @@ Lunaris [provides a blueprint](./blueprints/) for this.
 
 ## ⚙️ Arguments
 
-All settings are CLI-only (there is no config file or ENVs). **`lunaris --help`** lists the same flags.
+All settings are CLI-only (there is no config file or ENVs). `lunaris --help` lists the same flags.
 
 <a id="cli-quick-start"></a>
 
@@ -175,7 +176,7 @@ lunaris \
 
  Option | Default | Required | Description |
 |--------|---------|:--------:|-------------|
-| `--pod` | — | Yes | Your Pod generation: **3**, **4**, or **5**. Chooses sensible default serial speeds. |
+| `--pod` | — | Yes | Your Pod generation: 3, 4, or 5. Chooses sensible default serial speeds. |
 
 ### MQTT
 | Option | Default | Required | Description |
@@ -205,11 +206,11 @@ lunaris \
 |--------|---------|:--------:|-------------|
 | `--i2c-device` | `/dev/i2c-1` | No | I²C bus used for the status LED. If it is missing, everything else still works except the light in Home Assistant. |
 | `--log-level` | `info` | No | How chatty the logs are when `RUST_LOG` is not set. |
-| `--sensor-baud` | *(from `--pod`; Pod 4 / 5 → `921600`)* | No | Speed for the sensor/vibration serial line; change if your hardware needs it. |
+| `--sensor-baud` | (from `--pod`; Pod 4 / 5 → `921600`) | No | Speed for the sensor/vibration serial line; change if your hardware needs it. |
 | `--sensor-device` | `/dev/ttyS2` | No | Serial port for vibration and presence. If it cannot be opened, heating and MQTT still work, but not vibration or presence. |
-| `--sensor-vibrate-no-ack-wait` | *(off)* | No | Try this if vibration never starts but you suspect the sensor port does not report replies. |
-| `--serial-baud` | *(from `--pod`; Pod 4 / 5 → `38400`)* | No | Speed for the main (temperature) serial line. |
-| `--serial-device` | `/dev/ttyS1` | No | Serial port for temperature and related control. **Required:** the program exits if this port cannot be opened. |
+| `--sensor-vibrate-no-ack-wait` | (off) | No | Try this if vibration never starts but you suspect the sensor port does not report replies. |
+| `--serial-baud` | (from `--pod`; Pod 4 / 5 → `38400`) | No | Speed for the main (temperature) serial line. |
+| `--serial-device` | `/dev/ttyS1` | No | Serial port for temperature and related control. Required: the program exits if this port cannot be opened. |
 
 
 
@@ -241,7 +242,7 @@ Output: `./target/aarch64-unknown-linux-musl/release/lunaris`.
 When lunaris starts and the MQTT topic does not exist yet (this is normally the first start ever), it will automatically calibrate the presence sensors.
 You can also calibrate manually via the `Calibrate Presence` button entity.
 For fine-tuning, use `Presence Baseline Delta` and `Presence Cap Threshold` on the device.  
-> **Hint**: Increase the `Presence Baseline Delta` by 150 after pressing `Calibrate Presence`. This fixes it for me.
+> Hint: Increase the `Presence Baseline Delta` by 150 after pressing `Calibrate Presence`. This fixes it for me.
 
 ### Water Tank
 The Water Tank binary sensor often shows `unknown` briefly at startup until the bridge has parsed reservoir state. You can usually refresh it by pulling the tank out and plugging it back in.
@@ -253,4 +254,4 @@ The Water Tank binary sensor often shows `unknown` briefly at startup until the 
 - [OsirisSpectrum](https://github.com/OsirisSpectrum) for the naming idea of this project.
 
 ## ⚖️ License
-SPDX: **GPL-3.0-only**. See [LICENSE](LICENSE). CRC/framing for Frozen frames derives from [opensleep](https://github.com/LiamSnow/opensleep) (same license).
+SPDX: GPL-3.0-only. See [LICENSE](LICENSE). CRC/framing for Frozen frames derives from [opensleep](https://github.com/LiamSnow/opensleep) (same license).
