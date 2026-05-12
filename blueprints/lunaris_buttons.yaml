@@ -1,6 +1,6 @@
 blueprint:
   name: Lunaris Buttons
-  description: Run actions for left/right cover buttons.
+  description: Run actions for left/right cover buttons
   domain: automation
   input:
     button_left:
@@ -43,60 +43,105 @@ blueprint:
 
     action_left_1:
       name: Left - 1 Tap Action
+      description: Action to run for a 1-tap on the left cover button.
       default: []
       selector:
         action: {}
 
     action_left_2:
       name: Left - 2 Tap Action
+      description: Action to run for a 2-tap on the left cover button.
       default: []
       selector:
         action: {}
 
     action_left_3:
       name: Left - 3 Tap Action
+      description: Action to run for a 3-tap on the left cover button.
       default: []
       selector:
         action: {}
 
     action_left_4:
       name: Left - 4 Tap Action
+      description: Action to run for a 4-tap on the left cover button.
       default: []
       selector:
         action: {}
 
     action_left_5:
       name: Left - 5 Tap Action
+      description: Action to run for a 5-tap on the left cover button.
       default: []
       selector:
         action: {}
 
     action_right_1:
       name: Right - 1 Tap Action
+      description: Action to run for a 1-tap on the right cover button.
       default: []
       selector:
         action: {}
 
     action_right_2:
       name: Right - 2 Tap Action
+      description: Action to run for a 2-tap on the right cover button.
       default: []
       selector:
         action: {}
 
     action_right_3:
       name: Right - 3 Tap Action
+      description: Action to run for a 3-tap on the right cover button.
       default: []
       selector:
         action: {}
 
     action_right_4:
       name: Right - 4 Tap Action
+      description: Action to run for a 4-tap on the right cover button.
       default: []
       selector:
         action: {}
 
     action_right_5:
       name: Right - 5 Tap Action
+      description: Action to run for a 5-tap on the right cover button.
+      default: []
+      selector:
+        action: {}
+
+    action_any_1:
+      name: Any - 1 Tap Action
+      description: Action to run for a 1-tap count from either cover button (in parallel with side-specific actions, if configured).
+      default: []
+      selector:
+        action: {}
+
+    action_any_2:
+      name: Any - 2 Tap Action
+      description: Action to run for a 2-tap count from either cover button (in parallel with side-specific actions, if configured).
+      default: []
+      selector:
+        action: {}
+
+    action_any_3:
+      name: Any - 3 Tap Action
+      description: Action to run for a 3-tap count from either cover button (in parallel with side-specific actions, if configured).
+      default: []
+      selector:
+        action: {}
+
+    action_any_4:
+      name: Any - 4 Tap Action
+      description: Action to run for a 4-tap count from either cover button (in parallel with side-specific actions, if configured).
+      default: []
+      selector:
+        action: {}
+
+    action_any_5:
+      name: Any - 5 Tap Action
+      description: Action to run for a 5-tap count from either cover button (in parallel with side-specific actions, if configured).
       default: []
       selector:
         action: {}
@@ -119,73 +164,130 @@ variables:
 condition: !input condition
 
 action:
-  - choose:
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 1 }}"
-          - condition: trigger
-            id: btn_left
-        sequence: !input action_left_1
+  - parallel:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 1 }}"
+              - condition: trigger
+                id: btn_left
+            sequence: !input action_left_1
 
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 2 }}"
-          - condition: trigger
-            id: btn_left
-        sequence: !input action_left_2
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 2 }}"
+              - condition: trigger
+                id: btn_left
+            sequence: !input action_left_2
 
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 3 }}"
-          - condition: trigger
-            id: btn_left
-        sequence: !input action_left_3
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 3 }}"
+              - condition: trigger
+                id: btn_left
+            sequence: !input action_left_3
 
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 4 }}"
-          - condition: trigger
-            id: btn_left
-        sequence: !input action_left_4
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 4 }}"
+              - condition: trigger
+                id: btn_left
+            sequence: !input action_left_4
 
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 5 }}"
-          - condition: trigger
-            id: btn_left
-        sequence: !input action_left_5
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 5 }}"
+              - condition: trigger
+                id: btn_left
+            sequence: !input action_left_5
 
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 1 }}"
-          - condition: trigger
-            id: btn_right
-        sequence: !input action_right_1
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 1 }}"
+              - condition: trigger
+                id: btn_right
+            sequence: !input action_right_1
 
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 2 }}"
-          - condition: trigger
-            id: btn_right
-        sequence: !input action_right_2
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 2 }}"
+              - condition: trigger
+                id: btn_right
+            sequence: !input action_right_2
 
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 3 }}"
-          - condition: trigger
-            id: btn_right
-        sequence: !input action_right_3
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 3 }}"
+              - condition: trigger
+                id: btn_right
+            sequence: !input action_right_3
 
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 4 }}"
-          - condition: trigger
-            id: btn_right
-        sequence: !input action_right_4
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 4 }}"
+              - condition: trigger
+                id: btn_right
+            sequence: !input action_right_4
 
-      - conditions:
-          - condition: template
-            value_template: "{{ tap_count | int == 5 }}"
-          - condition: trigger
-            id: btn_right
-        sequence: !input action_right_5
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 5 }}"
+              - condition: trigger
+                id: btn_right
+            sequence: !input action_right_5
+
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 1 }}"
+              - condition: or
+                conditions:
+                  - condition: trigger
+                    id: btn_left
+                  - condition: trigger
+                    id: btn_right
+            sequence: !input action_any_1
+
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 2 }}"
+              - condition: or
+                conditions:
+                  - condition: trigger
+                    id: btn_left
+                  - condition: trigger
+                    id: btn_right
+            sequence: !input action_any_2
+
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 3 }}"
+              - condition: or
+                conditions:
+                  - condition: trigger
+                    id: btn_left
+                  - condition: trigger
+                    id: btn_right
+            sequence: !input action_any_3
+
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 4 }}"
+              - condition: or
+                conditions:
+                  - condition: trigger
+                    id: btn_left
+                  - condition: trigger
+                    id: btn_right
+            sequence: !input action_any_4
+
+          - conditions:
+              - condition: template
+                value_template: "{{ tap_count | int == 5 }}"
+              - condition: or
+                conditions:
+                  - condition: trigger
+                    id: btn_left
+                  - condition: trigger
+                    id: btn_right
+            sequence: !input action_any_5
