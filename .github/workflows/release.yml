@@ -50,11 +50,9 @@ jobs:
         id: gate
         run: |
           set -euo pipefail
+          MANUAL=false
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "release=true" >> "$GITHUB_OUTPUT"
-            echo "bump=patch" >> "$GITHUB_OUTPUT"
-            echo "workflow_dispatch — releasing with default patch bump."
-            exit 0
+            MANUAL=true
           fi
           PREV="${{ steps.prev.outputs.tag }}"
           if [ -n "$PREV" ]; then
@@ -64,7 +62,8 @@ jobs:
             RANGE="HEAD"
             REV_RANGE="HEAD"
           fi
-          # Automated release only when a commit **subject line** is feat: or fix: (Conventional Commits).
+          # Push: release only when a commit **subject line** is feat: or fix: (Conventional Commits).
+          # workflow_dispatch: same bump rules from commits since the last tag; patch if none (forced release).
           # chore/docs/ci/etc. never gate a release; `git log --grep` is avoided because Git's multiline
           # ^ anchor can match body lines (e.g. "fix:" in a chore commit message) and falsely trigger.
           #
@@ -101,6 +100,10 @@ jobs:
             echo "release=true" >> "$GITHUB_OUTPUT"
             echo "bump=patch" >> "$GITHUB_OUTPUT"
             echo "fix commit(s) found in ${RANGE} — patch release."
+          elif [ "$MANUAL" = true ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "bump=patch" >> "$GITHUB_OUTPUT"
+            echo "workflow_dispatch — no feat/fix in ${RANGE}; patch bump."
           else
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "No fix/feat commits in ${RANGE} — skipping release."
