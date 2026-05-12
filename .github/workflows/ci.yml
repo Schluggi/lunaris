@@ -39,15 +39,15 @@ jobs:
       # Must match rust-toolchain.toml channel — cargo uses that toolchain, not @stable.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.84.0
+          toolchain: 1.95.0
           targets: aarch64-unknown-linux-musl
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.1
+          version: 0.16.0
 
       - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild --version 0.20.1 --locked
+        run: cargo install cargo-zigbuild --version 0.22.3 --locked
 
       - name: Cargo build (aarch64 musl release, static — matches Pod glibc constraints)
         run: cargo zigbuild --release --verbose --target aarch64-unknown-linux-musl

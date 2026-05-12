@@ -188,7 +188,7 @@ async fn tick_body(
         sleep(Duration::from_millis(200)).await;
         write_half.write_all(&jump_to_firmware_frame()).await?;
         write_half.flush().await?;
-        if *wake_attempts > 0 && *wake_attempts % 10 == 0 {
+        if *wake_attempts > 0 && (*wake_attempts).is_multiple_of(10) {
             tracing::warn!(
                 attempt = *wake_attempts,
                 "Frozen MCU still not reporting firmware (check RX wiring / baud {})",

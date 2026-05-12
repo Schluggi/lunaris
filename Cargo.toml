@@ -2,6 +2,7 @@
 name = "lunaris"
 version = "5.1.0"
 edition = "2021"
+rust-version = "1.95"
 license = "GPL-3.0"
 repository = "https://github.com/Schluggi/lunaris"
 description = "Local MQTT bridge: Eight Sleep Pod Frozen (prime, climate) + Sensor vibration (per side) + IS31FL3194 LED, Home Assistant MQTT discovery."
@@ -14,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 rumqttc = "0.25"
-clap = { version = "=4.5.27", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -23,13 +24,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-serial = "5.4"
 i2cdev = "0.6"
 # Sync HTTP: `native-tls` + invalid certs (Pod has no CA bundle); not default rustls/webpki.
-# Pin `url` so transitive `idna` stays off versions that need Cargo edition2024 (Rust 1.84 CI).
 ureq = { version = "2.9", default-features = false, features = ["json", "native-tls", "gzip"] }
 native-tls = "0.2"
 # `native-tls` → `openssl-sys`: avoid system OpenSSL (CI/cross); compile OpenSSL from source.
 openssl-sys = { version = "0.9.115", features = ["vendored"] }
 sha2 = "0.10"
 libc = "0.2"
-url = "=2.4.1"
 
 [dev-dependencies]
