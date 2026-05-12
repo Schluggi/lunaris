@@ -1,6 +1,6 @@
 blueprint:
-  name: Lunaris Button Actions
-  description: "Templating your Lunaris cover buttons"
+  name: Lunaris Buttons
+  description: Run actions for left/right cover buttons.
   domain: automation
   input:
     button_left:
