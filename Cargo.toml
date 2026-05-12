@@ -30,6 +30,6 @@ native-tls = "0.2"
 openssl-sys = { version = "0.9.115", features = ["vendored"] }
 sha2 = "0.10"
 libc = "0.2"
-url = "=2.4.1"
+url = "=2.5.8"
 
 [dev-dependencies]
