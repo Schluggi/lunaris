@@ -12,6 +12,8 @@ Target hardware: **Eight Sleep Pod 4** — the protocol is modeled in code/repos
 
 **MQTT TLS:** **`rumqttc` 0.25** pulls **`rustls` 0.23** with **`rustls-webpki` 0.103.x** (Web PKI validation on the TLS connection). **`ureq`** self-update stays **`native-tls`** + **`openssl-sys` vendored**. **`rumqttc`** also depends on **`rustls-webpki` ^0.102** for bundled wire data, so **`Cargo.lock`** may list **two** `rustls-webpki` versions until `rumqttc` widens that range.
 
+**HA MQTT discovery `device`:** `manufacturer` **Lunaris**; `sw_version` is the lunaris crate semver only (`CARGO_PKG_VERSION`, e.g. `5.1.0`).
+
 ## Architecture (brief)
 
 

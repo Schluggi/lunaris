@@ -196,7 +196,7 @@ impl BridgeConfig {
             device_name: cli.device_name.clone(),
             device_identifier: cli.device_identifier.clone(),
             device_model: cli.pod.homeassistant_device_model().to_string(),
-            sw_version: format!("Lunaris {}", env!("CARGO_PKG_VERSION")),
+            sw_version: env!("CARGO_PKG_VERSION").to_string(),
             payload_press: cli.payload_press.clone(),
             serial_device: cli.serial_device.clone(),
             serial_baud: cli.effective_serial_baud(),
@@ -738,6 +738,7 @@ impl BridgeConfig {
         json!({
             "identifiers": [self.device_identifier.clone()],
             "name": self.device_name,
+            "manufacturer": "Lunaris",
             "model": self.device_model.clone(),
             "sw_version": self.sw_version,
         })
