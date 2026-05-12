@@ -110,10 +110,12 @@ jobs:
         if: steps.gate.outputs.release != 'true'
         run: echo "::notice::Release skipped — no fix or feat commits since the previous tag."
 
+      # Must match rust-toolchain.toml channel — otherwise `rustup` uses 1.95.x for `cargo`
+      # while the musl target was added only to an older toolchain → E0463 (no `core` for aarch64 musl).
       - uses: dtolnay/rust-toolchain@stable
         if: steps.gate.outputs.release == 'true'
         with:
-          toolchain: 1.84.0
+          toolchain: 1.95.0
           targets: aarch64-unknown-linux-musl
 
       # Static musl binary — avoids GLIBC version mismatch on the Pod (gnu target links a newer glibc than older Pod OS).
