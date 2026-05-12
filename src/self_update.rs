@@ -211,17 +211,16 @@ pub fn fetch_latest_version_blocking() -> Result<String, FetchError> {
         .to_string())
 }
 
-/// Returns `true` if the GitHub **releases/latest** API endpoint used for self-update responds with HTTP **2xx**.
+/// Returns `true` if `url` responds with HTTP **2xx** (used for the MQTT **Internet Access** diagnostic sensor).
 ///
 /// Uses the same TLS settings as [`fetch_latest_version_blocking`] (no system CA required on the Pod).
-pub fn probe_self_update_upstream_reachable_blocking() -> bool {
+pub fn probe_url_reachable_blocking(url: &str) -> bool {
     let Ok(agent) = insecure_agent() else {
         return false;
     };
     let resp = match agent
-        .get(GITHUB_API_LATEST)
+        .get(url)
         .timeout(HTTP_TIMEOUT_SMALL_REQUEST)
-        .set("Accept", "application/vnd.github+json")
         .set("User-Agent", &user_agent())
         .call()
     {

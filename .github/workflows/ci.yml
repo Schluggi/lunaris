@@ -19,6 +19,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.95.0
           components: clippy, rustfmt
 
       - name: Cargo fmt (check)

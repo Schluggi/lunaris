@@ -107,7 +107,7 @@ How Lunaris differs from other local-control projects ([free-sleep](https://gith
 | System Uptime | sensor | No | Shows the local date/time since when the pod OS has been running (last reboot timestamp). |
 | Frozen Link | binary_sensor | No | `ON` when valid Frozen MCU traffic was decoded. |
 | Sensor Link | binary_sensor | No | `ON` when valid Sensor MCU traffic was decoded. |
-| Internet Access | binary_sensor | No | `ON` when the GitHub is reachable (checked every 60s). |
+| Internet Access | binary_sensor | No | `ON` when the configured URL (default: lunaris GitHub project page) is reachable (checked every 60s). Change the URL with `--internet-access-url`. |
 | Reboot Pod | button | No | Restarts the pod. |
 | Restart Lunaris | button | No | Restarts the lunaris process. |
 | Shutdown Pod | button | No | Powers off the pod. |
@@ -177,6 +177,8 @@ lunaris \
  Option | Default | Required | Description |
 |--------|---------|:--------:|-------------|
 | `--pod` | — | Yes | Your Pod generation: 3, 4, or 5. Chooses sensible default serial speeds. |
+| `--self-update-poll-secs` | `43200` | No | How often lunaris checks GitHub for a newer release (`12h` by default). Set to `0` to disable self-update polling and hide the Firmware update entity. |
+| `--internet-access-url` | `https://github.com/Schluggi/lunaris` | No | URL the Internet Access sensor probes (every 60s). |
 
 ### MQTT
 | Option | Default | Required | Description |
@@ -190,7 +192,6 @@ lunaris \
 | `--mqtt-port` | `1883` | No | Broker port. |
 | `--mqtt-username` | — | No | Broker username, if required. |
 | `--payload-press` | `PRESS` | No | Text Home Assistant sends when you “press” an MQTT button; must match what discovery advertises. |
-| `--self-update-poll-secs` | `43200` | No | How often lunaris checks GitHub for a newer release (`12h` by default). Set to `0` to disable self-update polling and hide the Firmware update entity. |
 | `--topic-prefix` | `lunaris/pod4` | No | Leading part of all topics for this bed (availability, controls, sensors, etc.). |
 
 
