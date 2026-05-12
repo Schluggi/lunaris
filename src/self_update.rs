@@ -15,6 +15,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use ureq::tls::{TlsConfig, TlsProvider};
 
 pub const PAYLOAD_INSTALL: &str = "INSTALL";
 
@@ -99,17 +100,15 @@ static INSECURE_AGENT: OnceLock<Result<ureq::Agent, String>> = OnceLock::new();
 
 fn insecure_agent() -> Result<&'static ureq::Agent, FetchError> {
     let slot = INSECURE_AGENT.get_or_init(|| {
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
+        let tls = TlsConfig::builder()
+            .provider(TlsProvider::NativeTls)
+            .disable_verification(true)
+            .build();
+        Ok(ureq::Agent::config_builder()
+            .tls_config(tls)
+            .timeout_connect(Some(HTTP_TIMEOUT_CONNECT))
             .build()
-        {
-            Ok(c) => c,
-            Err(e) => return Err(format!("native_tls: {e}")),
-        };
-        Ok(ureq::builder()
-            .tls_connector(std::sync::Arc::new(connector))
-            .timeout_connect(HTTP_TIMEOUT_CONNECT)
-            .build())
+            .into())
     });
     match slot {
         Ok(a) => Ok(a),
@@ -163,15 +162,18 @@ pub enum FetchError {
 }
 
 fn fetch_latest_release(agent: &ureq::Agent) -> Result<LatestRelease, FetchError> {
-    let resp = agent
+    let mut resp = agent
         .get(GITHUB_API_LATEST)
-        .timeout(HTTP_TIMEOUT_SMALL_REQUEST)
-        .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", &user_agent())
+        .config()
+        .timeout_global(Some(HTTP_TIMEOUT_SMALL_REQUEST))
+        .build()
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", user_agent())
         .call()
         .map_err(|e| FetchError::Http(e.to_string()))?;
     let v: Value = resp
-        .into_json()
+        .body_mut()
+        .read_json()
         .map_err(|e| FetchError::Http(e.to_string()))?;
     let tag_name = v["tag_name"]
         .as_str()
@@ -218,18 +220,21 @@ pub fn probe_url_reachable_blocking(url: &str) -> bool {
     let Ok(agent) = insecure_agent() else {
         return false;
     };
-    let resp = match agent
+    let mut resp = match agent
         .get(url)
-        .timeout(HTTP_TIMEOUT_SMALL_REQUEST)
-        .set("User-Agent", &user_agent())
+        .config()
+        .timeout_global(Some(HTTP_TIMEOUT_SMALL_REQUEST))
+        .http_status_as_error(false)
+        .build()
+        .header("User-Agent", user_agent())
         .call()
     {
         Ok(r) => r,
         Err(_) => return false,
     };
-    let status = resp.status();
+    let status = resp.status().as_u16();
     let mut sink = Vec::new();
-    if resp.into_reader().read_to_end(&mut sink).is_err() {
+    if resp.body_mut().as_reader().read_to_end(&mut sink).is_err() {
         return false;
     }
     (200..300).contains(&status)
@@ -312,14 +317,17 @@ pub enum InstallError {
 }
 
 fn download_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, InstallError> {
-    let resp = agent
+    let mut resp = agent
         .get(url)
-        .timeout(HTTP_TIMEOUT_LARGE_DOWNLOAD)
-        .set("User-Agent", &user_agent())
+        .config()
+        .timeout_global(Some(HTTP_TIMEOUT_LARGE_DOWNLOAD))
+        .build()
+        .header("User-Agent", user_agent())
         .call()
         .map_err(|e| InstallError::Http(e.to_string()))?;
     let mut buf = Vec::new();
-    resp.into_reader()
+    resp.body_mut()
+        .as_reader()
         .read_to_end(&mut buf)
         .map_err(|e| InstallError::Http(e.to_string()))?;
     Ok(buf)
