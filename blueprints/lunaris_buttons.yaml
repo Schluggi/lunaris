@@ -1,0 +1,191 @@
+blueprint:
+  name: Lunaris Button Actions
+  description: "Templating your Lunaris cover buttons"
+  domain: automation
+  input:
+    button_left:
+      name: Tap Button Left
+      selector:
+        entity:
+          filter:
+            integration: mqtt
+            domain: sensor
+    
+    button_right:
+      name: Tap Button Right
+      selector:
+        entity:
+          filter:
+            integration: mqtt
+            domain: sensor
+    
+    condition:
+      name: Condition
+      default: []
+      selector:
+        condition: {}
+
+    automation_mode:
+      name: Automation mode
+      description: >
+        single = ignore new triggers while running; 
+        queued = run after current;
+        parallel = overlap; 
+        restart = cancel current and run latest.
+      default: parallel
+      selector:
+        select:
+          options:
+            - single
+            - queued
+            - parallel
+            - restart
+
+    action_left_1:
+      name: Left - 1 Tap Action
+      default: []
+      selector:
+        action: {}
+
+    action_left_2:
+      name: Left - 2 Tap Action
+      default: []
+      selector:
+        action: {}
+
+    action_left_3:
+      name: Left - 3 Tap Action
+      default: []
+      selector:
+        action: {}
+
+    action_left_4:
+      name: Left - 4 Tap Action
+      default: []
+      selector:
+        action: {}
+
+    action_left_5:
+      name: Left - 5 Tap Action
+      default: []
+      selector:
+        action: {}
+
+    action_right_1:
+      name: Right - 1 Tap Action
+      default: []
+      selector:
+        action: {}
+
+    action_right_2:
+      name: Right - 2 Tap Action
+      default: []
+      selector:
+        action: {}
+
+    action_right_3:
+      name: Right - 3 Tap Action
+      default: []
+      selector:
+        action: {}
+
+    action_right_4:
+      name: Right - 4 Tap Action
+      default: []
+      selector:
+        action: {}
+
+    action_right_5:
+      name: Right - 5 Tap Action
+      default: []
+      selector:
+        action: {}
+
+mode: !input automation_mode
+
+trigger:
+  - platform: state
+    entity_id: !input button_left
+    id: btn_left
+
+  - platform: state
+    entity_id: !input button_right
+    id: btn_right
+
+
+variables:
+  tap_count: "{{ trigger.to_state.state | int(0) }}"
+
+condition: !input condition
+
+action:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 1 }}"
+          - condition: trigger
+            id: btn_left
+        sequence: !input action_left_1
+
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 2 }}"
+          - condition: trigger
+            id: btn_left
+        sequence: !input action_left_2
+
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 3 }}"
+          - condition: trigger
+            id: btn_left
+        sequence: !input action_left_3
+
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 4 }}"
+          - condition: trigger
+            id: btn_left
+        sequence: !input action_left_4
+
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 5 }}"
+          - condition: trigger
+            id: btn_left
+        sequence: !input action_left_5
+
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 1 }}"
+          - condition: trigger
+            id: btn_right
+        sequence: !input action_right_1
+
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 2 }}"
+          - condition: trigger
+            id: btn_right
+        sequence: !input action_right_2
+
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 3 }}"
+          - condition: trigger
+            id: btn_right
+        sequence: !input action_right_3
+
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 4 }}"
+          - condition: trigger
+            id: btn_right
+        sequence: !input action_right_4
+
+      - conditions:
+          - condition: template
+            value_template: "{{ tap_count | int == 5 }}"
+          - condition: trigger
+            id: btn_right
+        sequence: !input action_right_5
