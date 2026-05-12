@@ -151,21 +151,10 @@ systemctl daemon-reload
 systemctl enable --now lunaris
 ```
 ### 4. Configure Priming
-> There is no periodic priming built-in. You have to manage it yourself!
+There is no periodic priming built-in. You have to manage it yourself.
 
-Add this automation to Home Assistant using the **Prime** button entity from your MQTT device—the `entity_id` below is **only an example**; replace it with yours (see note under [Entities](#entities)).
+Lunaris [provides a blueprint](./blueprints/) for this.
 
-```yaml
-description: "Eight Sleep priming"
-mode: single
-triggers:
-  - trigger: time
-    at: "12:00:00"
-actions:
-  - action: button.press
-    target:
-      entity_id: button.eight_sleep_prime  # substitute: HA → device → Prime button entity_id
-```
 
 <a id="cli-arguments"></a>
 
