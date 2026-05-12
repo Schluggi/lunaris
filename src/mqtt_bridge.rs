@@ -3201,21 +3201,27 @@ async fn publish_discovery_and_online(
         {
             tracing::error!(?e, "publish Internet Access discovery");
         }
-        let initial_internet = match tokio::task::spawn_blocking(
-            crate::self_update::probe_self_update_upstream_reachable_blocking,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!(
-                    ?e,
-                    "Internet Access: spawn_blocking join failed (initial probe)"
-                );
-                false
-            }
-        };
-        publish_internet_access_state(client, config, initial_internet).await;
+        // Do not await GitHub here: ureq connect/read timeouts still delay MQTT `online` and the rest
+        // of discovery. The periodic probe loop keeps the sensor updated after startup.
+        let c_net0 = client.clone();
+        let cfg_net0 = config.clone();
+        tokio::spawn(async move {
+            let initial_internet = match tokio::task::spawn_blocking(
+                crate::self_update::probe_self_update_upstream_reachable_blocking,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(
+                        ?e,
+                        "Internet Access: spawn_blocking join failed (initial probe)"
+                    );
+                    false
+                }
+            };
+            publish_internet_access_state(&c_net0, &cfg_net0, initial_internet).await;
+        });
         publish_frozen_usart_link_state(client, config, frozen_mcu_connected).await;
         publish_sensor_usart_framing_state(client, config, sensor_rx_framing).await;
     }
@@ -3537,29 +3543,9 @@ async fn publish_discovery_and_online(
         {
             tracing::error!(?e, "publish self-update discovery");
         }
-        // Fetch GitHub `latest` before the first retained update state so HA can compare
-        // `installed_version` vs `latest_version` immediately (avoids empty/missing latest until poll).
-        let latest_initial =
-            match tokio::task::spawn_blocking(crate::self_update::fetch_latest_version_blocking)
-                .await
-            {
-                Ok(Ok(v)) => Some(v),
-                Ok(Err(e)) => {
-                    tracing::warn!(
-                        %e,
-                        "self-update: could not fetch latest version for initial update state"
-                    );
-                    None
-                }
-                Err(e) => {
-                    tracing::error!(
-                        ?e,
-                        "self-update: spawn_blocking join failed (initial latest version)"
-                    );
-                    None
-                }
-            };
-        publish_self_update_state(client, config, latest_initial.as_deref(), false, None).await;
+        // Avoid blocking `online` on GitHub: publish installed version only; `self_update_version_poll_loop`
+        // (spawned right after this function) fetches `latest_version` on its first iteration.
+        publish_self_update_state(client, config, None, false, None).await;
     }
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
