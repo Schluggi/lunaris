@@ -2,7 +2,7 @@
 //! vibration tuning, optional capacitance **presence**,
 //! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`), **Cover Button Left / Right** (**`0`..=`5`** taps from **`dismissing alarm (N taps)`**), plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
 //! mattress climate, JSON light (I²C),
-//! MQTT **update** (self-install from GitHub `releases/latest` asset).
+//! MQTT **update** (self-install from GitHub `releases/latest` asset), diagnostic **Internet Access** (GitHub API reachability).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
 //! Outbound work runs in [`tokio::spawn`] so the event loop keeps draining requests (see upstream docs on [`AsyncClient`]).
@@ -38,6 +38,9 @@ const DISCOVERY_OBJECT_ID_DEVICEINFO_ID: &str = "lunaris_deviceinfo_device_id";
 const DISCOVERY_OBJECT_ID_SYSTEM_UPTIME: &str = "lunaris_system_uptime";
 const DISCOVERY_OBJECT_ID_FROZEN_USART_LINK: &str = "lunaris_frozen_usart_link";
 const DISCOVERY_OBJECT_ID_SENSOR_USART_FRAMING: &str = "lunaris_sensor_usart_framing";
+const DISCOVERY_OBJECT_ID_INTERNET_ACCESS: &str = "lunaris_internet_access";
+/// Interval between GitHub update-endpoint reachability checks for MQTT **Internet Access**.
+const INTERNET_ACCESS_PROBE_INTERVAL_SECS: u64 = 60;
 const DISCOVERY_OBJECT_ID_PRIME: &str = "lunaris_prime";
 const DISCOVERY_OBJECT_ID_REQUEST_TEMPERATURES: &str = "lunaris_request_temperatures";
 const DISCOVERY_OBJECT_ID_REBOOT: &str = "lunaris_reboot";
@@ -196,7 +199,7 @@ impl BridgeConfig {
             device_name: cli.device_name.clone(),
             device_identifier: cli.device_identifier.clone(),
             device_model: cli.pod.homeassistant_device_model().to_string(),
-            sw_version: format!("Lunaris {}", env!("CARGO_PKG_VERSION")),
+            sw_version: env!("CARGO_PKG_VERSION").to_string(),
             payload_press: cli.payload_press.clone(),
             serial_device: cli.serial_device.clone(),
             serial_baud: cli.effective_serial_baud(),
@@ -730,6 +733,17 @@ impl BridgeConfig {
         )
     }
 
+    pub fn internet_access_state_topic(&self) -> String {
+        format!("{}/binary_sensor/internet_access/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_internet_access(&self) -> String {
+        format!(
+            "{}/binary_sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_INTERNET_ACCESS
+        )
+    }
+
     pub fn result_topic(&self) -> String {
         format!("{}/result", self.topic_prefix)
     }
@@ -738,6 +752,7 @@ impl BridgeConfig {
         json!({
             "identifiers": [self.device_identifier.clone()],
             "name": self.device_name,
+            "manufacturer": "Lunaris",
             "model": self.device_model.clone(),
             "sw_version": self.sw_version,
         })
@@ -1309,6 +1324,26 @@ fn discovery_payload_sensor_usart_framing(config: &BridgeConfig) -> String {
     .to_string()
 }
 
+fn discovery_payload_internet_access(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Internet Access",
+        "state_topic": config.internet_access_state_topic(),
+        "icon": "mdi:web",
+        "entity_category": "diagnostic",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device_class": "connectivity",
+        "unique_id": format!("{}_internet_access", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 async fn read_system_uptime_secs() -> Option<u64> {
     let content = tokio::fs::read_to_string("/proc/uptime").await.ok()?;
     let raw = content.split_whitespace().next()?;
@@ -1437,6 +1472,25 @@ async fn publish_sensor_usart_framing_state(
         .await
     {
         tracing::error!(?e, "publish Sensor USART framing state");
+    }
+}
+
+async fn publish_internet_access_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    reachable: bool,
+) {
+    let payload = if reachable { "ON" } else { "OFF" };
+    if let Err(e) = client
+        .publish(
+            config.internet_access_state_topic(),
+            QoS::AtLeastOnce,
+            false,
+            payload,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish Internet Access state");
     }
 }
 
@@ -2995,6 +3049,24 @@ async fn self_update_version_poll_loop(
     }
 }
 
+async fn internet_access_probe_loop(client: AsyncClient, config: BridgeConfig) {
+    loop {
+        sleep(Duration::from_secs(INTERNET_ACCESS_PROBE_INTERVAL_SECS)).await;
+        let reachable = match tokio::task::spawn_blocking(
+            crate::self_update::probe_self_update_upstream_reachable_blocking,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(?e, "Internet Access: spawn_blocking join failed (probe)");
+                false
+            }
+        };
+        publish_internet_access_state(&client, &config, reachable).await;
+    }
+}
+
 async fn publish_discovery_and_online(
     client: &AsyncClient,
     config: &BridgeConfig,
@@ -3122,6 +3194,34 @@ async fn publish_discovery_and_online(
         {
             tracing::error!(?e, "publish Sensor USART framing discovery");
         }
+        let disc = discovery_payload_internet_access(config);
+        if let Err(e) = client
+            .publish(config.discovery_topic_internet_access(), qos, true, disc)
+            .await
+        {
+            tracing::error!(?e, "publish Internet Access discovery");
+        }
+        // Do not await GitHub here: ureq connect/read timeouts still delay MQTT `online` and the rest
+        // of discovery. The periodic probe loop keeps the sensor updated after startup.
+        let c_net0 = client.clone();
+        let cfg_net0 = config.clone();
+        tokio::spawn(async move {
+            let initial_internet = match tokio::task::spawn_blocking(
+                crate::self_update::probe_self_update_upstream_reachable_blocking,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(
+                        ?e,
+                        "Internet Access: spawn_blocking join failed (initial probe)"
+                    );
+                    false
+                }
+            };
+            publish_internet_access_state(&c_net0, &cfg_net0, initial_internet).await;
+        });
         publish_frozen_usart_link_state(client, config, frozen_mcu_connected).await;
         publish_sensor_usart_framing_state(client, config, sensor_rx_framing).await;
     }
@@ -3443,29 +3543,9 @@ async fn publish_discovery_and_online(
         {
             tracing::error!(?e, "publish self-update discovery");
         }
-        // Fetch GitHub `latest` before the first retained update state so HA can compare
-        // `installed_version` vs `latest_version` immediately (avoids empty/missing latest until poll).
-        let latest_initial =
-            match tokio::task::spawn_blocking(crate::self_update::fetch_latest_version_blocking)
-                .await
-            {
-                Ok(Ok(v)) => Some(v),
-                Ok(Err(e)) => {
-                    tracing::warn!(
-                        %e,
-                        "self-update: could not fetch latest version for initial update state"
-                    );
-                    None
-                }
-                Err(e) => {
-                    tracing::error!(
-                        ?e,
-                        "self-update: spawn_blocking join failed (initial latest version)"
-                    );
-                    None
-                }
-            };
-        publish_self_update_state(client, config, latest_initial.as_deref(), false, None).await;
+        // Avoid blocking `online` on GitHub: publish installed version only; `self_update_version_poll_loop`
+        // (spawned right after this function) fetches `latest_version` on its first iteration.
+        publish_self_update_state(client, config, None, false, None).await;
     }
     if let Err(e) = client
         .publish(config.availability_topic(), qos, true, "online")
@@ -3612,6 +3692,11 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig, st: &Publish
             self_update_version_poll_loop(c, cfg, poll_interval).await;
         });
     }
+    let c_net = client.clone();
+    let cfg_net = config.clone();
+    tokio::spawn(async move {
+        internet_access_probe_loop(c_net, cfg_net).await;
+    });
 }
 
 async fn handle_light_command(
@@ -5004,6 +5089,16 @@ mod tests {
         assert_eq!(v["device_class"].as_str(), Some("connectivity"));
         assert_eq!(v["name"].as_str(), Some("Sensor Link"));
         assert_eq!(v["icon"].as_str(), Some("mdi:connection"));
+        let disc_i = discovery_payload_internet_access(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc_i).unwrap();
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.internet_access_state_topic().as_str()),
+        );
+        assert_eq!(v["entity_category"].as_str(), Some("diagnostic"));
+        assert_eq!(v["device_class"].as_str(), Some("connectivity"));
+        assert_eq!(v["name"].as_str(), Some("Internet Access"));
+        assert_eq!(v["icon"].as_str(), Some("mdi:web"));
     }
 
     #[test]

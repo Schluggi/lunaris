@@ -10,6 +10,7 @@
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -78,6 +79,13 @@ const GITHUB_API_LATEST: &str = "https://api.github.com/repos/Schluggi/lunaris/r
 const ASSET_LUNARIS: &str = "lunaris";
 const ASSET_SHA256SUMS: &str = "SHA256SUMS";
 
+/// ureq default connect timeout is 30s; unreachable GitHub would delay MQTT `online` and probes.
+const HTTP_TIMEOUT_CONNECT: Duration = Duration::from_secs(5);
+/// releases/latest JSON and probe body drain.
+const HTTP_TIMEOUT_SMALL_REQUEST: Duration = Duration::from_secs(12);
+/// Release binary and SHA256SUMS on slow links.
+const HTTP_TIMEOUT_LARGE_DOWNLOAD: Duration = Duration::from_secs(900);
+
 pub fn installed_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -100,6 +108,7 @@ fn insecure_agent() -> Result<&'static ureq::Agent, FetchError> {
         };
         Ok(ureq::builder()
             .tls_connector(std::sync::Arc::new(connector))
+            .timeout_connect(HTTP_TIMEOUT_CONNECT)
             .build())
     });
     match slot {
@@ -156,6 +165,7 @@ pub enum FetchError {
 fn fetch_latest_release(agent: &ureq::Agent) -> Result<LatestRelease, FetchError> {
     let resp = agent
         .get(GITHUB_API_LATEST)
+        .timeout(HTTP_TIMEOUT_SMALL_REQUEST)
         .set("Accept", "application/vnd.github+json")
         .set("User-Agent", &user_agent())
         .call()
@@ -199,6 +209,31 @@ pub fn fetch_latest_version_blocking() -> Result<String, FetchError> {
         .strip_prefix('v')
         .unwrap_or(&rel.tag_name)
         .to_string())
+}
+
+/// Returns `true` if the GitHub **releases/latest** API endpoint used for self-update responds with HTTP **2xx**.
+///
+/// Uses the same TLS settings as [`fetch_latest_version_blocking`] (no system CA required on the Pod).
+pub fn probe_self_update_upstream_reachable_blocking() -> bool {
+    let Ok(agent) = insecure_agent() else {
+        return false;
+    };
+    let resp = match agent
+        .get(GITHUB_API_LATEST)
+        .timeout(HTTP_TIMEOUT_SMALL_REQUEST)
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", &user_agent())
+        .call()
+    {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let status = resp.status();
+    let mut sink = Vec::new();
+    if resp.into_reader().read_to_end(&mut sink).is_err() {
+        return false;
+    }
+    (200..300).contains(&status)
 }
 
 pub fn update_state_json(
@@ -280,6 +315,7 @@ pub enum InstallError {
 fn download_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, InstallError> {
     let resp = agent
         .get(url)
+        .timeout(HTTP_TIMEOUT_LARGE_DOWNLOAD)
         .set("User-Agent", &user_agent())
         .call()
         .map_err(|e| InstallError::Http(e.to_string()))?;

@@ -1,0 +1,55 @@
+blueprint:
+  name: Lunaris Prime
+  description: Prime your pod on a schedule only when the bed is empty
+  domain: automation
+  
+  input:
+    prime_button:
+      name: Prime button
+      description: Lunaris prime button entity.
+      selector:
+        entity:
+          filter:
+            integration: mqtt
+            domain: button
+
+    manual_time:
+      name: Time of day
+      description: Daily time for priming. Choose a time of day where the bed is empty.
+      selector:
+        time:
+
+    presence_any:
+      name: Presence Any
+      description: Lunaris "Presence Any" entity. Prime runs only when state is off (no presence).
+      selector:
+        entity:
+          filter:
+            integration: mqtt
+            domain: binary_sensor
+
+    actions_when_skipped:
+      name: Actions when Prime is skipped
+      description: >
+        Optional actions when Prime is skipped because the bed is not empty. (Normally you want some kind of notification.)
+      default: []
+      selector:
+        action: {}
+
+mode: single
+
+trigger:
+  - platform: time
+    at: !input manual_time
+
+action:
+  - choose:
+      - conditions:
+          - condition: state
+            entity_id: !input presence_any
+            state: "off"
+        sequence:
+          - service: button.press
+            target:
+              entity_id: !input prime_button
+    default: !input actions_when_skipped
