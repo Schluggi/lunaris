@@ -1453,13 +1453,8 @@ async fn publish_sensor_usart_framing_state(
     sensor_rx_framing: Option<&Arc<AtomicBool>>,
 ) {
     let payload = match sensor_rx_framing {
-        Some(a) => {
-            if a.load(Ordering::Relaxed) {
-                "ON"
-            } else {
-                "OFF"
-            }
-        }
+        Some(a) if a.load(Ordering::Relaxed) => "ON",
+        Some(_) => "OFF",
         None => "OFF",
     };
     if let Err(e) = client
@@ -1704,11 +1699,7 @@ fn presence_tune_from_calibration_samples(
     let mut peak_abs_dev: u16 = 0;
     for s in samples {
         for i in 0..6 {
-            let dev = if s[i] > baselines[i] {
-                s[i] - baselines[i]
-            } else {
-                baselines[i] - s[i]
-            };
+            let dev = s[i].abs_diff(baselines[i]);
             peak_abs_dev = peak_abs_dev.max(dev);
         }
     }

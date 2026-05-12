@@ -216,6 +216,7 @@ lunaris \
 
 ## 🔨 How To Build
 - Host: Ubuntu 24.04
+- Rust: Same version as [rust-toolchain.toml](rust-toolchain.toml)
 
 ```bash
 # Download & install zig (https://ziglang.org/download/)
@@ -227,7 +228,7 @@ cd -
 
 # Setup Zigbuild
 rustup target add aarch64-unknown-linux-musl
-cargo install cargo-zigbuild --version 0.20.1 --locked
+cargo install cargo-zigbuild
 
 # Build
 cargo zigbuild --release --target aarch64-unknown-linux-musl

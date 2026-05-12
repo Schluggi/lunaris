@@ -56,7 +56,7 @@ LED: I²C `/dev/i2c-1`; probe error → no light. With LED enabled, HA discovers
 - New MQTT / Home Assistant entities: Update `README.md` with the new entities (topics, purpose) in the same change as the code — not only `AGENTS.md` / inline discovery.
 - README style: Keep README edits minimally invasive and only document what is necessary. Prefer simple, plain wording and avoid overly technical language.
 - Tests: Unit-test critical logic (CRC, frame bytes); CI (`[.github/workflows/ci.yml](.github/workflows/ci.yml)`: `fmt`, `test`, `clippy`; separate job aarch64 `release` cross-build) runs on pull requests only. On push to `main`/`master`, `[release.yml](.github/workflows/release.yml)` is workflow-level path-filtered to changes under `src/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, or `.cargo/` (documentation-only merges do not start the workflow); it publishes only if there is a semver-relevant commit after the last tag (`fix:`, `feat:`, or breaking change via `BREAKING CHANGE:` / `!`); otherwise it succeeds without publishing. The `chore(release):` version bump touches `Cargo.toml` and thus can still enqueue a run that skips the release job via the existing message guard. `workflow_dispatch` always runs the full release. When a release runs: version bump in `Cargo.toml` follows semver rules (major/minor/patch by commit type), then Git tag `v*.*.*`, GitHub Release with aarch64 Linux binary (+ `SHA256SUMS`); release notes group commits from the previous tag to the new tag by Conventional Commit type (no merge commits, no `chore(release):` bump), emoji section headings; newest-first within each section; not GitHub’s PR-based auto notes.
-- Toolchain: `[rust-toolchain.toml](rust-toolchain.toml)` — clap is pinned to `=4.5.27` (compatibility with Rust 1.84; newer clap may require Rust 1.85+/Edition 2024). `url` is pinned to `=2.4.1` so transitive `idna` does not pull crates that require Cargo edition2024 (CI Rust 1.84 cannot parse those manifests). Self-update enables `openssl-sys/vendored` (compile OpenSSL via `openssl-src`; needs a C toolchain / `perl` for the OpenSSL build script).
+- Toolchain: `[rust-toolchain.toml](rust-toolchain.toml)` pins the compiler (currently 1.95.x); `[Cargo.toml](Cargo.toml)` sets `package.rust-version` to match. Dependencies use normal semver ranges (no `clap` / `url` MSRV pins). Self-update enables `openssl-sys/vendored` (compile OpenSSL via `openssl-src`; needs a C toolchain / `perl` for the OpenSSL build script).
 
 ## Commands
 
@@ -67,7 +67,7 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
-# Pod / aarch64 (static musl — matches CI releases; Zig on PATH; cargo-zigbuild 0.20.1 --locked for Rust 1.84):
+# Pod / aarch64 (static musl — matches CI releases; Zig on PATH; cargo-zigbuild 0.20.1 --locked; Rust per rust-toolchain.toml):
 # rustup target add aarch64-unknown-linux-musl
 # cargo install cargo-zigbuild --version 0.20.1 --locked
 # cargo zigbuild --release --target aarch64-unknown-linux-musl
@@ -82,7 +82,7 @@ When you change any of the following, update AGENTS.md here:
 - Commit-message conventions or release automation (semantic-release, commitlint, `release.yml`).
 - New CLI flags, default topics, or discovery fields — and `README.md` when adding or changing MQTT/HA entities (see Conventions for changes).
 - Serial parameters, protocol bytes, or Pod-specific assumptions.
-- New dependencies or intentional pins (e.g. clap).
+- New dependencies or intentional version pins.
 - New public doc paths or CI steps.
 
 ---

@@ -253,12 +253,12 @@ async fn run(
                     break;
                 }
                 Ok(n) => {
-                    if chunk[..n].iter().any(|&b| b == 0x7E) {
+                    if chunk[..n].contains(&0x7E) {
                         sensor_rx_framing.store(true, Ordering::SeqCst);
                     }
                     if n > 0 && log_first_rx {
                         log_first_rx = false;
-                        let has_7e = chunk[..n].iter().any(|&b| b == 0x7E);
+                        let has_7e = chunk[..n].contains(&0x7E);
                         if has_7e {
                             tracing::info!(
                                 len = n,
