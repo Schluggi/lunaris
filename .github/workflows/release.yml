@@ -219,12 +219,16 @@ jobs:
           repo = os.environ["REPO"]
           range_spec = f"{prev}..{new}" if prev else new
 
-          fmt = "%h%x1f%s%x1f%b%x1fENDRECORD%x00"
+          # `-z` NUL-separates commits (do not put `%x00` in `--pretty`: `%b` can contain NUL and
+          # would break naive `split("\\x00")`). Do not `.strip()` the payload after removing
+          # `ENDRECORD`: Python's default strip() also removes U+001F and would drop empty bodies.
+          fmt = "%h%x1f%s%x1f%b%x1fENDRECORD"
           out = subprocess.check_output(
               [
                   "git",
                   "log",
                   range_spec,
+                  "-z",
                   "--no-merges",
                   "--invert-grep",
                   "--grep=^chore(release):",
@@ -258,13 +262,13 @@ jobs:
               raw = raw.strip()
               if not raw.endswith("ENDRECORD"):
                   continue
+              # Git emits `%b%x1fENDRECORD`. Empty `%b` → `…%x1f%x1fENDRECORD`. Strip only the
+              # trailing `ENDRECORD` literal; peel one 0x1f from the body field (record delimiter).
               core = raw[: -len("ENDRECORD")]
-              if core.endswith("\x1f"):
-                  core = core[:-1]
-              core = core.strip()
-              if core.count("\x1f") < 2:
+              parts = core.split("\x1f", 2)
+              if len(parts) < 3:
                   continue
-              h, subject, body = core.split("\x1f", 2)
+              h, subject, body = parts[0], parts[1], parts[2].removesuffix("\x1f")
               line = f"- {subject.strip()} ({h.strip()})"
               body = body or ""
 
