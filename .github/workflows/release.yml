@@ -118,7 +118,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: steps.gate.outputs.release == 'true'
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: aarch64-unknown-linux-musl
 
       # Static musl binary — avoids GLIBC version mismatch on the Pod (gnu target links a newer glibc than older Pod OS).
