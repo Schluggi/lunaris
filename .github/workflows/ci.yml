@@ -19,7 +19,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           components: clippy, rustfmt
 
       - name: Cargo fmt (check)
@@ -40,7 +40,7 @@ jobs:
       # Must match rust-toolchain.toml channel — cargo uses that toolchain, not @stable.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.1
           targets: aarch64-unknown-linux-musl
 
       - uses: mlugg/setup-zig@v2
