@@ -45,6 +45,30 @@ pub async fn check_device_accessible(device: &Path, baud: u32) -> Result<(), Ser
     Ok(())
 }
 
+/// Checks that a serial device node exists and is readable/writable **without opening it**.
+///
+/// Unlike [`check_device_accessible`], this performs no open/close cycle — every open of a
+/// `ttyS*` can toggle modem-control lines (DTR/RTS) and reset the attached MCU, which is
+/// exactly what must not happen for the optional Sensor USART before [`crate::sensor_link`]
+/// runs its probe/handshake sequence. `sensor_link` retries open errors in the background.
+pub fn check_device_present(device: &Path) -> Result<(), SerialPrimeError> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let md = std::fs::metadata(device)?;
+    if !md.file_type().is_char_device() {
+        return Err(SerialPrimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a character device", device.display()),
+        )));
+    }
+    let c_path = std::ffi::CString::new(device.as_os_str().as_encoded_bytes())
+        .map_err(std::io::Error::from)?;
+    if unsafe { libc::access(c_path.as_ptr(), libc::R_OK | libc::W_OK) } != 0 {
+        return Err(SerialPrimeError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 pub async fn send_frame(device: &Path, baud: u32, frame: &[u8]) -> Result<(), SerialPrimeError> {
     let path = device.to_string_lossy().to_string();
     let mut port = tokio_serial::new(path, baud).open_native_async()?;

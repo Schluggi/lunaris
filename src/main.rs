@@ -7,6 +7,7 @@ mod deviceinfo;
 mod frozen_frame;
 mod frozen_link;
 mod frozen_rx;
+mod hrv;
 mod is31fl3194;
 mod machine_config;
 mod mqtt_bridge;
@@ -17,7 +18,7 @@ mod sensor_rx;
 mod serial_prime;
 mod wire_buffer;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tracing_subscriber::EnvFilter;
@@ -35,6 +36,9 @@ async fn main() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(cli.log_level.clone()));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+    // `--sensor-piezo-debug`: hex-dump the first few piezo payloads (0x32/0x35) at WARN.
+    sensor_rx::PIEZO_DEBUG_DUMP_LIMIT
+        .store(if cli.sensor_piezo_debug { 3 } else { 0 }, Ordering::SeqCst);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting lunaris");
 
     if let Err(e) =
@@ -81,21 +85,22 @@ async fn main() {
     let mut presence_cap_rx =
         None::<tokio::sync::mpsc::Receiver<sensor_rx::SensorCapacitanceZones>>;
     let mut sensor_message_rx = None::<tokio::sync::mpsc::Receiver<String>>;
+    let mut piezo_rx = None::<tokio::sync::mpsc::Receiver<sensor_rx::SensorPiezoSamples>>;
     let mut sensor_rx_framing = None::<Arc<AtomicBool>>;
 
-    if let Err(e) =
-        serial_prime::check_device_accessible(&cli.sensor_device, cli.effective_sensor_baud()).await
-    {
+    // No open/close here: every open of a ttyS* can toggle DTR/RTS and reset the Sensor MCU
+    // before sensor_link's probe/handshake runs. sensor_link retries open errors in background.
+    if let Err(e) = serial_prime::check_device_present(&cli.sensor_device) {
         tracing::warn!(
             device = %cli.sensor_device.display(),
             error = %e,
-            "cannot open Sensor serial for vibration; continuing without vibrate buttons"
+            "cannot access Sensor serial device; continuing without vibrate buttons"
         );
     } else {
         tracing::info!(
             device = %cli.sensor_device.display(),
             baud = cli.effective_sensor_baud(),
-            "Sensor serial opened (vibration / SetAlarm)"
+            "Sensor serial device present (vibration / SetAlarm); link connects in background"
         );
         config.sensor_device = Some(cli.sensor_device.clone());
         config.presence_discovery = true;
@@ -105,13 +110,15 @@ async fn main() {
         let sensor = sensor_link::spawn(
             cli.sensor_device.clone(),
             cli.effective_sensor_baud(),
-            true,
+            cli.effective_piezo_freq_hz(),
+            cli.sensor_force_bootloader_handshake,
             cli.sensor_vibrate_no_ack_wait,
             Some(tx),
             presence_cap_parse_diag,
         );
         config.sensor_tx = Some(sensor.tx.clone());
         sensor_message_rx = Some(sensor.sensor_message_rx);
+        piezo_rx = Some(sensor.piezo_rx);
         sensor_rx_framing = Some(sensor.sensor_rx_framing);
     }
 
@@ -125,6 +132,7 @@ async fn main() {
         frozen_link.firmware_message_rx,
         presence_cap_rx,
         sensor_message_rx,
+        piezo_rx,
         frozen_link.frozen_mcu_connected.clone(),
         sensor_rx_framing,
     )

@@ -29,7 +29,7 @@ Using custom firmware or low-level hardware control may void warranties, break t
 - ✅ LED control
 - ✅ Self update
 - ✅ Presence detection
-- ❌ Biometrics (work in progress)
+- ✅ Heart rate + HRV (biometrics from the mattress piezo signal)
 
 
 ## 🤔 Comparison
@@ -70,6 +70,8 @@ How Lunaris differs from other local-control projects ([free-sleep](https://gith
 | Ambient Temperature | sensor | No | Ambient temperature send by the cover sensor. |
 | Cover Button Left / Right | sensor | No | Tap count `1`-`5`, `0` when idle. |
 | Current Cover Temperature Left / Right | sensor | No | How warm each side of the mattress is right now. |
+| Heart Rate Left / Right | sensor | No | Heart rate in beats per minute from that side’s piezo signal (only while Presence is ON for that side when presence is available; reliable ~40–80 bpm — the detector bandpass-filters the signal to the heart band and suppresses the dicrotic second wave of each beat). When nobody is in bed (Presence OFF), the state is cleared with an **empty payload** — HA shows the sensor as `unknown`, so "not in bed" stays distinguishable from "in bed, no reading" for downstream processing. A `0` is only published when the side is occupied but has had no valid reading for ~10 s (several consecutive zero intervals) — a single sporadic zero (short lock blip) is held back so it does not pollute the statistics. |
+| HRV RMSSD Left / Right | — | — | Not exposed for now: the RMSSD values are computed and logged (`--sensor-piezo-debug`) but the entities are not discovered in Home Assistant until the values are calibrated. |
 | Heatsink Temperature | sensor | No | Temperature of the cooling hardware. |
 | Presence Any | binary_sensor | No | Someone is detected on either side of the bed. |
 | [Presence Calibration](#presence-calibration) | binary_sensor | No | On while lunaris is learning an “empty bed” baseline. |
@@ -209,6 +211,9 @@ lunaris \
 | `--log-level` | `info` | No | How chatty the logs are when `RUST_LOG` is not set. |
 | `--sensor-baud` | (from `--pod`; Pod 4 / 5 → `921600`) | No | Speed for the sensor/vibration serial line; change if your hardware needs it. |
 | `--sensor-device` | `/dev/ttyS2` | No | Serial port for vibration and presence. If it cannot be opened, heating and MQTT still work, but not vibration or presence. |
+| `--sensor-force-bootloader-handshake` | (off) | No | Skip the firmware-baud probe — only the bootloader handshake runs (legacy connect path). Rarely needed; the default covers both MCU states and reconnects automatically. |
+| `--sensor-piezo-debug` | (off) | No | Hex-dump the first piezo sample payloads (`0x32` / `0x35`) in the log, to verify the Pod 4/5 frame layout (header size, channel interleave, endianness). |
+| `--sensor-piezo-swap-lr` | (off) | No | Swap left/right piezo channels for heart rate if values appear on the opposite side from Presence. |
 | `--sensor-vibrate-no-ack-wait` | (off) | No | Try this if vibration never starts but you suspect the sensor port does not report replies. |
 | `--serial-baud` | (from `--pod`; Pod 4 / 5 → `38400`) | No | Speed for the main (temperature) serial line. |
 | `--serial-device` | `/dev/ttyS1` | No | Serial port for temperature and related control. Required: the program exits if this port cannot be opened. |

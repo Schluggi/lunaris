@@ -784,6 +784,7 @@ dependencies = [
  "rumqttc",
  "serde",
  "serde_json",
+ "serialport",
  "sha2",
  "thiserror",
  "tokio",

@@ -10,21 +10,26 @@ use crate::frozen_frame::{encode_command, BedSide};
 
 /// Default piezo gain per channel (opensleep `sensor::state::PIEZO_GAIN`).
 pub const PIEZO_GAIN_DEFAULT: u16 = 400;
-/// Default piezo frequency Hz (opensleep `sensor::state::PIEZO_FREQ`).
-pub const PIEZO_FREQ_DEFAULT: u32 = 1000;
+/// Default piezo frequency Hz for Pod 3 / opensleep (`sensor::state::PIEZO_FREQ`).
+pub const PIEZO_FREQ_POD3: u32 = 1000;
+/// Pod 4 / 5 Sensor MCU samples at ~500 Hz (MCU `[sampling] avg rate ≈ 500Hz`).
+pub const PIEZO_FREQ_POD4: u32 = 500;
+/// Alias kept for callers that want the opensleep default (Pod 3).
+pub const PIEZO_FREQ_DEFAULT: u32 = PIEZO_FREQ_POD3;
 
 /// `SensorCommand::Ping` (same opcode `0x01` as Frozen ping).
 pub fn ping_frame() -> Vec<u8> {
     encode_command(&[0x01])
 }
 
-/// Piezo enable priming without alarm — opensleep sends these before `SetAlarm` works.
-pub fn piezo_priming_frames() -> Vec<Vec<u8>> {
+/// Piezo enable priming without alarm — opensleep order: EnableVibration → SetPiezoGain →
+/// EnablePiezo → SetPiezoFreq (freq only after piezo is enabled).
+pub fn piezo_priming_frames(freq_hz: u32) -> Vec<Vec<u8>> {
     vec![
         enable_vibration_frame(),
         set_piezo_gain_frame(PIEZO_GAIN_DEFAULT, PIEZO_GAIN_DEFAULT),
-        set_piezo_freq_frame(PIEZO_FREQ_DEFAULT),
         enable_piezo_frame(),
+        set_piezo_freq_frame(freq_hz),
     ]
 }
 
@@ -93,26 +98,22 @@ pub fn enable_piezo_frame() -> Vec<u8> {
     encode_command(&[0x28])
 }
 
-/// **`cancel_preamble`:** optional opensleep-style alarm cancel (`SetAlarm` zeros), then enable vibration → gain →
-/// frequency → enable piezo → real `SetAlarm` (**5** frames if `false`, **6** if `true`).
+/// **`cancel_preamble`:** optional opensleep-style alarm cancel (`SetAlarm` zeros), then enable
+/// vibration → gain → enable piezo → frequency → real `SetAlarm` (**5** frames if `false`, **6** if `true`).
 pub fn vibration_sequence_frames(
     side: BedSide,
     intensity_pct: u8,
     pattern: AlarmPattern,
     duration_secs: u32,
     cancel_preamble: bool,
+    piezo_freq_hz: u32,
 ) -> Vec<Vec<u8>> {
     let mut out = Vec::with_capacity(6);
     if cancel_preamble {
         out.push(cancel_alarm_frame(side));
     }
-    out.extend([
-        enable_vibration_frame(),
-        set_piezo_gain_frame(PIEZO_GAIN_DEFAULT, PIEZO_GAIN_DEFAULT),
-        set_piezo_freq_frame(PIEZO_FREQ_DEFAULT),
-        enable_piezo_frame(),
-        set_alarm_frame(side, intensity_pct, pattern, duration_secs),
-    ]);
+    out.extend(piezo_priming_frames(piezo_freq_hz));
+    out.push(set_alarm_frame(side, intensity_pct, pattern, duration_secs));
     out
 }
 
@@ -167,5 +168,37 @@ mod tests {
             vec![0x7E, 0x05, 0x21, 0x00, 0x00, 0x03, 0xE8, 0x7A, 0x5E]
         );
         assert_eq!(enable_piezo_frame(), vec![0x7E, 0x01, 0x28, 0x69, 0xF6]);
+    }
+
+    #[test]
+    fn piezo_priming_order_enable_before_freq() {
+        let frames = piezo_priming_frames(500);
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[0], enable_vibration_frame());
+        assert_eq!(
+            frames[1],
+            set_piezo_gain_frame(PIEZO_GAIN_DEFAULT, PIEZO_GAIN_DEFAULT)
+        );
+        assert_eq!(frames[2], enable_piezo_frame());
+        assert_eq!(frames[3], set_piezo_freq_frame(500));
+    }
+
+    #[test]
+    fn vibration_sequence_opensleep_order_with_freq() {
+        let frames = vibration_sequence_frames(
+            BedSide::Left,
+            50,
+            AlarmPattern::Single,
+            10,
+            false,
+            PIEZO_FREQ_POD4,
+        );
+        assert_eq!(frames.len(), 5);
+        assert_eq!(frames[2], enable_piezo_frame());
+        assert_eq!(frames[3], set_piezo_freq_frame(PIEZO_FREQ_POD4));
+        assert_eq!(
+            frames[4],
+            set_alarm_frame(BedSide::Left, 50, AlarmPattern::Single, 10)
+        );
     }
 }

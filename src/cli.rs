@@ -32,6 +32,15 @@ impl PodModel {
         }
     }
 
+    /// Default piezo sample rate (`SetPiezoFreq`): Pod 3 / opensleep **1000** Hz; Pod 4 / 5 **500** Hz
+    /// (MCU `[sampling] avg rate ≈ 500Hz`).
+    pub fn default_piezo_freq_hz(self) -> u32 {
+        match self {
+            PodModel::Three => crate::sensor_frame::PIEZO_FREQ_POD3,
+            PodModel::Four | PodModel::Five => crate::sensor_frame::PIEZO_FREQ_POD4,
+        }
+    }
+
     /// MQTT discovery `device.model` (matches [`--pod`](Cli::pod)).
     pub fn homeassistant_device_model(self) -> &'static str {
         match self {
@@ -150,6 +159,18 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub sensor_vibrate_no_ack_wait: bool,
 
+    /// Swap piezo sample channels (opensleep: first `u16` = left, second = right). Use when Heart Rate locks on the opposite side from Presence Occupancy.
+    #[arg(long, default_value_t = false)]
+    pub sensor_piezo_swap_lr: bool,
+
+    /// Hex-dump the first few Sensor piezo sample payloads (`0x32` / `0x35`) at **WARN** — verify the Pod 4/5 frame layout (header size, channel interleave, endianness) against the opensleep `PiezoData` assumption. The Pod 4/5 sensor board streams **four** piezo channels (`left1`, `left2`, `right1`, `right2`), not two.
+    #[arg(long, default_value_t = false)]
+    pub sensor_piezo_debug: bool,
+
+    /// Skip the firmware-baud probe: only the bootloader phase (**38400** ping/pong + JumpToFirmware with `0x90` confirmation) runs at startup — the legacy connect path. The default probes bootloader first, then firmware baud.
+    #[arg(long, default_value_t = false)]
+    pub sensor_force_bootloader_handshake: bool,
+
     /// `tracing` filter (e.g. `debug`, `info,lunaris=debug`).
     #[arg(long, default_value = "info")]
     pub log_level: String,
@@ -179,6 +200,11 @@ impl Cli {
         self.sensor_baud
             .unwrap_or_else(|| self.pod.default_sensor_baud())
     }
+
+    /// Piezo `SetPiezoFreq` target Hz for this `--pod` (Pod **3** → **1000**, Pod **4** / **5** → **500**).
+    pub fn effective_piezo_freq_hz(&self) -> u32 {
+        self.pod.default_piezo_freq_hz()
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +216,7 @@ mod tests {
         let cli = Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 921600);
+        assert_eq!(cli.effective_piezo_freq_hz(), 500);
     }
 
     #[test]
@@ -239,6 +266,16 @@ mod tests {
         let cli = Cli::parse_from(["lunaris", "--pod", "5", "--mqtt-host", "localhost"]);
         assert_eq!(cli.effective_serial_baud(), 38400);
         assert_eq!(cli.effective_sensor_baud(), 921600);
+    }
+
+    #[test]
+    fn piezo_freq_defaults_by_pod() {
+        let p3 = Cli::parse_from(["lunaris", "--pod", "3", "--mqtt-host", "localhost"]);
+        let p4 = Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let p5 = Cli::parse_from(["lunaris", "--pod", "5", "--mqtt-host", "localhost"]);
+        assert_eq!(p3.effective_piezo_freq_hz(), 1000);
+        assert_eq!(p4.effective_piezo_freq_hz(), 500);
+        assert_eq!(p5.effective_piezo_freq_hz(), 500);
     }
 
     #[test]

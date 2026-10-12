@@ -24,11 +24,12 @@ use crate::cli::Cli;
 use crate::deviceinfo;
 use crate::frozen_frame::{get_temperatures_frame, set_target_temperature_frame, BedSide};
 use crate::frozen_rx::FrozenTemperatureUpdate;
+use crate::hrv::{HeartRateReading, HeartRateTracker};
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
 use crate::sensor_frame::{vibration_sequence_frames, AlarmPattern};
 use crate::sensor_rx::{
     ambient_from_sensor_message_line, cover_button_dismiss_tap_count_from_sensor_message,
-    CoverButtonTapSide, SensorCapacitanceZones,
+    CoverButtonTapSide, SensorCapacitanceZones, SensorPiezoSamples, PIEZO_DEBUG_DUMP_LIMIT,
 };
 use crate::serial_prime;
 
@@ -76,12 +77,25 @@ const DISCOVERY_OBJECT_ID_COVER_BUTTON_LEFT: &str = "lunaris_cover_button_left";
 const DISCOVERY_OBJECT_ID_COVER_BUTTON_RIGHT: &str = "lunaris_cover_button_right";
 const DISCOVERY_OBJECT_ID_AMBIENT_TEMPERATURE: &str = "lunaris_ambient_temperature";
 const DISCOVERY_OBJECT_ID_AMBIENT_HUMIDITY: &str = "lunaris_ambient_humidity";
+const DISCOVERY_OBJECT_ID_HEART_RATE_LEFT: &str = "lunaris_heart_rate_left";
+const DISCOVERY_OBJECT_ID_HEART_RATE_RIGHT: &str = "lunaris_heart_rate_right";
 const DISCOVERY_OBJECT_ID_UPDATE: &str = "lunaris_update";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
 const CLIMATE_MODE_OFF: &str = "off";
 /// Resting MQTT state for **Cover Button** sensors (**no recent dismissal**).
 const COVER_BUTTON_SENSOR_STATE_REST: &str = "0";
+/// Minimum interval between HR/HRV state publishes per side (piezo `0x32` frames arrive every ~40–60 ms).
+const HEART_RATE_PUBLISH_INTERVAL: Duration = Duration::from_secs(5);
+/// Artifact guard: an IBI window of at least this many **identical** IBIs (span below one
+/// sample period) is a periodic artifact (e.g. per-frame structure of a misparsed piezo
+/// stream), not a real pulse — the reading is rejected and 0 is published instead.
+const HEART_RATE_ARTIFACT_MIN_IBIS: usize = 8;
+/// Publish `0.0` on the heart-rate state topic only after the side has had no
+/// valid reading for this long (2× `HEART_RATE_PUBLISH_INTERVAL`, i.e. several
+/// consecutive zero publish intervals) — a single sporadic zero (e.g. a short
+/// lock blip) is held back so it does not land in HA and pollute the statistics.
+const HEART_RATE_ZERO_PUBLISH_DELAY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LedBehavior {
@@ -160,6 +174,8 @@ pub struct BridgeConfig {
     /// `None` → vibration MQTT buttons disabled (Sensor UART probe failed at startup).
     pub sensor_device: Option<PathBuf>,
     pub sensor_baud: u32,
+    /// Piezo `SetPiezoFreq` target Hz (`--pod` default: 1000 on Pod 3, 500 on Pod 4/5).
+    pub piezo_freq_hz: u32,
     /// Uncalibrated: side occupied if **`max`** of three zones `>= threshold` (MQTT **Presence Cap Threshold** updates this at runtime).
     pub presence_cap_threshold: Arc<AtomicU16>,
     /// Calibrated: zone counts when raw `>` baseline + Δ (MQTT **Presence Baseline Delta**; opensleep default **50**).
@@ -172,6 +188,15 @@ pub struct BridgeConfig {
     pub presence_discovery: bool,
     /// Log each `0x33` presence inference step at INFO ([`Cli::presence_debug`](crate::cli::Cli::presence_debug)).
     pub presence_debug: bool,
+    /// Latest capacitance occupancy left (shared with HR piezo consumer for presence gate).
+    pub presence_occupied_left: Arc<AtomicBool>,
+    /// Latest capacitance occupancy right (shared with HR piezo consumer for presence gate).
+    pub presence_occupied_right: Arc<AtomicBool>,
+    /// Swap piezo interleaved channels before HR (see [`Cli::sensor_piezo_swap_lr`](crate::cli::Cli::sensor_piezo_swap_lr)).
+    pub sensor_piezo_swap_lr: bool,
+    /// Re-arm the `--sensor-piezo-debug` payload dumps when presence flips ON (the
+    /// lying-time frames reveal the channel↔side mapping).
+    pub sensor_piezo_debug: bool,
     pub vibration_settings: Arc<Mutex<VibrationSettings>>,
     /// When set, Frozen frames are queued to [`crate::frozen_link`] instead of opening the port per command.
     pub frozen_tx: Option<mpsc::Sender<Vec<u8>>>,
@@ -208,6 +233,7 @@ impl BridgeConfig {
             i2c_device: None,
             sensor_device: None,
             sensor_baud: cli.effective_sensor_baud(),
+            piezo_freq_hz: cli.effective_piezo_freq_hz(),
             presence_cap_threshold: Arc::new(AtomicU16::new(
                 cli.presence_cap_threshold
                     .clamp(PRESENCE_CAP_THRESHOLD_MIN, PRESENCE_CAP_THRESHOLD_MAX),
@@ -220,6 +246,10 @@ impl BridgeConfig {
             presence_calibrate_secs: cli.presence_calibrate_secs.max(3),
             presence_discovery: false,
             presence_debug: cli.presence_debug,
+            presence_occupied_left: Arc::new(AtomicBool::new(false)),
+            presence_occupied_right: Arc::new(AtomicBool::new(false)),
+            sensor_piezo_swap_lr: cli.sensor_piezo_swap_lr,
+            sensor_piezo_debug: cli.sensor_piezo_debug,
             vibration_settings: Arc::new(Mutex::new(VibrationSettings::default())),
             frozen_tx: None,
             sensor_tx: None,
@@ -658,6 +688,33 @@ impl BridgeConfig {
             "{}/sensor/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_AMBIENT_HUMIDITY
         )
+    }
+
+    pub fn heart_rate_left_state_topic(&self) -> String {
+        format!("{}/sensor/heart_rate_left/state", self.topic_prefix)
+    }
+
+    pub fn heart_rate_right_state_topic(&self) -> String {
+        format!("{}/sensor/heart_rate_right/state", self.topic_prefix)
+    }
+
+    pub fn discovery_topic_heart_rate(&self, side: BedSide) -> String {
+        let object_id = match side {
+            BedSide::Left => DISCOVERY_OBJECT_ID_HEART_RATE_LEFT,
+            BedSide::Right => DISCOVERY_OBJECT_ID_HEART_RATE_RIGHT,
+        };
+        format!("{}/sensor/{}/config", self.discovery_prefix, object_id)
+    }
+
+    /// HRV (RMSSD) discovery config topic — the HRV entities are not exposed to
+    /// Home Assistant for now (values not calibrated yet); an empty retained
+    /// payload here removes previously discovered ones.
+    pub fn discovery_topic_hrv_rmssd(&self, side: BedSide) -> String {
+        let object_id = match side {
+            BedSide::Left => "lunaris_hrv_rmssd_left",
+            BedSide::Right => "lunaris_hrv_rmssd_right",
+        };
+        format!("{}/sensor/{}/config", self.discovery_prefix, object_id)
     }
 
     pub fn update_state_topic(&self) -> String {
@@ -1209,6 +1266,260 @@ fn discovery_payload_ambient_humidity(config: &BridgeConfig) -> String {
         "availability": config.availability_json(),
     })
     .to_string()
+}
+
+fn discovery_payload_heart_rate(config: &BridgeConfig, side: BedSide) -> String {
+    let (name, state_topic, unique_suffix) = match side {
+        BedSide::Left => (
+            "Heart Rate Left",
+            config.heart_rate_left_state_topic(),
+            "heart_rate_left",
+        ),
+        BedSide::Right => (
+            "Heart Rate Right",
+            config.heart_rate_right_state_topic(),
+            "heart_rate_right",
+        ),
+    };
+    json!({
+        "name": name,
+        "state_topic": state_topic,
+        "unit_of_measurement": "bpm",
+        "state_class": "measurement",
+        "icon": "mdi:heart-pulse",
+        "unique_id": format!("{}_{}", config.device_identifier, unique_suffix),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+fn heart_rate_state_topic(config: &BridgeConfig, side: BedSide) -> String {
+    match side {
+        BedSide::Left => config.heart_rate_left_state_topic(),
+        BedSide::Right => config.heart_rate_right_state_topic(),
+    }
+}
+
+async fn publish_heart_rate_reading(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    side: BedSide,
+    reading: HeartRateReading,
+) {
+    let hr_topic = heart_rate_state_topic(config, side);
+    let qos = QoS::AtLeastOnce;
+    // Not retained: a stale bpm after a lunaris restart would be misleading.
+    // When there is no valid reading (presence OFF, lock expired, artifact lock),
+    // `clear_heart_rate_reading` publishes `0.0` so HA shows 0 instead of unknown.
+    // The HRV (RMSSD) value is computed and logged but not published — the HRV
+    // entities are not exposed to Home Assistant for now (not calibrated yet).
+    let retain = false;
+    let bpm = format!("{:.1}", reading.bpm);
+    if let Err(e) = client.publish(hr_topic, qos, retain, bpm.as_bytes()).await {
+        tracing::error!(?e, ?side, "publish heart rate state");
+    }
+}
+
+/// Per-side heart-rate publish state. A `0.0` is published only once the side
+/// has had no valid reading for `HEART_RATE_ZERO_PUBLISH_DELAY` — a single
+/// sporadic zero (e.g. a short lock blip) is held back so it does not land in
+/// HA and pollute the statistics.
+#[derive(Debug, Default)]
+struct HrSideState {
+    /// A valid reading was announced (is currently shown in HA).
+    announced: bool,
+    /// The HA state topic holds a payload (a real reading or `0.0`).
+    published: bool,
+    /// `0.0` is currently shown in HA.
+    zero_published: bool,
+    /// When the current no-valid-reading streak started.
+    zero_since: Option<Instant>,
+}
+
+/// Why the side currently has no valid heart-rate reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZeroReason {
+    /// Nobody is in bed (presence OFF) — the state is cleared to an empty
+    /// payload (HA shows `unknown`), so "not in bed" stays distinguishable
+    /// from "in bed, no reading" for downstream processing.
+    PresenceOff,
+    /// In bed but the beat lock expired.
+    LockExpired,
+    /// In bed but the IBI window was rejected as a periodic artifact.
+    Artifact,
+}
+
+impl ZeroReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            ZeroReason::PresenceOff => "presence OFF",
+            ZeroReason::LockExpired => "lock expired",
+            ZeroReason::Artifact => "artifact lock",
+        }
+    }
+
+    /// Whether the no-reading state is published as an empty payload (`unknown`
+    /// in HA) instead of `0.0` — only when nobody is in bed.
+    fn clears_to_unknown(self) -> bool {
+        matches!(self, ZeroReason::PresenceOff)
+    }
+}
+
+/// What to do about a `0.0` heart-rate publish for the current zero streak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZeroPublish {
+    /// Nothing published yet — publish the startup seed immediately.
+    Seed,
+    /// The streak persisted for `HEART_RATE_ZERO_PUBLISH_DELAY` — publish `0.0`.
+    Due,
+    /// Hold back (sporadic zero or `0.0` already shown).
+    Hold,
+}
+
+impl HrSideState {
+    /// Pure decision for `note_zero` (unit-tested).
+    fn zero_publish_decision(&self) -> ZeroPublish {
+        if !self.published {
+            return ZeroPublish::Seed;
+        }
+        if self.zero_published {
+            return ZeroPublish::Hold;
+        }
+        if self
+            .zero_since
+            .is_some_and(|t| t.elapsed() >= HEART_RATE_ZERO_PUBLISH_DELAY)
+        {
+            ZeroPublish::Due
+        } else {
+            ZeroPublish::Hold
+        }
+    }
+
+    /// Note that the side currently has no valid reading. Publishes the
+    /// no-reading state once the streak persisted for
+    /// `HEART_RATE_ZERO_PUBLISH_DELAY` (several consecutive publish intervals):
+    /// an **empty payload** (HA shows `unknown`) when nobody is in bed, `0.0`
+    /// when the side is occupied but has no valid reading (lock expired /
+    /// artifact). The startup seed (nothing published yet) publishes
+    /// immediately.
+    async fn note_zero(
+        &mut self,
+        client: &AsyncClient,
+        config: &BridgeConfig,
+        side: BedSide,
+        reason: ZeroReason,
+    ) {
+        if self.zero_since.is_none() {
+            self.zero_since = Some(Instant::now());
+        }
+        match self.zero_publish_decision() {
+            ZeroPublish::Seed => {
+                // Startup seed: nothing in HA yet.
+                publish_heart_rate_no_reading(client, config, side, reason).await;
+                self.published = true;
+                self.zero_published = true;
+            }
+            ZeroPublish::Due => {
+                publish_heart_rate_no_reading(client, config, side, reason).await;
+                self.zero_published = true;
+                if reason.clears_to_unknown() {
+                    tracing::info!(
+                        ?side,
+                        reason = reason.as_str(),
+                        "heart rate state cleared to unknown (empty payload)"
+                    );
+                } else {
+                    tracing::info!(?side, reason = reason.as_str(), "heart rate / HRV set to 0");
+                }
+            }
+            ZeroPublish::Hold => {}
+        }
+    }
+
+    /// Note that a valid reading exists again — resets the zero streak.
+    fn note_reading(&mut self) {
+        self.zero_since = None;
+        self.zero_published = false;
+    }
+}
+
+/// Publish the no-valid-reading state on the heart-rate topic (see
+/// `HrSideState::note_zero`): an **empty payload** when nobody is in bed
+/// (presence OFF) — Home Assistant shows the sensor as `unknown` then, which
+/// keeps "not in bed" distinguishable from "in bed, no reading" for downstream
+/// processing — and `0.0` when the side is occupied but the beat lock expired
+/// or the IBI window was rejected as a periodic artifact. The HRV (RMSSD)
+/// topic is not published — the HRV entities are not exposed to Home
+/// Assistant for now.
+async fn publish_heart_rate_no_reading(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    side: BedSide,
+    reason: ZeroReason,
+) {
+    let hr_topic = heart_rate_state_topic(config, side);
+    let qos = QoS::AtLeastOnce;
+    let retain = false;
+    let payload: &[u8] = if reason.clears_to_unknown() {
+        b""
+    } else {
+        b"0.0"
+    };
+    if let Err(e) = client.publish(hr_topic, qos, retain, payload).await {
+        tracing::error!(?e, ?side, "reset heart rate state");
+    }
+}
+
+/// Effective tick rate for Pod 5 `0x35` piezo frames, derived from consecutive frame
+/// ms-timestamps: `ticks / Δt`. The MCU streams ~200 ticks/s (11 ticks per ~55 ms
+/// frame) regardless of the 500 Hz SetPiezoFreq setting — the hub firmware also
+/// defaults to 200 Hz (5 ms/tick) when its freq field reads 0. EMA-smoothed, only
+/// updates inside a plausible band; reconnects (timestamp reset) are rejected via
+/// the wrapping delta. `None` keeps `ema` unchanged.
+fn update_piezo35_rate(
+    prev_ms: Option<u32>,
+    ts_ms: u32,
+    ticks: usize,
+    ema: Option<f32>,
+) -> Option<f32> {
+    let Some(prev) = prev_ms else {
+        return ema;
+    };
+    let dt = ts_ms.wrapping_sub(prev);
+    if dt == 0 {
+        return ema;
+    }
+    let r = ticks as f32 * 1000.0 / dt as f32;
+    if !(30.0..=1000.0).contains(&r) {
+        return ema;
+    }
+    Some(match ema {
+        None => r,
+        Some(e) => e * 0.8 + r * 0.2,
+    })
+}
+
+/// Sample variance of a piezo channel (for opposite-side lock diagnostics).
+fn piezo_channel_variance(samples: &[u16]) -> f32 {
+    if samples.len() < 2 {
+        return 0.0;
+    }
+    let n = samples.len() as f32;
+    let mean = samples.iter().map(|&s| f32::from(s)).sum::<f32>() / n;
+    let var = samples
+        .iter()
+        .map(|&s| {
+            let d = f32::from(s) - mean;
+            d * d
+        })
+        .sum::<f32>()
+        / n;
+    var
 }
 
 fn discovery_payload_self_update(config: &BridgeConfig) -> String {
@@ -2305,7 +2616,14 @@ async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side:
     };
     let intensity = intensity.clamp(1, 100);
     let duration = duration.clamp(1, 600);
-    let frames = vibration_sequence_frames(side, intensity, pattern, duration, cancel_preamble);
+    let frames = vibration_sequence_frames(
+        side,
+        intensity,
+        pattern,
+        duration,
+        cancel_preamble,
+        config.piezo_freq_hz,
+    );
     let frame_count = frames.len();
     match enqueue_sensor_vibration(config, frames).await {
         Ok(()) => {
@@ -3386,6 +3704,24 @@ async fn publish_discovery_and_online(
         {
             tracing::error!(?e, "publish ambient humidity discovery");
         }
+        for side in [BedSide::Left, BedSide::Right] {
+            let disc_hr = discovery_payload_heart_rate(config, side);
+            if let Err(e) = client
+                .publish(config.discovery_topic_heart_rate(side), qos, true, disc_hr)
+                .await
+            {
+                tracing::error!(?e, ?side, "publish heart rate discovery");
+            }
+            // The HRV (RMSSD) entities are not exposed to Home Assistant for now
+            // (values not calibrated yet) — an empty retained payload removes any
+            // previously discovered ones from HA.
+            if let Err(e) = client
+                .publish(config.discovery_topic_hrv_rmssd(side), qos, true, "")
+                .await
+            {
+                tracing::error!(?e, ?side, "remove HRV RMSSD discovery");
+            }
+        }
     }
     if config.sensor_device.is_some() && config.presence_discovery {
         for side in [BedSide::Left, BedSide::Right] {
@@ -4176,6 +4512,7 @@ pub async fn run(
     frozen_firmware_message_rx: mpsc::Receiver<String>,
     capacitance_rx: Option<mpsc::Receiver<SensorCapacitanceZones>>,
     sensor_message_rx: Option<mpsc::Receiver<String>>,
+    piezo_rx: Option<mpsc::Receiver<SensorPiezoSamples>>,
     frozen_mcu_connected: Arc<AtomicBool>,
     sensor_rx_framing: Option<Arc<AtomicBool>>,
 ) {
@@ -4265,6 +4602,294 @@ pub async fn run(
         });
     }
 
+    if let Some(mut piezo_rx) = piezo_rx {
+        let c = client.clone();
+        let cfg = config.clone();
+        tokio::spawn(async move {
+            // One tracker per mattress side (left/right piezo channel of `0x32` / `0x35`).
+            let mut trackers = [
+                (BedSide::Left, HeartRateTracker::new()),
+                (BedSide::Right, HeartRateTracker::new()),
+            ];
+            let mut last_publish = [None::<Instant>; 2];
+            // Per-side publish state (announced / published / zero streak).
+            let mut state = [HrSideState::default(), HrSideState::default()];
+            let mut artifact_warned = [false; 2];
+            let mut saw_any_samples = false;
+            let mut last_nolock_warn = Instant::now();
+            let session_start = Instant::now();
+            let mut no_sample_warned = false;
+            let mut swap_hint_logged = false;
+            let presence_gate = cfg.presence_discovery;
+            // Pod 5 `0x35`: effective tick rate derived from consecutive frame
+            // ms-timestamps (see `update_piezo35_rate`); `prev_piezo_ts_ms` seeds it.
+            let mut prev_piezo_ts_ms: Option<u32> = None;
+            let mut tick_rate_hz: Option<f32> = None;
+            let mut prev_occ = [false; 2];
+            // --sensor-piezo-debug: rolling 10 s per-channel signal window (raw c0..c3).
+            // The per-frame variance cannot show a slow ~1 Hz BCG wave; the 10 s min/max
+            // span can — it reveals the wave amplitude and the per-side DC shifts.
+            let mut dbg_win_start = Instant::now();
+            let mut dbg_min = [u16::MAX; 4];
+            let mut dbg_max = [0u16; 4];
+            let mut dbg_sum = [0f64; 4];
+            let mut dbg_n = [0u64; 4];
+            let mut rate_logged = false;
+            let swap_lr = cfg.sensor_piezo_swap_lr;
+            if swap_lr {
+                tracing::info!(
+                    "heart rate / HRV: --sensor-piezo-swap-lr — feeding first interleaved sample to Right"
+                );
+            }
+            loop {
+                tokio::select! {
+                    samples = piezo_rx.recv() => {
+                        let Some(samples) = samples else {
+                            tracing::warn!("Sensor piezo channel closed; HR/HRV tracking stopped");
+                            break;
+                        };
+                        saw_any_samples = true;
+                        let (left_ch, right_ch) = if swap_lr {
+                            (&samples.right_samples, &samples.left_samples)
+                        } else {
+                            (&samples.left_samples, &samples.right_samples)
+                        };
+                        let occ = [
+                            cfg.presence_occupied_left.load(Ordering::Relaxed),
+                            cfg.presence_occupied_right.load(Ordering::Relaxed),
+                        ];
+                        // The lying-time frames are the ones that reveal the channel↔side
+                        // mapping — re-arm the raw payload dumps when presence flips ON.
+                        if cfg.sensor_piezo_debug
+                            && ((occ[0] && !prev_occ[0]) || (occ[1] && !prev_occ[1]))
+                        {
+                            PIEZO_DEBUG_DUMP_LIMIT.store(3, Ordering::Relaxed);
+                        }
+                        prev_occ = occ;
+                        if cfg.sensor_piezo_debug {
+                            for (c, st) in samples.channel_stats.iter().enumerate() {
+                                if st.min > st.max {
+                                    continue; // empty frame for this channel
+                                }
+                                dbg_min[c] = dbg_min[c].min(st.min);
+                                dbg_max[c] = dbg_max[c].max(st.max);
+                                // Frames carry a constant tick count, so mean-of-means is fine.
+                                dbg_sum[c] += f64::from(st.mean);
+                                dbg_n[c] += 1;
+                            }
+                            if dbg_win_start.elapsed() >= Duration::from_secs(10) {
+                                dbg_win_start = Instant::now();
+                                let mut any = false;
+                                let mut fields: Vec<String> = Vec::new();
+                                for c in 0..4 {
+                                    if dbg_n[c] == 0 {
+                                        continue;
+                                    }
+                                    any = true;
+                                    let mean = dbg_sum[c] / dbg_n[c] as f64;
+                                    let span = dbg_max[c].saturating_sub(dbg_min[c]);
+                                    fields.push(format!(
+                                        "c{} mean={:.1} min={} max={} span={}",
+                                        c, mean, dbg_min[c], dbg_max[c], span
+                                    ));
+                                    dbg_min[c] = u16::MAX;
+                                    dbg_max[c] = 0;
+                                    dbg_sum[c] = 0.0;
+                                    dbg_n[c] = 0;
+                                }
+                                if any {
+                                    let joined = fields.join(" | ");
+                                    tracing::warn!(
+                                        "Sensor: piezo 10s channel window (--sensor-piezo-debug): {joined}"
+                                    );
+                                }
+                            }
+                        }
+                        let lv = piezo_channel_variance(left_ch);
+                        let rv = piezo_channel_variance(right_ch);
+                        // Pod 4: BCG often lands on the opposite wire label vs capacitance Presence.
+                        // When only one side is occupied and the other channel is much livelier,
+                        // feed that lively channel to the occupied side (so Right HR can lock).
+                        const VAR_RATIO: f32 = 3.0;
+                        // Corrected parse scale: per-frame idle wobble variance ≈ 0.1–0.2,
+                        // the slow BCG wave over one 55 ms frame only reaches single digits
+                        // (the old 50.0 floor was tuned against the misaligned parse's
+                        // garbage variance and blocked every routing).
+                        const VAR_MIN: f32 = 1.0;
+                        let left_only = presence_gate && occ[0] && !occ[1];
+                        let right_only = presence_gate && occ[1] && !occ[0];
+                        let feed_left_from_right = left_only && rv > lv * VAR_RATIO && rv > VAR_MIN;
+                        let feed_right_from_left = right_only && lv > rv * VAR_RATIO && lv > VAR_MIN;
+                        if !swap_hint_logged && (feed_left_from_right || feed_right_from_left) {
+                            swap_hint_logged = true;
+                            tracing::info!(
+                                presence_left = occ[0],
+                                presence_right = occ[1],
+                                left_var = lv,
+                                right_var = rv,
+                                "heart rate / HRV: routing livelier piezo channel to the occupied side (wire L/R vs Presence mismatch)"
+                            );
+                        }
+                        // Pod 5 `0x35` frames carry no usable rate field — derive the
+                        // effective tick rate (hub firmware default: 200 Hz) from the ms
+                        // timestamp deltas; the 500 Hz SetPiezoFreq target would inflate
+                        // bpm by 2.5×. `0x32` keeps the frame rate / SetPiezoFreq target.
+                        let freq_hz = if samples.tag == 0x35 {
+                            tick_rate_hz = update_piezo35_rate(
+                                prev_piezo_ts_ms,
+                                samples.sequence,
+                                samples.left_samples.len(),
+                                tick_rate_hz,
+                            );
+                            prev_piezo_ts_ms = Some(samples.sequence);
+                            if let (Some(r), false) = (tick_rate_hz, rate_logged) {
+                                rate_logged = true;
+                                tracing::info!(
+                                    rate_hz = r.round() as u32,
+                                    "heart rate / HRV: effective piezo tick rate derived from frame timestamps"
+                                );
+                            }
+                            tick_rate_hz.map_or(0, |r| r.round() as u32) // 0 = not derived yet
+                        } else if samples.freq > 0 {
+                            samples.freq
+                        } else {
+                            cfg.piezo_freq_hz
+                        };
+                        for (i, (side, tracker)) in trackers.iter_mut().enumerate() {
+                            let occupied = !presence_gate || occ[i];
+                            if !occupied {
+                                tracker.clear_lock();
+                                state[i].announced = false;
+                                state[i]
+                                    .note_zero(&c, &cfg, *side, ZeroReason::PresenceOff)
+                                    .await;
+                                continue;
+                            }
+                            let channel = match side {
+                                BedSide::Left if feed_left_from_right => right_ch,
+                                BedSide::Right if feed_right_from_left => left_ch,
+                                BedSide::Left => left_ch,
+                                BedSide::Right => right_ch,
+                            };
+                            if freq_hz == 0 {
+                                // 0x35 before the first rate derivation — skip feeding.
+                                continue;
+                            }
+                            tracker.set_freq(freq_hz);
+                            tracker.push_samples(channel);
+                            let Some(reading) = tracker.reading() else {
+                                state[i].announced = false;
+                                state[i]
+                                    .note_zero(&c, &cfg, *side, ZeroReason::LockExpired)
+                                    .await;
+                                continue;
+                            };
+                            // Artifact guard: IBIs are quantized to whole samples, so a
+                            // window of many identical IBIs (span below one sample period)
+                            // is a periodic artifact — e.g. per-frame structure of a
+                            // misparsed piezo stream — not a real pulse. Publish 0.
+                            // The post-bandpass moving average widens peaks, so a
+                            // perfectly periodic (artifact) signal still shows an IBI
+                            // jitter floor of a few ms — allow two sample periods.
+                            let sample_period_ms = 1000.0 / tracker.freq_hz().max(1) as f32;
+                            let metronome = tracker.ibi_count() >= HEART_RATE_ARTIFACT_MIN_IBIS
+                                && tracker
+                                    .ibi_span_ms()
+                                    .is_none_or(|span| span < 2.0 * sample_period_ms);
+                            if metronome {
+                                let ibis = tracker.ibi_count();
+                                tracker.clear_lock();
+                                state[i].announced = false;
+                                state[i]
+                                    .note_zero(&c, &cfg, *side, ZeroReason::Artifact)
+                                    .await;
+                                if !artifact_warned[i] {
+                                    artifact_warned[i] = true;
+                                    tracing::warn!(
+                                        ?side,
+                                        ibis,
+                                        bpm = reading.bpm,
+                                        "heart rate / HRV: constant IBI window (RMSSD ≈ 0 over many beats) — periodic artifact, not a real pulse; publishing 0 (check piezo frame layout, --sensor-piezo-debug)"
+                                    );
+                                }
+                                continue;
+                            }
+                            artifact_warned[i] = false;
+                            state[i].note_reading();
+                            let due = last_publish[i]
+                                .is_none_or(|t| t.elapsed() >= HEART_RATE_PUBLISH_INTERVAL);
+                            if !due {
+                                continue;
+                            }
+                            last_publish[i] = Some(Instant::now());
+                            if !state[i].announced {
+                                state[i].announced = true;
+                                tracing::info!(
+                                    ?side,
+                                    bpm = reading.bpm,
+                                    rmssd_ms = reading.rmssd_ms,
+                                    freq_hz = tracker.freq_hz(),
+                                    samples = tracker.samples_seen(),
+                                    "heart rate / HRV tracking started (Sensor piezo stream)"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    ?side,
+                                    bpm = reading.bpm,
+                                    rmssd_ms = reading.rmssd_ms,
+                                    ibis = tracker.ibi_count(),
+                                    "heart rate / HRV reading"
+                                );
+                            }
+                            publish_heart_rate_reading(&c, &cfg, *side, reading).await;
+                            state[i].published = true;
+                            if cfg.sensor_piezo_debug {
+                                // Beat-pattern diagnostics: the IBI list shows whether
+                                // each heartbeat is counted once (e.g. [950, 948, ...])
+                                // or twice (dicrotic second peak → [600, 1200, ...]);
+                                // the bandpassed window (decimated 4× ≈ 50 Hz) shows
+                                // the wave shape behind the detected peaks.
+                                tracing::warn!(
+                                    ?side,
+                                    bpm = reading.bpm,
+                                    rmssd_ms = reading.rmssd_ms,
+                                    ibis_ms = ?tracker.ibis_ms(),
+                                    wave = ?tracker.detrended_window(4),
+                                    "heart rate / HRV reading (--sensor-piezo-debug)"
+                                );
+                            }
+                        }
+                        if (!presence_gate || occ[0] || occ[1])
+                            && !state[0].announced
+                            && !state[1].announced
+                            && last_nolock_warn.elapsed() >= Duration::from_secs(60)
+                        {
+                            last_nolock_warn = Instant::now();
+                            tracing::warn!(
+                                left_ibis = trackers[0].1.ibi_count(),
+                                right_ibis = trackers[1].1.ibi_count(),
+                                left_samples = trackers[0].1.samples_seen(),
+                                right_samples = trackers[1].1.samples_seen(),
+                                presence_left = occ[0],
+                                presence_right = occ[1],
+                                "heart rate / HRV: piezo samples flowing but no lock yet (need ≥4 IBIs + presence ON when capacitance is available)"
+                            );
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        if !saw_any_samples && !no_sample_warned && session_start.elapsed() >= Duration::from_secs(30)
+                        {
+                            no_sample_warned = true;
+                            tracing::warn!(
+                                "heart rate / HRV: no Sensor piezo samples (0x32/0x35) after 30s — check piezo setup / Sensor USART"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     let c = client.clone();
     let cfg = config.clone();
     tokio::spawn(async move {
@@ -4331,6 +4956,8 @@ pub async fn run(
                             );
                             cal_until = Some(Instant::now() + cal_wait);
                             cal_samples.clear();
+                            cfg.presence_occupied_left.store(false, Ordering::Relaxed);
+                            cfg.presence_occupied_right.store(false, Ordering::Relaxed);
                             publish_presence_calibration_running_state(&c, &cfg, true).await;
                             publish_presence_readings_unknown(&c, &cfg).await;
                         }
@@ -4415,6 +5042,8 @@ pub async fn run(
                             if calibrating {
                                 continue;
                             }
+                            cfg.presence_occupied_left.store(left_on, Ordering::Relaxed);
+                            cfg.presence_occupied_right.store(right_on, Ordering::Relaxed);
                             if prev_publish == Some((left_on, right_on)) {
                                 continue;
                             }
@@ -4456,6 +5085,7 @@ pub async fn run(
         led = config.i2c_device.is_some(),
         vibrate = config.sensor_device.is_some(),
         presence = config.sensor_device.is_some() && config.presence_discovery,
+        heart_rate = config.sensor_device.is_some(),
         "MQTT client created; polling event loop"
     );
 
@@ -4737,6 +5367,85 @@ pub async fn run(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn heart_rate_zero_publish_waits_for_persistent_streak() {
+        // Startup seed: nothing published yet → publish immediately.
+        let s = HrSideState::default();
+        assert_eq!(s.zero_publish_decision(), ZeroPublish::Seed);
+        // After a real reading, a short zero blip is held back…
+        let s = HrSideState {
+            announced: true,
+            published: true,
+            zero_published: false,
+            zero_since: Some(Instant::now()),
+        };
+        assert_eq!(s.zero_publish_decision(), ZeroPublish::Hold);
+        // …but a streak older than the delay publishes 0.
+        let s = HrSideState {
+            announced: true,
+            published: true,
+            zero_published: false,
+            zero_since: Some(
+                Instant::now()
+                    .checked_sub(HEART_RATE_ZERO_PUBLISH_DELAY)
+                    .unwrap(),
+            ),
+        };
+        assert_eq!(s.zero_publish_decision(), ZeroPublish::Due);
+        // Once 0 is shown, further zero evaluations hold.
+        let mut s = HrSideState {
+            announced: false,
+            published: true,
+            zero_published: true,
+            zero_since: Some(
+                Instant::now()
+                    .checked_sub(HEART_RATE_ZERO_PUBLISH_DELAY)
+                    .unwrap(),
+            ),
+        };
+        assert_eq!(s.zero_publish_decision(), ZeroPublish::Hold);
+        // A new valid reading resets the streak.
+        s.note_reading();
+        assert_eq!(s.zero_since, None);
+        assert!(!s.zero_published);
+        // Only "nobody in bed" clears to an empty payload (unknown in HA);
+        // lock expired / artifact keep `0.0`.
+        assert!(ZeroReason::PresenceOff.clears_to_unknown());
+        assert!(!ZeroReason::LockExpired.clears_to_unknown());
+        assert!(!ZeroReason::Artifact.clears_to_unknown());
+        assert_eq!(ZeroReason::PresenceOff.as_str(), "presence OFF");
+        assert_eq!(ZeroReason::LockExpired.as_str(), "lock expired");
+        assert_eq!(ZeroReason::Artifact.as_str(), "artifact lock");
+    }
+
+    #[test]
+    fn piezo35_tick_rate_derived_from_frame_timestamps() {
+        // Real Pod 5 cadence: 11 ticks per ~55 ms frame → 200 Hz.
+        let r = update_piezo35_rate(None, 1445, 11, None);
+        assert_eq!(r, None); // first frame only seeds the timestamp
+        let r = update_piezo35_rate(Some(1445), 1500, 11, r).unwrap();
+        assert!((r - 200.0).abs() < 2.0, "rate {r} should be ≈ 200 Hz");
+        // EMA keeps converging on the same rate.
+        let r2 = update_piezo35_rate(Some(1500), 1555, 11, Some(r)).unwrap();
+        assert!((r2 - 200.0).abs() < 2.0, "rate {r2} should stay ≈ 200 Hz");
+    }
+
+    #[test]
+    fn piezo35_tick_rate_rejects_implausible_deltas() {
+        let seeded = Some(200.0f32);
+        // Reconnect: MCU timestamp reset → wrapping delta huge → rejected.
+        assert_eq!(
+            update_piezo35_rate(Some(1500), 4_000_000_000, 11, seeded),
+            seeded
+        );
+        // Same-ms frame and zero-tick frames → no update.
+        assert_eq!(update_piezo35_rate(Some(1500), 1500, 11, seeded), seeded);
+        // Garbage rate (e.g. wrong timestamp unit) stays outside the band; a
+        // backwards timestamp jump also wraps to a huge delta and is rejected.
+        assert_eq!(update_piezo35_rate(Some(1500), 1300, 11, seeded), seeded);
+        assert_eq!(update_piezo35_rate(Some(1500), 1501, 11, seeded), seeded);
+    }
 
     #[test]
     fn chip_rgb_scales_brightness() {

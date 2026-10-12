@@ -22,6 +22,10 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-serial = "5.4"
+# Same `serialport` 4.x tokio-serial builds on — direct dep for `SerialStream::set_baud_rate`
+# (Sensor bootloader→firmware baud switch without close/reopen). `default-features = false`
+# matches tokio-serial: no libudev (we never enumerate USB ports, only open ttyS*/PTY paths).
+serialport = { version = "4", default-features = false }
 i2cdev = "0.6"
 # Sync HTTP: `native-tls` + invalid certs (Pod has no CA bundle); not default rustls/webpki.
 ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip"] }
