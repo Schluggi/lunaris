@@ -26,10 +26,10 @@ Using custom firmware or low-level hardware control may void warranties, break t
 - ✅ Cover buttons
 - ✅ Vibration
 - ✅ Temperature control
-- ✅ LED control
+- ✅ LED control 
 - ✅ Self update
 - ✅ Presence detection
-- ✅ Heart rate + HRV (biometrics from the mattress piezo signal)
+- ✅ Heart rate 
 
 
 ## 🤔 Comparison
