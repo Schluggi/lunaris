@@ -4,8 +4,10 @@
 # GitHub Actions release builds use `cargo zigbuild` → `aarch64-unknown-linux-musl`.
 #
 #   rustup target add aarch64-unknown-linux-musl
-#   cargo install cargo-zigbuild --version 0.20.1 --locked   # lockfile → deps compatible with Rust 1.95 (see rust-toolchain.toml)
+#   cargo install cargo-zigbuild --version 0.23.4 --locked   # lockfile → deps compatible with Rust 1.99 (see rust-toolchain.toml)
 #   # Zig must be on PATH — https://ziglang.org/download/  or snap install zig --classic
+#   # (cargo-zigbuild >= 0.23.4: rustc >= 1.98 passes -Wl,--fix-cortex-a53-843419 for
+#   # aarch64-unknown-linux-musl; zig cc rejects it and the final link fails)
 #   cargo zigbuild --release --target aarch64-unknown-linux-musl
 #
 # Binary: `target/aarch64-unknown-linux-musl/release/lunaris`

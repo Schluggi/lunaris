@@ -113,12 +113,12 @@ jobs:
         if: steps.gate.outputs.release != 'true'
         run: echo "::notice::Release skipped — no fix or feat commits since the previous tag."
 
-      # Must match rust-toolchain.toml channel — otherwise `rustup` uses 1.95.x for `cargo`
+      # Must match rust-toolchain.toml channel — otherwise `rustup` uses 1.99.x for `cargo`
       # while the musl target was added only to an older toolchain → E0463 (no `core` for aarch64 musl).
       - uses: dtolnay/rust-toolchain@stable
         if: steps.gate.outputs.release == 'true'
         with:
-          toolchain: 1.97.1
+          toolchain: 1.99.0
           targets: aarch64-unknown-linux-musl
 
       # Static musl binary — avoids GLIBC version mismatch on the Pod (gnu target links a newer glibc than older Pod OS).
@@ -126,11 +126,11 @@ jobs:
         if: steps.gate.outputs.release == 'true'
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.1
+          version: 0.16.0
 
       - name: Install cargo-zigbuild
         if: steps.gate.outputs.release == 'true'
-        run: cargo install cargo-zigbuild --version 0.20.1 --locked
+        run: cargo install cargo-zigbuild --version 0.23.4 --locked
 
       - name: Bump semantic version in Cargo.toml
         if: steps.gate.outputs.release == 'true'
