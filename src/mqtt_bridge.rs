@@ -2,6 +2,7 @@
 //! vibration tuning, optional capacitance **presence**,
 //! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`), **Cover Button Left / Right** (**`0`..=`5`** taps from **`dismissing alarm (N taps)`**), plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
 //! mattress climate, JSON light (I²C),
+//! every left/right pair also has a **combined** entity: climate Cover (both sides at once), Vibrate Cover button (both sides), mean Current / Target Cover Temperature, Heart Rate (pooled beat intervals of both sides),
 //! MQTT **update** (self-install from GitHub `releases/latest` asset), diagnostic **Internet Access** (HTTP `2xx` reachability of [`Cli::internet_access_url`](crate::cli::Cli::internet_access_url); default the lunaris GitHub project page).
 //!
 //! **rumqttc:** subscribe/publish must not block the task that runs [`rumqttc::EventLoop::poll`].
@@ -24,9 +25,11 @@ use crate::cli::Cli;
 use crate::deviceinfo;
 use crate::frozen_frame::{get_temperatures_frame, set_target_temperature_frame, BedSide};
 use crate::frozen_rx::FrozenTemperatureUpdate;
-use crate::hrv::{HeartRateReading, HeartRateTracker};
+use crate::hrv::{mean_bpm, HeartRateTracker};
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
-use crate::sensor_frame::{vibration_sequence_frames, AlarmPattern};
+use crate::sensor_frame::{
+    vibration_sequence_frames, vibration_sequence_frames_both, AlarmPattern, VibrationBatch,
+};
 use crate::sensor_rx::{
     ambient_from_sensor_message_line, cover_button_dismiss_tap_count_from_sensor_message,
     CoverButtonTapSide, SensorCapacitanceZones, SensorPiezoSamples, PIEZO_DEBUG_DUMP_LIMIT,
@@ -79,6 +82,11 @@ const DISCOVERY_OBJECT_ID_AMBIENT_TEMPERATURE: &str = "lunaris_ambient_temperatu
 const DISCOVERY_OBJECT_ID_AMBIENT_HUMIDITY: &str = "lunaris_ambient_humidity";
 const DISCOVERY_OBJECT_ID_HEART_RATE_LEFT: &str = "lunaris_heart_rate_left";
 const DISCOVERY_OBJECT_ID_HEART_RATE_RIGHT: &str = "lunaris_heart_rate_right";
+const DISCOVERY_OBJECT_ID_CLIMATE_COMBINED: &str = "lunaris_climate_combined";
+const DISCOVERY_OBJECT_ID_VIBRATE_COMBINED: &str = "lunaris_vibrate_combined";
+const DISCOVERY_OBJECT_ID_TEMP_COMBINED: &str = "lunaris_temp_combined";
+const DISCOVERY_OBJECT_ID_TARGET_TEMP_COMBINED: &str = "lunaris_target_temp_combined";
+const DISCOVERY_OBJECT_ID_HEART_RATE_COMBINED: &str = "lunaris_heart_rate_combined";
 const DISCOVERY_OBJECT_ID_UPDATE: &str = "lunaris_update";
 /// Home Assistant [HVACMode](https://developers.home-assistant.io/docs/core/entity/climate#hvac-modes) for active regulation.
 const CLIMATE_MODE_HEAT_COOL: &str = "heat_cool";
@@ -201,7 +209,7 @@ pub struct BridgeConfig {
     /// When set, Frozen frames are queued to [`crate::frozen_link`] instead of opening the port per command.
     pub frozen_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// When set, vibration batches go to [`crate::sensor_link`].
-    pub sensor_tx: Option<mpsc::Sender<Vec<Vec<u8>>>>,
+    pub sensor_tx: Option<mpsc::Sender<VibrationBatch>>,
     /// Publish MQTT sensors for Frozen inbound temperatures (`0x41` / `0xC1`); set by [`crate::main`] with [`crate::frozen_link`].
     pub frozen_temperature_discovery: bool,
     /// Self-update poll interval in seconds (`0` disables polling and MQTT update entity).
@@ -392,6 +400,29 @@ impl BridgeConfig {
         format!("{}/climate/{}/temperature/state", self.topic_prefix, s)
     }
 
+    pub fn climate_combined_discovery_topic(&self) -> String {
+        format!(
+            "{}/climate/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_CLIMATE_COMBINED
+        )
+    }
+
+    pub fn climate_combined_mode_command_topic(&self) -> String {
+        format!("{}/climate/combined/mode/set", self.topic_prefix)
+    }
+
+    pub fn climate_combined_mode_state_topic(&self) -> String {
+        format!("{}/climate/combined/mode/state", self.topic_prefix)
+    }
+
+    pub fn climate_combined_temperature_command_topic(&self) -> String {
+        format!("{}/climate/combined/temperature/set", self.topic_prefix)
+    }
+
+    pub fn climate_combined_temperature_state_topic(&self) -> String {
+        format!("{}/climate/combined/temperature/state", self.topic_prefix)
+    }
+
     pub fn vibrate_discovery_topic(&self, side: BedSide) -> String {
         let id = match side {
             BedSide::Left => DISCOVERY_OBJECT_ID_VIBRATE_LEFT,
@@ -406,6 +437,17 @@ impl BridgeConfig {
             BedSide::Right => "vibrate_right",
         };
         format!("{}/button/{}/set", self.topic_prefix, suffix)
+    }
+
+    pub fn vibrate_combined_discovery_topic(&self) -> String {
+        format!(
+            "{}/button/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_VIBRATE_COMBINED
+        )
+    }
+
+    pub fn vibrate_combined_command_topic(&self) -> String {
+        format!("{}/button/vibrate_combined/set", self.topic_prefix)
     }
 
     pub fn vibration_intensity_command_topic(&self) -> String {
@@ -480,6 +522,14 @@ impl BridgeConfig {
         format!("{}/sensor/cover_temperature_{}/state", self.topic_prefix, s)
     }
 
+    /// Inbound Frozen `0x41` / `0xC1` — mean of both sides' current water temperature.
+    pub fn frozen_current_temp_combined_state_topic(&self) -> String {
+        format!(
+            "{}/sensor/cover_temperature_combined/state",
+            self.topic_prefix
+        )
+    }
+
     /// Inbound Frozen `0x41` / `0xC1` — thermoelectric heatsink temperature.
     pub fn frozen_heatsink_temp_state_topic(&self) -> String {
         format!("{}/sensor/heatsink_temp/state", self.topic_prefix)
@@ -491,6 +541,13 @@ impl BridgeConfig {
             BedSide::Right => DISCOVERY_OBJECT_ID_TEMP_RIGHT,
         };
         format!("{}/sensor/{}/config", self.discovery_prefix, id)
+    }
+
+    pub fn discovery_topic_frozen_current_temp_combined(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_TEMP_COMBINED
+        )
     }
 
     pub fn discovery_topic_frozen_heatsink_temp(&self) -> String {
@@ -512,12 +569,27 @@ impl BridgeConfig {
         )
     }
 
+    /// MQTT bridge combined target (°C) — mean of both sides, mirrors `climate_combined_temperature_state_topic`.
+    pub fn target_temperature_combined_state_topic(&self) -> String {
+        format!(
+            "{}/sensor/target_temperature_combined/state",
+            self.topic_prefix
+        )
+    }
+
     pub fn discovery_topic_target_temperature(&self, side: BedSide) -> String {
         let id = match side {
             BedSide::Left => DISCOVERY_OBJECT_ID_TARGET_TEMP_LEFT,
             BedSide::Right => DISCOVERY_OBJECT_ID_TARGET_TEMP_RIGHT,
         };
         format!("{}/sensor/{}/config", self.discovery_prefix, id)
+    }
+
+    pub fn discovery_topic_target_temperature_combined(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_TARGET_TEMP_COMBINED
+        )
     }
 
     pub fn presence_state_topic(&self, side: BedSide) -> String {
@@ -698,12 +770,24 @@ impl BridgeConfig {
         format!("{}/sensor/heart_rate_right/state", self.topic_prefix)
     }
 
+    /// Mean over the sides with a valid reading (both-sides Heart Rate sensor).
+    pub fn heart_rate_combined_state_topic(&self) -> String {
+        format!("{}/sensor/heart_rate_combined/state", self.topic_prefix)
+    }
+
     pub fn discovery_topic_heart_rate(&self, side: BedSide) -> String {
         let object_id = match side {
             BedSide::Left => DISCOVERY_OBJECT_ID_HEART_RATE_LEFT,
             BedSide::Right => DISCOVERY_OBJECT_ID_HEART_RATE_RIGHT,
         };
         format!("{}/sensor/{}/config", self.discovery_prefix, object_id)
+    }
+
+    pub fn discovery_topic_heart_rate_combined(&self) -> String {
+        format!(
+            "{}/sensor/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_HEART_RATE_COMBINED
+        )
     }
 
     /// HRV (RMSSD) discovery config topic — the HRV entities are not exposed to
@@ -841,14 +925,14 @@ async fn enqueue_frozen_frame(config: &BridgeConfig, frame: Vec<u8>) -> Result<(
 
 async fn enqueue_sensor_vibration(
     config: &BridgeConfig,
-    frames: Vec<Vec<u8>>,
+    batch: VibrationBatch,
 ) -> Result<(), String> {
     if let Some(tx) = &config.sensor_tx {
-        tx.send(frames)
+        tx.send(batch)
             .await
             .map_err(|e| format!("sensor UART task disconnected: {e:?}"))
     } else if let Some(ref path) = config.sensor_device {
-        serial_prime::send_frames(path, config.sensor_baud, &frames)
+        serial_prime::send_frames(path, config.sensor_baud, batch.frames())
             .await
             .map_err(|e| e.to_string())
     } else {
@@ -1032,6 +1116,34 @@ fn discovery_payload_climate(config: &BridgeConfig, side: BedSide) -> String {
     .to_string()
 }
 
+/// Combined (both-sides) climate: one entity drives both mattress sides at once. Mode is
+/// `heat_cool` when either side is enabled, the target is the mean of both sides, and the
+/// current temperature reads the combined cover-temperature sensor.
+fn discovery_payload_climate_combined(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Cover",
+        "unique_id": format!("{}_climate_combined", config.device_identifier),
+        "temperature_unit": "C",
+        "min_temp": config.climate_min_temp,
+        "max_temp": config.climate_max_temp,
+        "temp_step": config.climate_temp_step,
+        "precision": 0.1,
+        "modes": [CLIMATE_MODE_OFF, CLIMATE_MODE_HEAT_COOL],
+        "mode_command_topic": config.climate_combined_mode_command_topic(),
+        "mode_state_topic": config.climate_combined_mode_state_topic(),
+        "temperature_command_topic": config.climate_combined_temperature_command_topic(),
+        "temperature_state_topic": config.climate_combined_temperature_state_topic(),
+        "current_temperature_topic": config.frozen_current_temp_combined_state_topic(),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
 fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> String {
     let name = match side {
         BedSide::Left => "Vibrate Cover Left",
@@ -1046,6 +1158,24 @@ fn discovery_payload_vibrate_button(config: &BridgeConfig, side: BedSide) -> Str
         "command_topic": config.vibrate_command_topic(side),
         "payload_press": config.payload_press,
         "unique_id": format!("{}_{}", config.device_identifier, unique_suffix),
+        "device": config.device_json(),
+        "icon": "mdi:vibrate",
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+/// Combined vibrate button: one `SetAlarm` sequence for both sides in a single batch.
+fn discovery_payload_vibrate_combined_button(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Vibrate Cover",
+        "command_topic": config.vibrate_combined_command_topic(),
+        "payload_press": config.payload_press,
+        "unique_id": format!("{}_vibrate_combined", config.device_identifier),
         "device": config.device_json(),
         "icon": "mdi:vibrate",
         "origin": {
@@ -1268,17 +1398,38 @@ fn discovery_payload_ambient_humidity(config: &BridgeConfig) -> String {
     .to_string()
 }
 
-fn discovery_payload_heart_rate(config: &BridgeConfig, side: BedSide) -> String {
-    let (name, state_topic, unique_suffix) = match side {
-        BedSide::Left => (
+/// Heart-rate state topic selector: one mattress side or the combined (both-sides) sensor.
+#[derive(Clone, Copy, Debug)]
+enum HrTopic {
+    Side(BedSide),
+    Combined,
+}
+
+impl HrTopic {
+    fn state_topic(&self, config: &BridgeConfig) -> String {
+        match self {
+            HrTopic::Side(side) => heart_rate_state_topic(config, *side),
+            HrTopic::Combined => config.heart_rate_combined_state_topic(),
+        }
+    }
+}
+
+fn discovery_payload_heart_rate(config: &BridgeConfig, topic: HrTopic) -> String {
+    let (name, state_topic, unique_suffix) = match topic {
+        HrTopic::Side(BedSide::Left) => (
             "Heart Rate Left",
             config.heart_rate_left_state_topic(),
             "heart_rate_left",
         ),
-        BedSide::Right => (
+        HrTopic::Side(BedSide::Right) => (
             "Heart Rate Right",
             config.heart_rate_right_state_topic(),
             "heart_rate_right",
+        ),
+        HrTopic::Combined => (
+            "Heart Rate",
+            config.heart_rate_combined_state_topic(),
+            "heart_rate_combined",
         ),
     };
     json!({
@@ -1305,23 +1456,32 @@ fn heart_rate_state_topic(config: &BridgeConfig, side: BedSide) -> String {
     }
 }
 
+/// Combined (both-sides) heart rate (bpm): one rate computed from the **pooled**
+/// inter-beat intervals of all accepted sides (`ibis_ms` windows concatenated) —
+/// all beat data together, not the mean of the two per-side readings. `None` when
+/// no occupied side has a valid reading (the caller then applies the same
+/// zero/unknown publish rules as for a single side).
+fn combined_heart_rate_bpm(pooled_ibis_ms: &[f32]) -> Option<f32> {
+    mean_bpm(pooled_ibis_ms)
+}
+
 async fn publish_heart_rate_reading(
     client: &AsyncClient,
     config: &BridgeConfig,
-    side: BedSide,
-    reading: HeartRateReading,
+    topic: HrTopic,
+    bpm: f32,
 ) {
-    let hr_topic = heart_rate_state_topic(config, side);
+    let hr_topic = topic.state_topic(config);
     let qos = QoS::AtLeastOnce;
     // Not retained: a stale bpm after a lunaris restart would be misleading.
     // When there is no valid reading (presence OFF, lock expired, artifact lock),
-    // `clear_heart_rate_reading` publishes `0.0` so HA shows 0 instead of unknown.
+    // `publish_heart_rate_no_reading` publishes `0.0` so HA shows 0 instead of unknown.
     // The HRV (RMSSD) value is computed and logged but not published — the HRV
     // entities are not exposed to Home Assistant for now (not calibrated yet).
     let retain = false;
-    let bpm = format!("{:.1}", reading.bpm);
+    let bpm = format!("{bpm:.1}");
     if let Err(e) = client.publish(hr_topic, qos, retain, bpm.as_bytes()).await {
-        tracing::error!(?e, ?side, "publish heart rate state");
+        tracing::error!(?e, ?topic, "publish heart rate state");
     }
 }
 
@@ -1400,8 +1560,8 @@ impl HrSideState {
         }
     }
 
-    /// Note that the side currently has no valid reading. Publishes the
-    /// no-reading state once the streak persisted for
+    /// Note that the side (or the combined sensor) currently has no valid reading.
+    /// Publishes the no-reading state once the streak persisted for
     /// `HEART_RATE_ZERO_PUBLISH_DELAY` (several consecutive publish intervals):
     /// an **empty payload** (HA shows `unknown`) when nobody is in bed, `0.0`
     /// when the side is occupied but has no valid reading (lock expired /
@@ -1411,7 +1571,7 @@ impl HrSideState {
         &mut self,
         client: &AsyncClient,
         config: &BridgeConfig,
-        side: BedSide,
+        topic: HrTopic,
         reason: ZeroReason,
     ) {
         if self.zero_since.is_none() {
@@ -1420,21 +1580,25 @@ impl HrSideState {
         match self.zero_publish_decision() {
             ZeroPublish::Seed => {
                 // Startup seed: nothing in HA yet.
-                publish_heart_rate_no_reading(client, config, side, reason).await;
+                publish_heart_rate_no_reading(client, config, topic, reason).await;
                 self.published = true;
                 self.zero_published = true;
             }
             ZeroPublish::Due => {
-                publish_heart_rate_no_reading(client, config, side, reason).await;
+                publish_heart_rate_no_reading(client, config, topic, reason).await;
                 self.zero_published = true;
                 if reason.clears_to_unknown() {
                     tracing::info!(
-                        ?side,
+                        ?topic,
                         reason = reason.as_str(),
                         "heart rate state cleared to unknown (empty payload)"
                     );
                 } else {
-                    tracing::info!(?side, reason = reason.as_str(), "heart rate / HRV set to 0");
+                    tracing::info!(
+                        ?topic,
+                        reason = reason.as_str(),
+                        "heart rate / HRV set to 0"
+                    );
                 }
             }
             ZeroPublish::Hold => {}
@@ -1459,10 +1623,10 @@ impl HrSideState {
 async fn publish_heart_rate_no_reading(
     client: &AsyncClient,
     config: &BridgeConfig,
-    side: BedSide,
+    topic: HrTopic,
     reason: ZeroReason,
 ) {
-    let hr_topic = heart_rate_state_topic(config, side);
+    let hr_topic = topic.state_topic(config);
     let qos = QoS::AtLeastOnce;
     let retain = false;
     let payload: &[u8] = if reason.clears_to_unknown() {
@@ -1471,7 +1635,7 @@ async fn publish_heart_rate_no_reading(
         b"0.0"
     };
     if let Err(e) = client.publish(hr_topic, qos, retain, payload).await {
-        tracing::error!(?e, ?side, "reset heart rate state");
+        tracing::error!(?e, ?topic, "reset heart rate state");
     }
 }
 
@@ -2034,20 +2198,32 @@ fn presence_tune_from_calibration_samples(
 }
 
 /// Uncalibrated: max-of-three zones vs absolute threshold (`--presence-cap-threshold`).
-fn occupancy_uncalibrated_max(z: &SensorCapacitanceZones, abs_threshold: u16) -> (bool, bool) {
+/// The combined value is decided directly on **all six zones** (max over the whole
+/// grid), not by OR-ing the two per-side results.
+fn occupancy_uncalibrated_max(
+    z: &SensorCapacitanceZones,
+    abs_threshold: u16,
+) -> (bool, bool, bool) {
     let left_max = z.zones[..3].iter().copied().max().unwrap_or(0);
     let right_max = z.zones[3..].iter().copied().max().unwrap_or(0);
-    (left_max >= abs_threshold, right_max >= abs_threshold)
+    let any_max = z.zones.iter().copied().max().unwrap_or(0);
+    (
+        left_max >= abs_threshold,
+        right_max >= abs_threshold,
+        any_max >= abs_threshold,
+    )
 }
 
 /// Calibrated: opensleep [`PresenseManager::update_presence`](https://github.com/LiamSnow/opensleep/blob/main/src/sensor/presence.rs).
+/// The combined value is decided directly on the debounce grid of **all six zones**,
+/// not by OR-ing the two per-side results.
 fn occupancy_calibrated(
     z: &SensorCapacitanceZones,
     inference: &mut PresenceInferenceState,
     baseline_delta: u16,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
     let Some(ref baselines) = inference.baselines else {
-        return (false, false);
+        return (false, false, false);
     };
     for (i, &b) in baselines.iter().enumerate() {
         if z.zones[i] > b.saturating_add(baseline_delta) {
@@ -2062,15 +2238,21 @@ fn occupancy_calibrated(
     let right = inference.debounce[3..]
         .iter()
         .any(|&c| c >= PRESENCE_DEBOUNCE_FRAMES);
-    (left, right)
+    let any = inference
+        .debounce
+        .iter()
+        .any(|&c| c >= PRESENCE_DEBOUNCE_FRAMES);
+    (left, right, any)
 }
 
+/// Occupancy for both sides **and** the combined sensor in one inference over the
+/// whole six-zone grid.
 fn inference_occupancy(
     z: &SensorCapacitanceZones,
     inference: &mut PresenceInferenceState,
     fallback_abs_threshold: u16,
     baseline_delta: u16,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
     if inference.baselines.is_some() {
         occupancy_calibrated(z, inference, baseline_delta)
     } else {
@@ -2079,6 +2261,7 @@ fn inference_occupancy(
 }
 
 /// Per-sample diagnostic for [`BridgeConfig::presence_debug`].
+#[allow(clippy::too_many_arguments)]
 fn log_presence_debug(
     z: &SensorCapacitanceZones,
     inference: &PresenceInferenceState,
@@ -2086,6 +2269,7 @@ fn log_presence_debug(
     baseline_delta: u16,
     left_on: bool,
     right_on: bool,
+    any_on: bool,
     calibrating: bool,
 ) {
     let left_max = z.zones[..3].iter().copied().max().unwrap_or(0);
@@ -2100,6 +2284,7 @@ fn log_presence_debug(
                 threshold = fallback_abs_threshold,
                 occupied_left = left_on,
                 occupied_right = right_on,
+                occupied_any = any_on,
                 calibrating,
                 "presence debug (uncalibrated: left_max/right_max vs threshold — use MQTT Calibrate presence or lower --presence-cap-threshold)"
             );
@@ -2114,8 +2299,9 @@ fn log_presence_debug(
                 debounce_need = PRESENCE_DEBOUNCE_FRAMES,
                 occupied_left = left_on,
                 occupied_right = right_on,
+                occupied_any = any_on,
                 calibrating,
-                "presence debug (calibrated: side ON when any zone on that side exceeds baseline+Δ for debounce_need consecutive frames)"
+                "presence debug (calibrated: side ON when any zone on that side exceeds baseline+Δ for debounce_need consecutive frames; combined ON when any zone of the whole grid does)"
             );
         }
     }
@@ -2199,14 +2385,16 @@ async fn publish_presence_calibration_running_state(
     }
 }
 
+/// Publish all three occupancy states. `any_on` is the combined value decided
+/// directly on all six zones by [`inference_occupancy`] (not `left_on || right_on`).
 async fn publish_presence_readings(
     client: &AsyncClient,
     config: &BridgeConfig,
     left_on: bool,
     right_on: bool,
+    any_on: bool,
 ) {
     let qos = QoS::AtLeastOnce;
-    let any_on = left_on || right_on;
     let publishes = [
         (
             config.presence_state_topic(BedSide::Left),
@@ -2379,6 +2567,14 @@ async fn publish_ambient_from_sensor_message(
     }
 }
 
+/// Mean of two centidegree readings, formatted like the per-side payloads (`{:.2}` °C).
+fn mean_temperature_payload(a_centi: u16, b_centi: u16) -> String {
+    format!(
+        "{:.2}",
+        (f64::from(a_centi) + f64::from(b_centi)) / 2.0 / 100.0
+    )
+}
+
 async fn publish_frozen_temperature_readings(
     client: &AsyncClient,
     config: &BridgeConfig,
@@ -2387,6 +2583,7 @@ async fn publish_frozen_temperature_readings(
     let qos = QoS::AtLeastOnce;
     let left = format!("{:.2}", u.left_centi as f64 / 100.0);
     let right = format!("{:.2}", u.right_centi as f64 / 100.0);
+    let combined = mean_temperature_payload(u.left_centi, u.right_centi);
     let hs = format!("{:.2}", u.heatsink_centi as f64 / 100.0);
     let publishes = [
         (config.frozen_current_temp_state_topic(BedSide::Left), left),
@@ -2394,6 +2591,7 @@ async fn publish_frozen_temperature_readings(
             config.frozen_current_temp_state_topic(BedSide::Right),
             right,
         ),
+        (config.frozen_current_temp_combined_state_topic(), combined),
         (config.frozen_heatsink_temp_state_topic(), hs),
     ];
     for (topic, payload) in publishes {
@@ -2625,7 +2823,7 @@ async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side:
         config.piezo_freq_hz,
     );
     let frame_count = frames.len();
-    match enqueue_sensor_vibration(config, frames).await {
+    match enqueue_sensor_vibration(config, VibrationBatch::Side(frames)).await {
         Ok(()) => {
             tracing::info!(
                 ?side,
@@ -2647,6 +2845,51 @@ async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side:
         Err(e) => {
             tracing::error!(%e, ?side, "Sensor vibration enqueue failed");
             publish_json_result(client, config, vibrate_action_label(side), "error", &e).await;
+        }
+    }
+}
+
+/// Combined vibrate button: one batch with `SetAlarm` for **both** sides, so they
+/// vibrate at the same time (shared piezo priming in a single sequence).
+async fn handle_vibrate_press_combined(client: &AsyncClient, config: &BridgeConfig) {
+    if config.sensor_device.is_none() {
+        return;
+    }
+    let (intensity, duration, pattern, cancel_preamble) = {
+        let g = config.vibration_settings.lock().await;
+        (g.intensity, g.duration_sec, g.pattern, g.cancel_preamble)
+    };
+    let intensity = intensity.clamp(1, 100);
+    let duration = duration.clamp(1, 600);
+    let frames = vibration_sequence_frames_both(
+        intensity,
+        pattern,
+        duration,
+        cancel_preamble,
+        config.piezo_freq_hz,
+    );
+    let frame_count = frames.len();
+    match enqueue_sensor_vibration(config, VibrationBatch::Both(frames)).await {
+        Ok(()) => {
+            tracing::info!(
+                intensity,
+                duration,
+                pattern = ?pattern,
+                frame_count,
+                "Sensor vibration sequence sent for both sides (opensleep: optional cancels + EnableVibration + piezo + SetAlarm left/right)"
+            );
+            publish_json_result(
+                client,
+                config,
+                "vibrate_combined",
+                "success",
+                "vibration sequence (both sides)",
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::error!(%e, "Sensor vibration enqueue failed (both sides)");
+            publish_json_result(client, config, "vibrate_combined", "error", &e).await;
         }
     }
 }
@@ -3263,6 +3506,215 @@ async fn handle_climate_temperature_command(
     }
 }
 
+/// Combined climate mode: active when **either** side is enabled (like Presence Any).
+fn combined_climate_mode(left: &ClimateSideState, right: &ClimateSideState) -> &'static str {
+    if left.enabled || right.enabled {
+        CLIMATE_MODE_HEAT_COOL
+    } else {
+        CLIMATE_MODE_OFF
+    }
+}
+
+/// Combined climate target (°C): mean of both sides' targets.
+fn combined_target_temp_c(left: &ClimateSideState, right: &ClimateSideState) -> f64 {
+    (f64::from(left.target_centi) + f64::from(right.target_centi)) / 2.0 / 100.0
+}
+
+/// Publish the combined climate state (mode + target) and the combined Target
+/// Cover Temperature sensor from both sides' states.
+async fn publish_climate_combined_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    left: &ClimateSideState,
+    right: &ClimateSideState,
+) {
+    let mode = combined_climate_mode(left, right);
+    let temp_str = format!("{:.2}", combined_target_temp_c(left, right));
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(config.climate_combined_mode_state_topic(), qos, true, mode)
+        .await
+    {
+        tracing::error!(?e, "publish combined climate mode state");
+    }
+    if let Err(e) = client
+        .publish(
+            config.climate_combined_temperature_state_topic(),
+            qos,
+            true,
+            temp_str.as_str(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish combined climate temperature state");
+    }
+    if let Err(e) = client
+        .publish(
+            config.target_temperature_combined_state_topic(),
+            qos,
+            true,
+            temp_str.as_str(),
+        )
+        .await
+    {
+        tracing::error!(?e, "publish combined target temperature sensor state");
+    }
+}
+
+/// Republish the combined climate state after any per-side climate change.
+async fn publish_climate_combined_after_change(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    st: &PublishHandlerState,
+) {
+    let left = st.climate_left.lock().await.clone();
+    let right = st.climate_right.lock().await.clone();
+    publish_climate_combined_state(client, config, &left, &right).await;
+}
+
+/// Combined climate mode command: apply the mode to **both** sides (each keeps its own target).
+async fn handle_climate_combined_mode_command(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    st: &PublishHandlerState,
+    payload: &[u8],
+) {
+    let Ok(mode_str) = std::str::from_utf8(payload) else {
+        tracing::warn!("combined climate mode: invalid UTF-8");
+        return;
+    };
+    let enabled = match mode_str.trim() {
+        CLIMATE_MODE_OFF => false,
+        CLIMATE_MODE_HEAT_COOL => true,
+        other => {
+            tracing::warn!(%other, "ignored unknown climate mode");
+            return;
+        }
+    };
+
+    let (backup_left, backup_right, frame_left, frame_right, snap_left, snap_right) = {
+        let mut l = st.climate_left.lock().await;
+        let mut r = st.climate_right.lock().await;
+        let backups = (l.clone(), r.clone());
+        l.enabled = enabled;
+        r.enabled = enabled;
+        let frames = (
+            set_target_temperature_frame(BedSide::Left, l.enabled, l.target_centi),
+            set_target_temperature_frame(BedSide::Right, r.enabled, r.target_centi),
+        );
+        (
+            backups.0,
+            backups.1,
+            frames.0,
+            frames.1,
+            l.clone(),
+            r.clone(),
+        )
+    };
+
+    let res_left = enqueue_frozen_frame(config, frame_left).await;
+    let res_right = enqueue_frozen_frame(config, frame_right).await;
+    if let Err(e) = res_left.as_ref().and(res_right.as_ref()) {
+        tracing::error!(%e, "combined climate mode Frozen UART enqueue failed");
+        *st.climate_left.lock().await = backup_left;
+        *st.climate_right.lock().await = backup_right;
+        publish_json_result(client, config, "climate_combined", "error", e).await;
+        return;
+    }
+    tracing::info!(enabled, "combined climate mode (both sides)");
+    publish_climate_state(client, config, BedSide::Left, &snap_left).await;
+    publish_climate_state(client, config, BedSide::Right, &snap_right).await;
+    publish_climate_combined_state(client, config, &snap_left, &snap_right).await;
+    publish_json_result(
+        client,
+        config,
+        "climate_combined",
+        "success",
+        "set target temperature (both sides)",
+    )
+    .await;
+}
+
+/// Combined climate temperature command: set the target on **both** sides; only enabled
+/// sides are sent to the MCU (like the per-side handler), disabled sides keep the new
+/// target for when they are turned on.
+async fn handle_climate_combined_temperature_command(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    st: &PublishHandlerState,
+    payload: &[u8],
+) {
+    let Ok(text) = std::str::from_utf8(payload) else {
+        return;
+    };
+    let Ok(temp_c) = text.trim().parse::<f64>() else {
+        tracing::warn!("ignored non-numeric climate temperature");
+        return;
+    };
+    let clamped = temp_c.clamp(config.climate_min_temp, config.climate_max_temp);
+    let centi = (clamped * 100.0).round() as u16;
+
+    let (backup_left, backup_right, snap_left, snap_right, send_left, send_right) = {
+        let mut l = st.climate_left.lock().await;
+        let mut r = st.climate_right.lock().await;
+        let backups = (l.clone(), r.clone());
+        l.target_centi = centi;
+        r.target_centi = centi;
+        (
+            backups.0,
+            backups.1,
+            l.clone(),
+            r.clone(),
+            l.enabled,
+            r.enabled,
+        )
+    };
+
+    let mut failed: Option<String> = None;
+    if send_left {
+        if let Err(e) = enqueue_frozen_frame(
+            config,
+            set_target_temperature_frame(BedSide::Left, true, centi),
+        )
+        .await
+        {
+            failed = Some(e);
+        }
+    }
+    if failed.is_none() && send_right {
+        if let Err(e) = enqueue_frozen_frame(
+            config,
+            set_target_temperature_frame(BedSide::Right, true, centi),
+        )
+        .await
+        {
+            failed = Some(e);
+        }
+    }
+    if let Some(e) = failed {
+        tracing::error!(%e, "combined climate temperature Frozen UART enqueue failed");
+        *st.climate_left.lock().await = backup_left;
+        *st.climate_right.lock().await = backup_right;
+        publish_json_result(client, config, "climate_combined", "error", &e).await;
+        return;
+    }
+    tracing::info!(
+        target_centi = centi,
+        "combined climate temperature (both sides)"
+    );
+    publish_climate_state(client, config, BedSide::Left, &snap_left).await;
+    publish_climate_state(client, config, BedSide::Right, &snap_right).await;
+    publish_climate_combined_state(client, config, &snap_left, &snap_right).await;
+    publish_json_result(
+        client,
+        config,
+        "climate_combined",
+        "success",
+        "set target temperature (both sides)",
+    )
+    .await;
+}
+
 async fn publish_self_update_state(
     client: &AsyncClient,
     config: &BridgeConfig,
@@ -3590,6 +4042,37 @@ async fn publish_discovery_and_online(
             tracing::error!(?e, side = ?side, "publish target temperature sensor discovery");
         }
     }
+    {
+        let disc_climate_combined = discovery_payload_climate_combined(config);
+        if let Err(e) = client
+            .publish(
+                config.climate_combined_discovery_topic(),
+                qos,
+                true,
+                disc_climate_combined,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish combined climate discovery");
+        }
+        let disc_target_combined = discovery_payload_frozen_temperature(
+            config,
+            "Target Cover Temperature",
+            "target_temp_combined",
+            config.target_temperature_combined_state_topic(),
+        );
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_target_temperature_combined(),
+                qos,
+                true,
+                disc_target_combined,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish combined target temperature sensor discovery");
+        }
+    }
     if config.sensor_device.is_some() {
         for side in [BedSide::Left, BedSide::Right] {
             let disc_v = discovery_payload_vibrate_button(config, side);
@@ -3599,6 +4082,18 @@ async fn publish_discovery_and_online(
             {
                 tracing::error!(?e, side = ?side, "publish vibrate discovery");
             }
+        }
+        let disc_vc = discovery_payload_vibrate_combined_button(config);
+        if let Err(e) = client
+            .publish(
+                config.vibrate_combined_discovery_topic(),
+                qos,
+                true,
+                disc_vc,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish combined vibrate discovery");
         }
         let disc_i = discovery_payload_vibration_intensity_number(config);
         if let Err(e) = client
@@ -3705,7 +4200,7 @@ async fn publish_discovery_and_online(
             tracing::error!(?e, "publish ambient humidity discovery");
         }
         for side in [BedSide::Left, BedSide::Right] {
-            let disc_hr = discovery_payload_heart_rate(config, side);
+            let disc_hr = discovery_payload_heart_rate(config, HrTopic::Side(side));
             if let Err(e) = client
                 .publish(config.discovery_topic_heart_rate(side), qos, true, disc_hr)
                 .await
@@ -3721,6 +4216,18 @@ async fn publish_discovery_and_online(
             {
                 tracing::error!(?e, ?side, "remove HRV RMSSD discovery");
             }
+        }
+        let disc_hr_combined = discovery_payload_heart_rate(config, HrTopic::Combined);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_heart_rate_combined(),
+                qos,
+                true,
+                disc_hr_combined,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish combined heart rate discovery");
         }
     }
     if config.sensor_device.is_some() && config.presence_discovery {
@@ -3741,7 +4248,7 @@ async fn publish_discovery_and_online(
             tracing::error!(?e, "publish presence_any discovery");
         }
         // HA shows "Unknown" until a retained state arrives; capacitance `0x33` may be rare/absent at boot.
-        publish_presence_readings(client, config, false, false).await;
+        publish_presence_readings(client, config, false, false, false).await;
         publish_presence_calibration_running_state(client, config, false).await;
         let disc_cal = discovery_payload_calibrate_presence_button(config);
         if let Err(e) = client
@@ -3834,6 +4341,23 @@ async fn publish_discovery_and_online(
             {
                 tracing::error!(?e, side = ?side, "publish Frozen current temperature discovery");
             }
+        }
+        let disc_combined = discovery_payload_frozen_temperature(
+            config,
+            "Current Cover Temperature",
+            "cover_temp_combined",
+            config.frozen_current_temp_combined_state_topic(),
+        );
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_frozen_current_temp_combined(),
+                qos,
+                true,
+                disc_combined,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish Frozen combined current temperature discovery");
         }
         let disc_hs = discovery_payload_frozen_temperature(
             config,
@@ -3958,6 +4482,18 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig, st: &Publish
             tracing::error!(?e, side = ?side, "subscribe climate temperature state topic (broker retain)");
         }
     }
+    if let Err(e) = client
+        .subscribe(config.climate_combined_mode_command_topic(), qos)
+        .await
+    {
+        tracing::error!(?e, "subscribe combined climate mode topic");
+    }
+    if let Err(e) = client
+        .subscribe(config.climate_combined_temperature_command_topic(), qos)
+        .await
+    {
+        tracing::error!(?e, "subscribe combined climate temperature topic");
+    }
     if config.i2c_device.is_some() {
         if let Err(e) = client.subscribe(config.light_state_topic(), qos).await {
             tracing::error!(?e, "subscribe light state topic (broker retain)");
@@ -3971,6 +4507,12 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig, st: &Publish
             {
                 tracing::error!(?e, side = ?side, "subscribe vibrate command topic");
             }
+        }
+        if let Err(e) = client
+            .subscribe(config.vibrate_combined_command_topic(), qos)
+            .await
+        {
+            tracing::error!(?e, "subscribe combined vibrate command topic");
         }
         for topic in [
             config.vibration_intensity_command_topic(),
@@ -4369,6 +4911,10 @@ async fn handle_publish(
             handle_vibrate_press(client, config, BedSide::Right).await;
             return;
         }
+        if p.topic == config.vibrate_combined_command_topic() && p.payload.as_ref() == expected {
+            handle_vibrate_press_combined(client, config).await;
+            return;
+        }
     }
 
     if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
@@ -4408,6 +4954,7 @@ async fn handle_publish(
     if p.topic == config.climate_mode_command_topic(BedSide::Left) {
         handle_climate_mode_command(client, config, BedSide::Left, &st.climate_left, &p.payload)
             .await;
+        publish_climate_combined_after_change(client, config, st).await;
         return;
     }
     if p.topic == config.climate_mode_command_topic(BedSide::Right) {
@@ -4419,6 +4966,7 @@ async fn handle_publish(
             &p.payload,
         )
         .await;
+        publish_climate_combined_after_change(client, config, st).await;
         return;
     }
     if p.topic == config.climate_temperature_command_topic(BedSide::Left) {
@@ -4430,6 +4978,7 @@ async fn handle_publish(
             &p.payload,
         )
         .await;
+        publish_climate_combined_after_change(client, config, st).await;
         return;
     }
     if p.topic == config.climate_temperature_command_topic(BedSide::Right) {
@@ -4441,6 +4990,16 @@ async fn handle_publish(
             &p.payload,
         )
         .await;
+        publish_climate_combined_after_change(client, config, st).await;
+        return;
+    }
+
+    if p.topic == config.climate_combined_mode_command_topic() {
+        handle_climate_combined_mode_command(client, config, st, &p.payload).await;
+        return;
+    }
+    if p.topic == config.climate_combined_temperature_command_topic() {
+        handle_climate_combined_temperature_command(client, config, st, &p.payload).await;
         return;
     }
 
@@ -4614,6 +5173,9 @@ pub async fn run(
             let mut last_publish = [None::<Instant>; 2];
             // Per-side publish state (announced / published / zero streak).
             let mut state = [HrSideState::default(), HrSideState::default()];
+            // Combined (both-sides) Heart Rate sensor: same publish rules as per side.
+            let mut hr_combined = HrSideState::default();
+            let mut last_publish_combined: Option<Instant> = None;
             let mut artifact_warned = [false; 2];
             let mut saw_any_samples = false;
             let mut last_nolock_warn = Instant::now();
@@ -4755,13 +5317,16 @@ pub async fn run(
                         } else {
                             cfg.piezo_freq_hz
                         };
+                        // Per-side readings accepted in this frame (their IBI windows
+                        // are pooled for the combined both-sides Heart Rate sensor).
+                        let mut accepted = [false; 2];
                         for (i, (side, tracker)) in trackers.iter_mut().enumerate() {
                             let occupied = !presence_gate || occ[i];
                             if !occupied {
                                 tracker.clear_lock();
                                 state[i].announced = false;
                                 state[i]
-                                    .note_zero(&c, &cfg, *side, ZeroReason::PresenceOff)
+                                    .note_zero(&c, &cfg, HrTopic::Side(*side), ZeroReason::PresenceOff)
                                     .await;
                                 continue;
                             }
@@ -4780,7 +5345,7 @@ pub async fn run(
                             let Some(reading) = tracker.reading() else {
                                 state[i].announced = false;
                                 state[i]
-                                    .note_zero(&c, &cfg, *side, ZeroReason::LockExpired)
+                                    .note_zero(&c, &cfg, HrTopic::Side(*side), ZeroReason::LockExpired)
                                     .await;
                                 continue;
                             };
@@ -4801,7 +5366,7 @@ pub async fn run(
                                 tracker.clear_lock();
                                 state[i].announced = false;
                                 state[i]
-                                    .note_zero(&c, &cfg, *side, ZeroReason::Artifact)
+                                    .note_zero(&c, &cfg, HrTopic::Side(*side), ZeroReason::Artifact)
                                     .await;
                                 if !artifact_warned[i] {
                                     artifact_warned[i] = true;
@@ -4816,6 +5381,7 @@ pub async fn run(
                             }
                             artifact_warned[i] = false;
                             state[i].note_reading();
+                            accepted[i] = true;
                             let due = last_publish[i]
                                 .is_none_or(|t| t.elapsed() >= HEART_RATE_PUBLISH_INTERVAL);
                             if !due {
@@ -4841,7 +5407,8 @@ pub async fn run(
                                     "heart rate / HRV reading"
                                 );
                             }
-                            publish_heart_rate_reading(&c, &cfg, *side, reading).await;
+                            publish_heart_rate_reading(&c, &cfg, HrTopic::Side(*side), reading.bpm)
+                                .await;
                             state[i].published = true;
                             if cfg.sensor_piezo_debug {
                                 // Beat-pattern diagnostics: the IBI list shows whether
@@ -4857,6 +5424,49 @@ pub async fn run(
                                     wave = ?tracker.detrended_window(4),
                                     "heart rate / HRV reading (--sensor-piezo-debug)"
                                 );
+                            }
+                        }
+                        // Combined (both-sides) Heart Rate sensor: one rate over the
+                        // pooled inter-beat intervals of all accepted sides — all beat
+                        // data together, not the mean of the two per-side readings.
+                        // When nobody is in bed the state is cleared to an empty
+                        // payload (HA `unknown`), and `0.0` is published only for a
+                        // persistent no-reading streak — same rules as per side.
+                        let mut pooled_ibis_ms: Vec<f32> = Vec::new();
+                        for (i, &side_accepted) in accepted.iter().enumerate() {
+                            if side_accepted {
+                                pooled_ibis_ms.extend_from_slice(&trackers[i].1.ibis_ms());
+                            }
+                        }
+                        match combined_heart_rate_bpm(&pooled_ibis_ms) {
+                            Some(bpm) => {
+                                hr_combined.note_reading();
+                                let due = last_publish_combined
+                                    .is_none_or(|t| t.elapsed() >= HEART_RATE_PUBLISH_INTERVAL);
+                                if due {
+                                    last_publish_combined = Some(Instant::now());
+                                    if !hr_combined.announced {
+                                        hr_combined.announced = true;
+                                        tracing::info!(
+                                            bpm,
+                                            "heart rate / HRV combined tracking started (Sensor piezo stream)"
+                                        );
+                                    }
+                                    publish_heart_rate_reading(&c, &cfg, HrTopic::Combined, bpm)
+                                        .await;
+                                    hr_combined.published = true;
+                                }
+                            }
+                            None => {
+                                let any_occupied = !presence_gate || occ[0] || occ[1];
+                                let reason = if any_occupied {
+                                    ZeroReason::LockExpired
+                                } else {
+                                    ZeroReason::PresenceOff
+                                };
+                                hr_combined
+                                    .note_zero(&c, &cfg, HrTopic::Combined, reason)
+                                    .await;
                             }
                         }
                         if (!presence_gate || occ[0] || occ[1])
@@ -4923,7 +5533,7 @@ pub async fn run(
             tokio::spawn(async move {
                 let mut inference = PresenceInferenceState::default();
                 // Matches `publish_discovery_and_online` seed (`OFF`/`OFF`).
-                let mut prev_publish = Some((false, false));
+                let mut prev_publish = Some((false, false, false));
                 let mut cal_until: Option<Instant> = None;
                 let mut cal_samples = Vec::<[u16; 6]>::new();
 
@@ -5025,7 +5635,7 @@ pub async fn run(
                                 cfg.presence_cap_threshold.load(Ordering::Relaxed);
                             let baseline_delta =
                                 cfg.presence_baseline_delta.load(Ordering::Relaxed);
-                            let (left_on, right_on) =
+                            let (left_on, right_on, any_on) =
                                 inference_occupancy(&z, &mut inference, abs_thr, baseline_delta);
                             let calibrating = cal_until.is_some();
                             if presence_debug {
@@ -5036,6 +5646,7 @@ pub async fn run(
                                     baseline_delta,
                                     left_on,
                                     right_on,
+                                    any_on,
                                     calibrating,
                                 );
                             }
@@ -5044,18 +5655,19 @@ pub async fn run(
                             }
                             cfg.presence_occupied_left.store(left_on, Ordering::Relaxed);
                             cfg.presence_occupied_right.store(right_on, Ordering::Relaxed);
-                            if prev_publish == Some((left_on, right_on)) {
+                            if prev_publish == Some((left_on, right_on, any_on)) {
                                 continue;
                             }
                             tracing::trace!(
                                 left_on,
                                 right_on,
+                                any_on,
                                 calibrated = inference.baselines.is_some(),
                                 zones = ?z.zones,
                                 "Sensor presence (capacitance)"
                             );
-                            prev_publish = Some((left_on, right_on));
-                            publish_presence_readings(&c, &cfg, left_on, right_on).await;
+                            prev_publish = Some((left_on, right_on, any_on));
+                            publish_presence_readings(&c, &cfg, left_on, right_on, any_on).await;
                         }
 
                         _ = async {
@@ -5162,6 +5774,8 @@ pub async fn run(
                             }
                             publish_climate_state(&c, &cfg, side, &snap).await;
                         }
+                        // The combined climate mirrors the restored per-side states.
+                        publish_climate_combined_after_change(&c, &cfg, &hs).await;
 
                         if cfg.sensor_device.is_some() {
                             publish_vibration_mqtt_states(&c, &cfg).await;
@@ -6090,12 +6704,212 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(
                 inference_occupancy(&z, &mut inference, 9999, 50),
-                (false, false)
+                (false, false, false)
             );
         }
         assert_eq!(
             inference_occupancy(&z, &mut inference, 9999, 50),
-            (true, true)
+            (true, true, true)
+        );
+    }
+
+    #[test]
+    fn combined_climate_discovery_uses_combined_topics() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let v: serde_json::Value =
+            serde_json::from_str(&discovery_payload_climate_combined(&cfg)).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Cover"));
+        assert_eq!(
+            v["mode_command_topic"].as_str(),
+            Some(cfg.climate_combined_mode_command_topic().as_str()),
+        );
+        assert_eq!(
+            v["mode_state_topic"].as_str(),
+            Some(cfg.climate_combined_mode_state_topic().as_str()),
+        );
+        assert_eq!(
+            v["temperature_command_topic"].as_str(),
+            Some(cfg.climate_combined_temperature_command_topic().as_str()),
+        );
+        assert_eq!(
+            v["temperature_state_topic"].as_str(),
+            Some(cfg.climate_combined_temperature_state_topic().as_str()),
+        );
+        // The combined climate reads the combined current cover temperature sensor.
+        assert_eq!(
+            v["current_temperature_topic"].as_str(),
+            Some(cfg.frozen_current_temp_combined_state_topic().as_str()),
+        );
+        assert!(v["unique_id"]
+            .as_str()
+            .unwrap()
+            .ends_with("_climate_combined"));
+    }
+
+    #[test]
+    fn combined_climate_state_is_any_enabled_and_mean_target() {
+        let mut left = ClimateSideState::default();
+        let mut right = ClimateSideState::default();
+        // Both off → off, mean of defaults (30.00).
+        assert_eq!(combined_climate_mode(&left, &right), CLIMATE_MODE_OFF);
+        assert_eq!(combined_target_temp_c(&left, &right), 30.0);
+        // Either side on → heat_cool.
+        left.enabled = true;
+        left.target_centi = 2000;
+        assert_eq!(combined_climate_mode(&left, &right), CLIMATE_MODE_HEAT_COOL);
+        assert_eq!(combined_target_temp_c(&left, &right), 25.0);
+        // Both on with different targets → still heat_cool, mean target.
+        right.enabled = true;
+        right.target_centi = 2200;
+        assert_eq!(combined_climate_mode(&left, &right), CLIMATE_MODE_HEAT_COOL);
+        assert_eq!(combined_target_temp_c(&left, &right), 21.0);
+        // Back off on one side → off only when both are off.
+        right.enabled = false;
+        assert_eq!(combined_climate_mode(&left, &right), CLIMATE_MODE_HEAT_COOL);
+        left.enabled = false;
+        assert_eq!(combined_climate_mode(&left, &right), CLIMATE_MODE_OFF);
+    }
+
+    #[test]
+    fn combined_vibrate_button_discovery_matches_command_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let v: serde_json::Value =
+            serde_json::from_str(&discovery_payload_vibrate_combined_button(&cfg)).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Vibrate Cover"));
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.vibrate_combined_command_topic().as_str()),
+        );
+        assert_eq!(v["icon"].as_str(), Some("mdi:vibrate"));
+        assert!(v["unique_id"]
+            .as_str()
+            .unwrap()
+            .ends_with("_vibrate_combined"));
+    }
+
+    #[test]
+    fn combined_temperature_sensor_discovery_matches_state_topics() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc_current = discovery_payload_frozen_temperature(
+            &cfg,
+            "Current Cover Temperature",
+            "cover_temp_combined",
+            cfg.frozen_current_temp_combined_state_topic(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&disc_current).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Current Cover Temperature"));
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.frozen_current_temp_combined_state_topic().as_str()),
+        );
+        assert_eq!(v["device_class"].as_str(), Some("temperature"));
+        let disc_target = discovery_payload_frozen_temperature(
+            &cfg,
+            "Target Cover Temperature",
+            "target_temp_combined",
+            cfg.target_temperature_combined_state_topic(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&disc_target).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Target Cover Temperature"));
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.target_temperature_combined_state_topic().as_str()),
+        );
+        assert_eq!(v["device_class"].as_str(), Some("temperature"));
+    }
+
+    #[test]
+    fn mean_temperature_payload_formats_average() {
+        assert_eq!(mean_temperature_payload(2550, 2675), "26.12");
+        assert_eq!(mean_temperature_payload(2000, 2000), "20.00");
+        assert_eq!(mean_temperature_payload(2001, 2000), "20.00");
+        assert_eq!(mean_temperature_payload(0, 100), "0.50");
+    }
+
+    #[test]
+    fn combined_heart_rate_discovery_matches_state_topic() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let v: serde_json::Value =
+            serde_json::from_str(&discovery_payload_heart_rate(&cfg, HrTopic::Combined)).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Heart Rate"));
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.heart_rate_combined_state_topic().as_str()),
+        );
+        assert_eq!(v["unit_of_measurement"].as_str(), Some("bpm"));
+        assert_eq!(v["state_class"].as_str(), Some("measurement"));
+        assert!(v["unique_id"]
+            .as_str()
+            .unwrap()
+            .ends_with("_heart_rate_combined"));
+    }
+
+    #[test]
+    fn combined_heart_rate_bpm_pools_all_ibis() {
+        // No beat intervals → None (caller applies the zero/unknown publish rules).
+        assert_eq!(combined_heart_rate_bpm(&[]), None);
+        // One side's beats only → that side's rate, computed from all its intervals.
+        let left = [857.0f32; 4]; // ≈ 70 bpm
+        assert_eq!(combined_heart_rate_bpm(&left), Some(60_000.0 / 857.0));
+        // Both sides pooled → one rate over all intervals, weighted by how many
+        // beats each side contributed — not the mean of the two per-side readings.
+        let right = [968.0f32; 8]; // ≈ 62 bpm
+        let mut pooled = left.to_vec();
+        pooled.extend_from_slice(&right);
+        let expected = 60_000.0 / ((4.0 * 857.0 + 8.0 * 968.0) / 12.0);
+        assert_eq!(combined_heart_rate_bpm(&pooled), Some(expected));
+        // The pooled rate differs from the plain mean of the two side rates.
+        let mean_of_sides = (60_000.0 / 857.0 + 60_000.0 / 968.0) / 2.0;
+        assert!((expected - mean_of_sides).abs() > 0.5);
+    }
+
+    #[test]
+    fn presence_combined_decided_on_all_six_zones() {
+        // Uncalibrated: a single zone on either side flips the combined occupancy,
+        // decided directly on the whole grid.
+        let mut inference = PresenceInferenceState::default();
+        let z_left = SensorCapacitanceZones {
+            sequence: 1,
+            zones: [900, 100, 100, 100, 100, 100],
+        };
+        assert_eq!(
+            inference_occupancy(&z_left, &mut inference, 800, 50),
+            (true, false, true)
+        );
+        let mut inference = PresenceInferenceState::default();
+        let z_right = SensorCapacitanceZones {
+            sequence: 1,
+            zones: [100, 100, 100, 100, 100, 900],
+        };
+        assert_eq!(
+            inference_occupancy(&z_right, &mut inference, 800, 50),
+            (false, true, true)
+        );
+        // Calibrated: any zone across the whole grid (5-frame debounce) flips the
+        // combined occupancy even when only one side is occupied.
+        let mut inference = PresenceInferenceState::default();
+        inference.set_baselines([100; 6]);
+        let z = SensorCapacitanceZones {
+            sequence: 1,
+            zones: [100, 100, 100, 200, 100, 100],
+        };
+        for _ in 0..4 {
+            assert_eq!(
+                inference_occupancy(&z, &mut inference, 9999, 50),
+                (false, false, false)
+            );
+        }
+        assert_eq!(
+            inference_occupancy(&z, &mut inference, 9999, 50),
+            (false, true, true)
         );
     }
 }

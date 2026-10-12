@@ -117,6 +117,77 @@ pub fn vibration_sequence_frames(
     out
 }
 
+/// Both mattress sides in **one** batch: optional cancels (left + right) → shared piezo
+/// priming → `SetAlarm` left → `SetAlarm` right (**6** frames if `cancel_preamble` is
+/// `false`, **8** if `true`). One batch so both sides vibrate at the same time.
+pub fn vibration_sequence_frames_both(
+    intensity_pct: u8,
+    pattern: AlarmPattern,
+    duration_secs: u32,
+    cancel_preamble: bool,
+    piezo_freq_hz: u32,
+) -> Vec<Vec<u8>> {
+    let mut out = Vec::with_capacity(8);
+    if cancel_preamble {
+        out.push(cancel_alarm_frame(BedSide::Left));
+        out.push(cancel_alarm_frame(BedSide::Right));
+    }
+    out.extend(piezo_priming_frames(piezo_freq_hz));
+    out.push(set_alarm_frame(
+        BedSide::Left,
+        intensity_pct,
+        pattern,
+        duration_secs,
+    ));
+    out.push(set_alarm_frame(
+        BedSide::Right,
+        intensity_pct,
+        pattern,
+        duration_secs,
+    ));
+    out
+}
+
+/// A queued vibration batch for the Sensor UART link (`sensor_tx` channel).
+///
+/// The link's writer paces known sequence shapes (cancels → priming → alarm(s) with the
+/// `0xAE` ack wait); the variant tells it how many cancel/alarm frames the batch carries,
+/// because a both-sides batch without cancels (**6** frames) has the same length as a
+/// one-side batch with cancel.
+#[derive(Debug)]
+pub enum VibrationBatch {
+    /// One mattress side — opensleep sequence shape (optional cancel + 4 priming + `SetAlarm`).
+    Side(Vec<Vec<u8>>),
+    /// Both sides at once — optional cancels + 4 priming + `SetAlarm` left + `SetAlarm` right.
+    Both(Vec<Vec<u8>>),
+}
+
+impl VibrationBatch {
+    /// Raw frames (fallback path when no Sensor link task owns the UART).
+    pub fn frames(&self) -> &[Vec<u8>] {
+        match self {
+            VibrationBatch::Side(frames) | VibrationBatch::Both(frames) => frames,
+        }
+    }
+
+    /// Cancel frames at the head of the batch (**0**/**1** for [`VibrationBatch::Side`],
+    /// **0**/**2** for [`VibrationBatch::Both`]).
+    pub fn cancel_count(&self) -> usize {
+        match self {
+            VibrationBatch::Side(frames) => usize::from(frames.len() == 6),
+            VibrationBatch::Both(frames) => usize::from(frames.len() == 8) * 2,
+        }
+    }
+
+    /// `SetAlarm` frames at the tail of the batch (**1** for [`VibrationBatch::Side`], **2** for [`VibrationBatch::Both`]).
+    pub fn alarm_count(&self) -> usize {
+        match self {
+            VibrationBatch::Side(_) => 1,
+            VibrationBatch::Both(_) => 2,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +271,54 @@ mod tests {
             frames[4],
             set_alarm_frame(BedSide::Left, 50, AlarmPattern::Single, 10)
         );
+    }
+
+    #[test]
+    fn vibration_sequence_both_sets_alarms_on_both_sides() {
+        let frames =
+            vibration_sequence_frames_both(50, AlarmPattern::Double, 10, true, PIEZO_FREQ_POD4);
+        assert_eq!(frames.len(), 8);
+        assert_eq!(frames[0], cancel_alarm_frame(BedSide::Left));
+        assert_eq!(frames[1], cancel_alarm_frame(BedSide::Right));
+        assert_eq!(frames[2], enable_vibration_frame());
+        assert_eq!(frames[5], set_piezo_freq_frame(PIEZO_FREQ_POD4));
+        assert_eq!(
+            frames[6],
+            set_alarm_frame(BedSide::Left, 50, AlarmPattern::Double, 10)
+        );
+        assert_eq!(
+            frames[7],
+            set_alarm_frame(BedSide::Right, 50, AlarmPattern::Double, 10)
+        );
+
+        let no_cancel =
+            vibration_sequence_frames_both(50, AlarmPattern::Single, 10, false, PIEZO_FREQ_POD4);
+        assert_eq!(no_cancel.len(), 6);
+        assert_eq!(no_cancel[0], enable_vibration_frame());
+        assert_eq!(
+            no_cancel[5],
+            set_alarm_frame(BedSide::Right, 50, AlarmPattern::Single, 10)
+        );
+
+        let side = VibrationBatch::Side(vibration_sequence_frames(
+            BedSide::Left,
+            50,
+            AlarmPattern::Single,
+            10,
+            true,
+            PIEZO_FREQ_POD4,
+        ));
+        assert_eq!(side.cancel_count(), 1);
+        assert_eq!(side.alarm_count(), 1);
+        assert_eq!(side.frames().len(), 6);
+        let both = VibrationBatch::Both(frames);
+        assert_eq!(both.cancel_count(), 2);
+        assert_eq!(both.alarm_count(), 2);
+        assert_eq!(both.frames().len(), 8);
+        // Same length, different shape: a both-sides batch without cancels (6)
+        // must not be mistaken for a one-side batch with cancel (6).
+        let both_no_cancel = VibrationBatch::Both(no_cancel);
+        assert_eq!(both_no_cancel.cancel_count(), 0);
+        assert_eq!(both_no_cancel.alarm_count(), 2);
     }
 }

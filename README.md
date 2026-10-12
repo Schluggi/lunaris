@@ -56,9 +56,11 @@ How Lunaris differs from other local-control projects ([free-sleep](https://gith
 | Name | Kind | Hidden by default | What it does |
 |:---|:---|:---:|:---|
 | Cover Left / Right | climate | No | Set how warm or cool each side of the bed should feel. |
+| Cover | climate | No | Both sides at once: mode and target temperature apply to left and right together; shows the average of both sides. |
 | LED | light | No | Colour and brightness for the indicator LED on the bed. |
 | Prime | button | No | Tell the pod to prepare / prime its water system before use. |
 | Vibrate Cover Left / Right | button | No | Run a vibration on that side. |
+| Vibrate Cover | button | No | Run a vibration on both sides at the same time. |
 
 ### Sensors
 
@@ -69,13 +71,16 @@ How Lunaris differs from other local-control projects ([free-sleep](https://gith
 | Ambient Humidity | sensor | No | Relative ambien humidity send by the cover sensor. |
 | Ambient Temperature | sensor | No | Ambient temperature send by the cover sensor. |
 | Cover Button Left / Right | sensor | No | Tap count `1`-`5`, `0` when idle. |
+| Current Cover Temperature | sensor | No | Average of both sides' current mattress temperature. |
 | Current Cover Temperature Left / Right | sensor | No | How warm each side of the mattress is right now. |
+| Heart Rate | sensor | No | One heart rate computed from the pooled beat intervals of both sides — all measured beats together, not the average of the two per-side readings (same `unknown` / `0` rules as the per-side sensors: empty payload when nobody is in bed, `0` only after ~10 s without a valid reading while someone is in bed). |
 | Heart Rate Left / Right | sensor | No | Heart rate in beats per minute from that side’s piezo signal (only while Presence is ON for that side when presence is available; reliable ~40–80 bpm — the detector bandpass-filters the signal to the heart band and suppresses the dicrotic second wave of each beat). When nobody is in bed (Presence OFF), the state is cleared with an **empty payload** — HA shows the sensor as `unknown`, so "not in bed" stays distinguishable from "in bed, no reading" for downstream processing. A `0` is only published when the side is occupied but has had no valid reading for ~10 s (several consecutive zero intervals) — a single sporadic zero (short lock blip) is held back so it does not pollute the statistics. |
 | HRV RMSSD Left / Right | — | — | Not exposed for now: the RMSSD values are computed and logged (`--sensor-piezo-debug`) but the entities are not discovered in Home Assistant until the values are calibrated. |
 | Heatsink Temperature | sensor | No | Temperature of the cooling hardware. |
 | Presence Any | binary_sensor | No | Someone is detected on either side of the bed. |
 | [Presence Calibration](#presence-calibration) | binary_sensor | No | On while lunaris is learning an “empty bed” baseline. |
 | Presence Left / Right | binary_sensor | No | Someone is detected on that side of the mattress. |
+| Target Cover Temperature | sensor | No | Average of both sides' target temperatures. |
 | Target Temperature Left / Right | sensor | No | Same target you set on the climate control, shown as plain numbers for dashboards or cards. |
 | [Water Tank](#water-tank) | binary_sensor | No | Shows whether the water tank is plugged in. |
 

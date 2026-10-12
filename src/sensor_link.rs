@@ -19,7 +19,7 @@ use tokio_serial::SerialPortBuilderExt;
 use crate::frozen_frame::jump_to_firmware_frame;
 use crate::sensor_frame::{
     enable_piezo_frame, enable_vibration_frame, ping_frame, set_piezo_freq_frame,
-    set_piezo_gain_frame, PIEZO_GAIN_DEFAULT,
+    set_piezo_gain_frame, VibrationBatch, PIEZO_GAIN_DEFAULT,
 };
 use crate::sensor_rx::{self, PiezoSetupState, PresenceCapDiag};
 
@@ -80,7 +80,7 @@ pub enum SensorLinkError {
 
 #[derive(Debug)]
 pub struct SensorLinkHandle {
-    pub tx: mpsc::Sender<Vec<Vec<u8>>>,
+    pub tx: mpsc::Sender<VibrationBatch>,
     /// `true` after inbound Sensor bytes include `0x7E` (opensleep‑style frame sync on RX at this baud).
     pub sensor_rx_framing: Arc<AtomicBool>,
     /// UTF‑8 bodies of Sensor `0x07` MCU text (MQTT **Sensor Message** text sensor).
@@ -98,7 +98,7 @@ pub fn spawn(
     capacitance_tx: Option<mpsc::Sender<crate::sensor_rx::SensorCapacitanceZones>>,
     capacitance_parse_diag: Option<std::sync::Arc<PresenceCapDiag>>,
 ) -> SensorLinkHandle {
-    let (tx, rx) = mpsc::channel::<Vec<Vec<u8>>>(32);
+    let (tx, rx) = mpsc::channel::<VibrationBatch>(32);
     let (sensor_mcu_tx, sensor_mcu_rx) = mpsc::channel::<String>(512);
     let (piezo_tx, piezo_rx) = mpsc::channel::<crate::sensor_rx::SensorPiezoSamples>(64);
     let sensor_rx_framing = Arc::new(AtomicBool::new(false));
@@ -158,7 +158,7 @@ async fn run(
     piezo_freq_hz: u32,
     force_bootloader_handshake: bool,
     vibrate_no_ack_wait: bool,
-    mut rx: mpsc::Receiver<Vec<Vec<u8>>>,
+    mut rx: mpsc::Receiver<VibrationBatch>,
     capacitance_tx: Option<mpsc::Sender<crate::sensor_rx::SensorCapacitanceZones>>,
     capacitance_parse_diag: Option<Arc<PresenceCapDiag>>,
     sensor_mcu_tx: mpsc::Sender<String>,
@@ -461,28 +461,32 @@ async fn wait_for_vibration_ack(
 
 async fn write_vibration_batch(
     write_half: &mut tokio::io::WriteHalf<tokio_serial::SerialStream>,
-    frames: Vec<Vec<u8>>,
+    batch: VibrationBatch,
     piezo_setup: &PiezoSetupState,
     vibrate_no_ack_wait: bool,
 ) -> Result<(), SensorLinkError> {
+    let frames = batch.frames();
+    // Known opensleep sequence shape: cancel(s) → 4 priming frames → alarm(s).
+    let cancels = batch.cancel_count();
+    let alarms = batch.alarm_count();
+    let is_sequence = frames.len() == cancels + 4 + alarms;
     if vibrate_no_ack_wait {
         // Same pacing as opensleep-style staggering — back-to-back frames can overwhelm ttyS2 / firmware.
         let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
-        if matches!(frames.len(), 5 | 6) {
-            let has_cancel = frames.len() == 6;
+        if is_sequence {
             piezo_setup.set_vibration_enabled(false);
             // Vibration priming restarts MCU sampling — refresh stream state afterwards.
             piezo_setup.request_stream_recovery();
-            if has_cancel {
-                write_half.write_all(&frames[0]).await?;
-                sleep(Duration::from_millis(100)).await;
-            }
-            let off = if has_cancel { 1 } else { 0 };
-            let rest = &frames[off..];
-            for (i, frame) in rest.iter().enumerate() {
+            for (i, frame) in frames.iter().enumerate() {
                 write_half.write_all(frame).await?;
-                if i + 1 < rest.len() {
-                    sleep(gap).await;
+                if i + 1 < frames.len() {
+                    // Slightly longer pause after the cancel frame(s).
+                    let pause = if i < cancels {
+                        Duration::from_millis(100)
+                    } else {
+                        gap
+                    };
+                    sleep(pause).await;
                 }
             }
         } else {
@@ -499,17 +503,15 @@ async fn write_vibration_batch(
         );
         return Ok(());
     }
-    if matches!(frames.len(), 5 | 6) {
-        let has_cancel = frames.len() == 6;
+    if is_sequence {
         piezo_setup.set_vibration_enabled(false);
         piezo_setup.request_stream_recovery();
-        if has_cancel {
-            write_half.write_all(&frames[0]).await?;
+        for frame in &frames[..cancels] {
+            write_half.write_all(frame).await?;
             sleep(Duration::from_millis(100)).await;
         }
-        let off = if has_cancel { 1 } else { 0 };
-        let prim = &frames[off..off + 4];
-        let alarm = &frames[off + 4..off + 5];
+        let prim = &frames[cancels..cancels + 4];
+        let alarm = &frames[cancels + 4..];
         let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
         {
             for (i, frame) in prim.iter().enumerate() {
@@ -528,7 +530,7 @@ async fn write_vibration_batch(
         write_half.flush().await?;
     } else {
         for frame in frames {
-            write_half.write_all(&frame).await?;
+            write_half.write_all(frame).await?;
         }
         write_half.flush().await?;
     }
@@ -545,7 +547,7 @@ async fn run_once(
     piezo_freq_hz: u32,
     force_bootloader_handshake: bool,
     vibrate_no_ack_wait: bool,
-    rx: &mut mpsc::Receiver<Vec<Vec<u8>>>,
+    rx: &mut mpsc::Receiver<VibrationBatch>,
     capacitance_tx: Option<mpsc::Sender<crate::sensor_rx::SensorCapacitanceZones>>,
     capacitance_parse_diag: Option<Arc<PresenceCapDiag>>,
     sensor_mcu_tx: mpsc::Sender<String>,
@@ -645,7 +647,7 @@ async fn run_once(
 /// error or a reconnect request (RX task death / RX health timeout).
 async fn session_loop(
     write_half: &mut tokio::io::WriteHalf<tokio_serial::SerialStream>,
-    rx: &mut mpsc::Receiver<Vec<Vec<u8>>>,
+    rx: &mut mpsc::Receiver<VibrationBatch>,
     vibrate_no_ack_wait: bool,
     piezo_setup: &PiezoSetupState,
     last_valid_frame: &Mutex<Instant>,
@@ -672,10 +674,10 @@ async fn session_loop(
                 biased;
                 batch = rx.recv() => {
                     match batch {
-                        Some(frames) => {
+                        Some(batch) => {
                             write_vibration_batch(
                                 write_half,
-                                frames,
+                                batch,
                                 piezo_setup,
                                 vibrate_no_ack_wait,
                             )
