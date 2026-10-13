@@ -69,13 +69,16 @@ pub fn cancel_alarm_frame(side: BedSide) -> Vec<u8> {
     set_alarm_frame(side, 0, AlarmPattern::Double, 0)
 }
 
-/// Cover-button feedback pulse intensity (percent) — a short confirmation buzz on the
-/// tapped side, not a full alarm (the stock firmware gives one short vibration per
-/// side-button press; lunaris reproduces that with the MQTT **Cover Button Vibration
-/// Feedback** switch).
-pub const COVER_BUTTON_FEEDBACK_INTENSITY: u8 = 50;
-/// Cover-button feedback pulse length in seconds (`SetAlarm` duration is whole seconds).
-pub const COVER_BUTTON_FEEDBACK_DURATION_SECS: u32 = 1;
+/// Cover-button feedback pulse intensity (percent) default — a short confirmation buzz
+/// on the tapped side, not a full alarm (the stock firmware gives one short vibration
+/// per side-button press; lunaris reproduces that with the MQTT **Cover Button Vibration
+/// Feedback** switch). Tunable at runtime via the HA number **Cover Button Vibration
+/// Feedback Intensity**.
+pub const COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT: u8 = 80;
+/// Cover-button feedback pulse length (seconds) default (`SetAlarm` duration is whole
+/// seconds). Tunable at runtime via the HA number **Cover Button Vibration Feedback
+/// Duration**.
+pub const COVER_BUTTON_FEEDBACK_DURATION_SECS_DEFAULT: u32 = 1;
 
 /// `SensorCommand::EnableVibration` — MCU often ignores `set_alarm_frame` until this runs (opensleep).
 pub fn enable_vibration_frame() -> Vec<u8> {
@@ -159,10 +162,13 @@ pub fn vibration_sequence_frames_both(
 /// Cover-button feedback batch: optional cancel + piezo priming + `pulses` × `SetAlarm`
 /// on **one** side — one short vibration per side-button tap (stock-firmware haptic
 /// feedback: `1` tap → `1` pulse, `2` taps → `2` pulses). The Sensor link paces the
-/// trailing `SetAlarm` frames (pulse duration + gap) so the pulses stay distinct.
+/// trailing `SetAlarm` frames (pulse duration + gap) so the pulses stay distinct, and
+/// sends them bare (no cancel/priming) when the MCU is already armed + sampling.
 pub fn cover_button_feedback_frames(
     side: BedSide,
     pulses: usize,
+    intensity_pct: u8,
+    duration_secs: u32,
     cancel_preamble: bool,
     piezo_freq_hz: u32,
 ) -> Vec<Vec<u8>> {
@@ -174,9 +180,9 @@ pub fn cover_button_feedback_frames(
     for _ in 0..pulses {
         out.push(set_alarm_frame(
             side,
-            COVER_BUTTON_FEEDBACK_INTENSITY,
+            intensity_pct,
             AlarmPattern::Single,
-            COVER_BUTTON_FEEDBACK_DURATION_SECS,
+            duration_secs,
         ));
     }
     out
@@ -375,7 +381,14 @@ mod tests {
     #[test]
     fn cover_button_feedback_frames_shape() {
         // cancel + 4 priming + pulses × SetAlarm (feedback intensity / duration / Single).
-        let frames = cover_button_feedback_frames(BedSide::Right, 2, true, PIEZO_FREQ_POD4);
+        let frames = cover_button_feedback_frames(
+            BedSide::Right,
+            2,
+            COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT,
+            COVER_BUTTON_FEEDBACK_DURATION_SECS_DEFAULT,
+            true,
+            PIEZO_FREQ_POD4,
+        );
         assert_eq!(frames.len(), 7);
         assert_eq!(frames[0], cancel_alarm_frame(BedSide::Right));
         assert_eq!(frames[1], enable_vibration_frame());
@@ -390,31 +403,27 @@ mod tests {
                 *frame,
                 set_alarm_frame(
                     BedSide::Right,
-                    COVER_BUTTON_FEEDBACK_INTENSITY,
+                    COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT,
                     AlarmPattern::Single,
-                    COVER_BUTTON_FEEDBACK_DURATION_SECS
+                    COVER_BUTTON_FEEDBACK_DURATION_SECS_DEFAULT
                 )
             );
         }
 
-        let no_cancel = cover_button_feedback_frames(BedSide::Left, 1, false, PIEZO_FREQ_POD4);
+        let no_cancel =
+            cover_button_feedback_frames(BedSide::Left, 1, 55, 2, false, PIEZO_FREQ_POD4);
         assert_eq!(no_cancel.len(), 5);
         assert_eq!(no_cancel[0], enable_vibration_frame());
         assert_eq!(
             no_cancel[4],
-            set_alarm_frame(
-                BedSide::Left,
-                COVER_BUTTON_FEEDBACK_INTENSITY,
-                AlarmPattern::Single,
-                COVER_BUTTON_FEEDBACK_DURATION_SECS
-            )
+            set_alarm_frame(BedSide::Left, 55, AlarmPattern::Single, 2)
         );
     }
 
     #[test]
     fn pulses_batch_counts_and_pacing_flag() {
         let with_cancel = VibrationBatch::Pulses {
-            frames: cover_button_feedback_frames(BedSide::Left, 3, true, PIEZO_FREQ_POD4),
+            frames: cover_button_feedback_frames(BedSide::Left, 3, 80, 1, true, PIEZO_FREQ_POD4),
             pulses: 3,
         };
         assert_eq!(with_cancel.cancel_count(), 1);
@@ -423,7 +432,7 @@ mod tests {
         assert!(with_cancel.paced_alarms());
 
         let no_cancel = VibrationBatch::Pulses {
-            frames: cover_button_feedback_frames(BedSide::Left, 2, false, PIEZO_FREQ_POD4),
+            frames: cover_button_feedback_frames(BedSide::Left, 2, 80, 1, false, PIEZO_FREQ_POD4),
             pulses: 2,
         };
         assert_eq!(no_cancel.cancel_count(), 0);
@@ -433,7 +442,7 @@ mod tests {
 
         // One tap = one pulse: same length as a Side batch with cancel (6) but paced.
         let single = VibrationBatch::Pulses {
-            frames: cover_button_feedback_frames(BedSide::Right, 1, true, PIEZO_FREQ_POD4),
+            frames: cover_button_feedback_frames(BedSide::Right, 1, 80, 1, true, PIEZO_FREQ_POD4),
             pulses: 1,
         };
         assert_eq!(single.cancel_count(), 1);

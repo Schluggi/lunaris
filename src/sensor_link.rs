@@ -505,6 +505,20 @@ async fn write_vibration_batch(
     let alarms = batch.alarm_count();
     let paced = batch.paced_alarms();
     let is_sequence = frames.len() == cancels + 4 + alarms;
+    // opensleep parity: alarms go out as a **bare `SetAlarm`** into an already-armed,
+    // sampling MCU — the CommandScheduler sends priming only until the state flags are
+    // set, and re-priming before every alarm restarts MCU sampling (and on some Pods
+    // yields `0xAC` acks without physical vibration). Cover-button feedback pulses use
+    // the bare path whenever vibration is armed and the piezo setup is complete; the
+    // full sequence stays as the fallback when the MCU is not armed yet.
+    if paced && is_sequence && piezo_setup.vibration_enabled() && piezo_setup.piezo_ok() {
+        write_paced_alarm_frames(write_half, &frames[cancels + 4..]).await?;
+        tracing::debug!(
+            alarms,
+            "Sensor: feedback pulses sent bare (MCU already armed + sampling; no re-priming)"
+        );
+        return Ok(());
+    }
     if vibrate_no_ack_wait {
         // Same pacing as opensleep-style staggering — back-to-back frames can overwhelm ttyS2 / firmware.
         let gap = Duration::from_millis(SENSOR_PRIMING_INTER_FRAME_MS);
@@ -972,6 +986,52 @@ mod tests {
             (file, slave_path)
         }
 
+        fn set_nonblock(fd: std::os::unix::io::RawFd, on: bool) {
+            let fl = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            assert_ne!(fl, -1, "F_GETFL failed");
+            let fl = if on {
+                fl | libc::O_NONBLOCK
+            } else {
+                fl & !libc::O_NONBLOCK
+            };
+            assert_ne!(unsafe { libc::fcntl(fd, libc::F_SETFL, fl) }, -1);
+        }
+
+        /// Reads one `0x7E`-framed record from the PTY master (non-blocking fd) with a
+        /// deadline. Returns the raw frame bytes plus the instant it completed.
+        /// Parses already-buffered bytes first — a read is only attempted when no
+        /// complete frame is buffered yet.
+        fn read_frame_deadline(
+            master: &mut std::fs::File,
+            buf: &mut Vec<u8>,
+            deadline: std::time::Instant,
+        ) -> Option<(Vec<u8>, std::time::Instant)> {
+            loop {
+                if let Some(pos) = buf.iter().position(|&b| b == 0x7E) {
+                    if pos > 0 {
+                        buf.drain(..pos);
+                    }
+                    if buf.len() >= 4 {
+                        let plen = buf[1] as usize;
+                        if buf.len() >= 2 + plen + 2 {
+                            let frame = buf[..2 + plen + 2].to_vec();
+                            buf.drain(..2 + plen + 2);
+                            return Some((frame, std::time::Instant::now()));
+                        }
+                    }
+                }
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                let mut chunk = [0u8; 256];
+                match master.read(&mut chunk) {
+                    Ok(0) => return None,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        }
+
         /// Current line speed of the PTY (lunaris sets the slave termios; master shares it).
         fn pty_line_speed(fd: std::os::unix::io::RawFd) -> u32 {
             let mut t2: libc::termios2 = unsafe { std::mem::zeroed() };
@@ -1135,17 +1195,6 @@ mod tests {
         async fn piezo_setup_gate_skips_when_stream_flowing() {
             use std::io::Read;
 
-            fn set_nonblock(fd: std::os::unix::io::RawFd, on: bool) {
-                let fl = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-                assert_ne!(fl, -1, "F_GETFL failed");
-                let fl = if on {
-                    fl | libc::O_NONBLOCK
-                } else {
-                    fl & !libc::O_NONBLOCK
-                };
-                assert_ne!(unsafe { libc::fcntl(fd, libc::F_SETFL, fl) }, -1);
-            }
-
             let (mut master, slave) = open_pty_pair();
             set_nonblock(master.as_raw_fd(), true);
             let port = open_port(&slave, 921600).await.expect("open slave port");
@@ -1200,6 +1249,126 @@ mod tests {
                 got.contains(&0x28),
                 "EnablePiezo must be sent after a stall: {got:?}"
             );
+        }
+
+        /// opensleep parity: cover-button feedback pulses go out as **bare `SetAlarm`**
+        /// frames when the MCU is already armed + sampling — no cancel, no priming, no
+        /// `0xAE` wait (re-priming restarts MCU sampling and can ack without physical
+        /// vibration on some Pods).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn feedback_pulses_sent_bare_when_mcu_armed_and_sampling() {
+            let (mut master, slave) = open_pty_pair();
+            set_nonblock(master.as_raw_fd(), true);
+            let port = open_port(&slave, 921600).await.expect("open slave port");
+            let (_, mut write_half) = tokio::io::split(port);
+
+            // Armed + sampling MCU (retained config): vibration enabled, gain/enabled/freq OK.
+            let setup = PiezoSetupState::new(500);
+            setup.mark_stream_configured();
+            let frames = crate::sensor_frame::cover_button_feedback_frames(
+                crate::frozen_frame::BedSide::Right,
+                2,
+                80,
+                1,
+                true,
+                500,
+            );
+            let batch = VibrationBatch::Pulses { frames, pulses: 2 };
+            let t0 = std::time::Instant::now();
+            let write_task = tokio::spawn(async move {
+                write_vibration_batch(&mut write_half, batch, &setup, false).await
+            });
+            // The reader thread must outlive the write task — it holds the PTY master
+            // (dropping it would EIO the slave writes). It exits after the two pulses
+            // plus a silence window (nothing else may follow on the wire).
+            let reader = std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut got: Vec<(Vec<u8>, std::time::Instant)> = Vec::new();
+                let cap = t0 + Duration::from_secs(10);
+                loop {
+                    // After each frame, wait out a silence window longer than the
+                    // pulse gap (1s duration + 500ms): a further frame would mean the
+                    // head (cancel/priming) leaked onto the wire. The window also
+                    // keeps the master alive until the write task (which returns
+                    // right after the last pulse) has fully completed.
+                    let deadline = match got.last() {
+                        Some((_, at)) => (*at + Duration::from_millis(2500)).min(cap),
+                        None => cap,
+                    };
+                    match read_frame_deadline(&mut master, &mut buf, deadline) {
+                        Some((frame, at)) => got.push((frame, at)),
+                        None => break,
+                    }
+                }
+                got
+            });
+            let got = reader.join().expect("reader thread");
+            write_task
+                .await
+                .expect("write task")
+                .expect("bare feedback batch");
+
+            assert_eq!(got.len(), 2, "exactly the two pulses, no head: {got:?}");
+            let (first, first_at) = &got[0];
+            assert_eq!(&first[2..4], &[0x2C, 0x01], "SetAlarm right side");
+            assert!(
+                first_at.duration_since(t0) < Duration::from_millis(1000),
+                "bare pulse must not wait for priming/ack-wait"
+            );
+            let (second, second_at) = &got[1];
+            assert_eq!(&second[2..4], &[0x2C, 0x01], "SetAlarm right side");
+            let gap = second_at.duration_since(*first_at);
+            assert!(
+                gap >= Duration::from_millis(1000),
+                "pulses must be paced (pulse duration + gap): {gap:?}"
+            );
+        }
+
+        /// Fallback: a MCU that is not armed yet gets the full cancel + priming +
+        /// pulses sequence (here in `--sensor-vibrate-no-ack-wait` mode so the test
+        /// does not wait for a `0xAE` that a deaf PTY never sends).
+        #[tokio::test]
+        async fn feedback_pulses_full_sequence_when_mcu_not_armed() {
+            let (mut master, slave) = open_pty_pair();
+            set_nonblock(master.as_raw_fd(), true);
+            let port = open_port(&slave, 921600).await.expect("open slave port");
+            let (_, mut write_half) = tokio::io::split(port);
+
+            let setup = PiezoSetupState::new(500);
+            let frames = crate::sensor_frame::cover_button_feedback_frames(
+                crate::frozen_frame::BedSide::Left,
+                2,
+                80,
+                1,
+                true,
+                500,
+            );
+            let batch = VibrationBatch::Pulses { frames, pulses: 2 };
+            write_vibration_batch(&mut write_half, batch, &setup, true)
+                .await
+                .expect("full feedback sequence (no-ack-wait)");
+
+            let mut buf = Vec::new();
+            let mut got = Vec::new();
+            let deadline = std::time::Instant::now() + Duration::from_millis(1000);
+            while got.len() < 7 {
+                match read_frame_deadline(&mut master, &mut buf, deadline) {
+                    Some((frame, _)) => got.push(frame),
+                    None => break,
+                }
+            }
+            assert_eq!(got.len(), 7, "cancel + 4 priming + 2 pulses: {got:?}");
+            assert_eq!(
+                &got[0][2..6],
+                &[0x2C, 0x00, 0x00, 0x01],
+                "cancel SetAlarm (left, intensity 0, Double)"
+            );
+            assert_eq!(&got[1][2..3], &[0x2E], "EnableVibration");
+            assert_eq!(&got[2][2..3], &[0x2B], "SetPiezoGain");
+            assert_eq!(&got[3][2..3], &[0x28], "EnablePiezo");
+            assert_eq!(&got[4][2..3], &[0x21], "SetPiezoFreq");
+            assert_eq!(&got[5][2..4], &[0x2C, 0x00], "pulse SetAlarm (left)");
+            assert_eq!(&got[6][2..4], &[0x2C, 0x00], "pulse SetAlarm (left)");
         }
 
         #[tokio::test]
