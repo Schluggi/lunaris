@@ -411,6 +411,40 @@ async fn wait_firmware_answer(
 const SENSOR_PRIMING_INTER_FRAME_MS: u64 = 150;
 /// Pause after the last priming frame (`EnablePiezo`) so the MCU can settle before we wait for `0xAE` / send `SetAlarm`.
 const SENSOR_AFTER_PRIMING_MS: u64 = 400;
+/// Pause between cover-button feedback pulses: each `SetAlarm` duration plus this gap,
+/// so every button tap is a distinct short vibration (stock-firmware haptic feedback).
+const SENSOR_FEEDBACK_PULSE_GAP_MS: u64 = 500;
+
+/// `SetAlarm` duration (seconds) parsed from a framed command
+/// (`7E len 2C side intensity pattern <duration u32 BE> crc crc`) — used to pace
+/// feedback pulses. `None` when the frame is not a well-formed `SetAlarm`.
+fn set_alarm_duration_secs(frame: &[u8]) -> Option<u32> {
+    if frame.len() >= 10 && frame[0] == 0x7E && frame[2] == 0x2C {
+        Some(u32::from_be_bytes([frame[6], frame[7], frame[8], frame[9]]))
+    } else {
+        None
+    }
+}
+
+/// Writes trailing `SetAlarm` frames as **sequential pulses**: each frame is flushed and
+/// followed by its own duration plus [`SENSOR_FEEDBACK_PULSE_GAP_MS`] (except after the
+/// last pulse), so the MCU runs one short vibration per button tap.
+async fn write_paced_alarm_frames(
+    write_half: &mut tokio::io::WriteHalf<tokio_serial::SerialStream>,
+    alarms: &[Vec<u8>],
+) -> Result<(), SensorLinkError> {
+    for (i, frame) in alarms.iter().enumerate() {
+        write_half.write_all(frame).await?;
+        write_half.flush().await?;
+        if i + 1 < alarms.len() {
+            let dur_ms = set_alarm_duration_secs(frame)
+                .map(|secs| u64::from(secs) * 1000)
+                .unwrap_or(0);
+            sleep(Duration::from_millis(dur_ms + SENSOR_FEEDBACK_PULSE_GAP_MS)).await;
+        }
+    }
+    Ok(())
+}
 
 /// Next opensleep-style piezo config command, or `None` when setup looks complete.
 fn next_piezo_setup_frame(setup: &PiezoSetupState) -> Option<Vec<u8>> {
@@ -469,6 +503,7 @@ async fn write_vibration_batch(
     // Known opensleep sequence shape: cancel(s) → 4 priming frames → alarm(s).
     let cancels = batch.cancel_count();
     let alarms = batch.alarm_count();
+    let paced = batch.paced_alarms();
     let is_sequence = frames.len() == cancels + 4 + alarms;
     if vibrate_no_ack_wait {
         // Same pacing as opensleep-style staggering — back-to-back frames can overwhelm ttyS2 / firmware.
@@ -477,16 +512,28 @@ async fn write_vibration_batch(
             piezo_setup.set_vibration_enabled(false);
             // Vibration priming restarts MCU sampling — refresh stream state afterwards.
             piezo_setup.request_stream_recovery();
-            for (i, frame) in frames.iter().enumerate() {
+            // Head (cancels + priming) keeps the flat staggering — including the pause
+            // after the last priming frame before the first alarm.
+            let head = cancels + 4;
+            for (i, frame) in frames[..head].iter().enumerate() {
                 write_half.write_all(frame).await?;
-                if i + 1 < frames.len() {
-                    // Slightly longer pause after the cancel frame(s).
-                    let pause = if i < cancels {
-                        Duration::from_millis(100)
-                    } else {
-                        gap
-                    };
-                    sleep(pause).await;
+                // Slightly longer pause after the cancel frame(s).
+                let pause = if i < cancels {
+                    Duration::from_millis(100)
+                } else {
+                    gap
+                };
+                sleep(pause).await;
+            }
+            if paced {
+                // Feedback pulses: one short vibration per button tap, not one long one.
+                write_paced_alarm_frames(write_half, &frames[head..]).await?;
+            } else {
+                for (i, frame) in frames[head..].iter().enumerate() {
+                    write_half.write_all(frame).await?;
+                    if i + 1 < frames[head..].len() {
+                        sleep(gap).await;
+                    }
                 }
             }
         } else {
@@ -524,10 +571,16 @@ async fn write_vibration_batch(
             sleep(Duration::from_millis(SENSOR_AFTER_PRIMING_MS)).await;
             wait_for_vibration_ack(write_half, piezo_setup).await?;
         }
-        for frame in alarm {
-            write_half.write_all(frame).await?;
+        if paced {
+            // Feedback pulses: pace the SetAlarm frames (pulse duration + gap).
+            write_paced_alarm_frames(write_half, alarm).await?;
+        } else {
+            // Simultaneous alarms (both sides) go back-to-back.
+            for frame in alarm {
+                write_half.write_all(frame).await?;
+            }
+            write_half.flush().await?;
         }
-        write_half.flush().await?;
     } else {
         for frame in frames {
             write_half.write_all(frame).await?;
@@ -829,6 +882,31 @@ async fn keepalive_and_health(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_alarm_duration_parsed_from_framed_command() {
+        // 7E 08 2C side intensity pattern <duration u32 BE> crc crc
+        let frame = crate::sensor_frame::set_alarm_frame(
+            crate::frozen_frame::BedSide::Left,
+            50,
+            crate::sensor_frame::AlarmPattern::Single,
+            1,
+        );
+        assert_eq!(set_alarm_duration_secs(&frame), Some(1));
+        let frame = crate::sensor_frame::set_alarm_frame(
+            crate::frozen_frame::BedSide::Right,
+            64,
+            crate::sensor_frame::AlarmPattern::Single,
+            600,
+        );
+        assert_eq!(set_alarm_duration_secs(&frame), Some(600));
+        // Not a SetAlarm / truncated → None.
+        assert_eq!(
+            set_alarm_duration_secs(&[0x7E, 0x01, 0x2E, 0x09, 0x30]),
+            None
+        );
+        assert_eq!(set_alarm_duration_secs(&[0x7E, 0x08, 0x2C]), None);
+    }
 
     #[test]
     fn backoff_doubles_until_cap() {

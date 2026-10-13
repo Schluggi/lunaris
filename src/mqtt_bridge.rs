@@ -1,6 +1,7 @@
 //! MQTT: Home Assistant discovery, prime, MQTT **Restart Lunaris** (re-`exec` lunaris; **diagnostic**), per-side vibration (Sensor) + retained **number/select/switch**
 //! vibration tuning, optional capacitance **presence**,
 //! Frozen **water tank** + **Frozen Message** (`0x07`), Sensor **Sensor Message** (`0x07`), **Cover Button Left / Right** (**`0`..=`5`** taps from **`dismissing alarm (N taps)`**), plus **Ambient Temperature** / **Ambient Humidity** from `[ambient]` MCU lines,
+//! **Cover Button Vibration Feedback** switch (stock-firmware haptic: one short vibration per cover-button tap, `N` taps → `N` pulses on the tapped side),
 //! mattress climate, JSON light (I²C),
 //! every left/right pair also has a **combined** entity: climate Cover (both sides at once), Vibrate Cover button (both sides), mean Current / Target Cover Temperature, Heart Rate (pooled beat intervals of both sides),
 //! MQTT **update** (self-install from GitHub `releases/latest` asset), diagnostic **Internet Access** (HTTP `2xx` reachability of [`Cli::internet_access_url`](crate::cli::Cli::internet_access_url); default the lunaris GitHub project page).
@@ -28,7 +29,8 @@ use crate::frozen_rx::FrozenTemperatureUpdate;
 use crate::hrv::{mean_bpm, HeartRateTracker};
 use crate::is31fl3194::{shutdown_led, Is31fl3194};
 use crate::sensor_frame::{
-    vibration_sequence_frames, vibration_sequence_frames_both, AlarmPattern, VibrationBatch,
+    cover_button_feedback_frames, vibration_sequence_frames, vibration_sequence_frames_both,
+    AlarmPattern, VibrationBatch,
 };
 use crate::sensor_rx::{
     ambient_from_sensor_message_line, cover_button_dismiss_tap_count_from_sensor_message,
@@ -78,6 +80,8 @@ const DISCOVERY_OBJECT_ID_FIRMWARE_MESSAGE: &str = "lunaris_firmware_message";
 const DISCOVERY_OBJECT_ID_SENSOR_MESSAGE: &str = "lunaris_sensor_message";
 const DISCOVERY_OBJECT_ID_COVER_BUTTON_LEFT: &str = "lunaris_cover_button_left";
 const DISCOVERY_OBJECT_ID_COVER_BUTTON_RIGHT: &str = "lunaris_cover_button_right";
+const DISCOVERY_OBJECT_ID_COVER_BUTTON_VIBRATION_FEEDBACK: &str =
+    "lunaris_cover_button_vibration_feedback";
 const DISCOVERY_OBJECT_ID_AMBIENT_TEMPERATURE: &str = "lunaris_ambient_temperature";
 const DISCOVERY_OBJECT_ID_AMBIENT_HUMIDITY: &str = "lunaris_ambient_humidity";
 const DISCOVERY_OBJECT_ID_HEART_RATE_LEFT: &str = "lunaris_heart_rate_left";
@@ -206,6 +210,10 @@ pub struct BridgeConfig {
     /// lying-time frames reveal the channel↔side mapping).
     pub sensor_piezo_debug: bool,
     pub vibration_settings: Arc<Mutex<VibrationSettings>>,
+    /// Stock-firmware haptic: one short vibration per cover-button tap on the tapped
+    /// side. MQTT switch **Cover Button Vibration Feedback** (retained state, restored
+    /// during the HA bootstrap window); defaults to **on** like the original firmware.
+    pub cover_button_feedback: Arc<AtomicBool>,
     /// When set, Frozen frames are queued to [`crate::frozen_link`] instead of opening the port per command.
     pub frozen_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// When set, vibration batches go to [`crate::sensor_link`].
@@ -259,6 +267,7 @@ impl BridgeConfig {
             sensor_piezo_swap_lr: cli.sensor_piezo_swap_lr,
             sensor_piezo_debug: cli.sensor_piezo_debug,
             vibration_settings: Arc::new(Mutex::new(VibrationSettings::default())),
+            cover_button_feedback: Arc::new(AtomicBool::new(true)),
             frozen_tx: None,
             sensor_tx: None,
             frozen_temperature_discovery: false,
@@ -737,6 +746,27 @@ impl BridgeConfig {
         format!(
             "{}/sensor/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_COVER_BUTTON_RIGHT
+        )
+    }
+
+    pub fn cover_button_feedback_command_topic(&self) -> String {
+        format!(
+            "{}/switch/cover_button_vibration_feedback/set",
+            self.topic_prefix
+        )
+    }
+
+    pub fn cover_button_feedback_state_topic(&self) -> String {
+        format!(
+            "{}/switch/cover_button_vibration_feedback/state",
+            self.topic_prefix
+        )
+    }
+
+    pub fn discovery_topic_cover_button_vibration_feedback(&self) -> String {
+        format!(
+            "{}/switch/{}/config",
+            self.discovery_prefix, DISCOVERY_OBJECT_ID_COVER_BUTTON_VIBRATION_FEEDBACK
         )
     }
 
@@ -1352,6 +1382,28 @@ fn discovery_payload_cover_button_right(config: &BridgeConfig) -> String {
         "state_class": "measurement",
         "unit_of_measurement": "taps",
         "unique_id": format!("{}_cover_button_right", config.device_identifier),
+        "device": config.device_json(),
+        "origin": {
+            "name": "lunaris",
+            "sw": config.sw_version,
+        },
+        "availability": config.availability_json(),
+    })
+    .to_string()
+}
+
+/// Switch for the stock-firmware haptic: one short vibration per cover-button tap.
+fn discovery_payload_cover_button_vibration_feedback_switch(config: &BridgeConfig) -> String {
+    json!({
+        "name": "Cover Button Vibration Feedback",
+        "command_topic": config.cover_button_feedback_command_topic(),
+        "state_topic": config.cover_button_feedback_state_topic(),
+        "icon": "mdi:vibrate",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "entity_category": "config",
+        "enabled_by_default": true,
+        "unique_id": format!("{}_cover_button_vibration_feedback", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -2534,6 +2586,47 @@ async fn pulse_cover_button_tap_count(
     }
 }
 
+/// Stock-firmware haptic: one short vibration per cover-button tap on the tapped side
+/// (`1` tap → `1` pulse, `2` taps → `2` pulses, …). Gated by the MQTT switch **Cover
+/// Button Vibration Feedback**; needs the Sensor UART for vibration. The pulses go out
+/// as one [`VibrationBatch::Pulses`] batch (cancel preamble per the vibration setting),
+/// paced by the Sensor link so each tap is a distinct short vibration.
+async fn handle_cover_button_tap_feedback(
+    config: &BridgeConfig,
+    side: CoverButtonTapSide,
+    taps: u8,
+) {
+    if !config.cover_button_feedback.load(Ordering::SeqCst) {
+        return;
+    }
+    if config.sensor_device.is_none() {
+        return;
+    }
+    let side = match side {
+        CoverButtonTapSide::Left => BedSide::Left,
+        CoverButtonTapSide::Right => BedSide::Right,
+    };
+    // The MCU parser yields 1..=5 taps; clamp defensively.
+    let pulses = usize::from(taps.clamp(1, 5));
+    let cancel_preamble = config.vibration_settings.lock().await.cancel_preamble;
+    let frames = cover_button_feedback_frames(side, pulses, cancel_preamble, config.piezo_freq_hz);
+    let frame_count = frames.len();
+    match enqueue_sensor_vibration(config, VibrationBatch::Pulses { frames, pulses }).await {
+        Ok(()) => {
+            tracing::info!(
+                ?side,
+                taps,
+                pulses,
+                frame_count,
+                "cover button tap: vibration feedback pulses sent (one short vibration per tap)"
+            );
+        }
+        Err(e) => {
+            tracing::error!(%e, ?side, taps, "cover button tap: vibration feedback enqueue failed");
+        }
+    }
+}
+
 async fn publish_ambient_from_sensor_message(
     client: &AsyncClient,
     config: &BridgeConfig,
@@ -2802,6 +2895,22 @@ async fn apply_vibration_cancel_preamble_mqtt(
         g.cancel_preamble = on;
     }
     publish_vibration_cancel_preamble_state(client, config, on).await;
+}
+
+async fn apply_cover_button_feedback_mqtt(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    payload: &[u8],
+) {
+    let Some(on) = parse_mqtt_on_off(payload) else {
+        tracing::trace!("ignored cover button vibration feedback MQTT payload");
+        return;
+    };
+    if config.cover_button_feedback.load(Ordering::SeqCst) == on {
+        return;
+    }
+    config.cover_button_feedback.store(on, Ordering::SeqCst);
+    publish_cover_button_feedback_state(client, config, on).await;
 }
 
 async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side: BedSide) {
@@ -3254,6 +3363,26 @@ async fn publish_vibration_cancel_preamble_state(
         .await
     {
         tracing::error!(?e, "publish vibration cancel preamble state");
+    }
+}
+
+async fn publish_cover_button_feedback_state(
+    client: &AsyncClient,
+    config: &BridgeConfig,
+    on: bool,
+) {
+    let payload = if on { "ON" } else { "OFF" };
+    let qos = QoS::AtLeastOnce;
+    if let Err(e) = client
+        .publish(
+            config.cover_button_feedback_state_topic(),
+            qos,
+            true,
+            payload,
+        )
+        .await
+    {
+        tracing::error!(?e, "publish cover button vibration feedback state");
     }
 }
 
@@ -4143,6 +4272,18 @@ async fn publish_discovery_and_online(
         {
             tracing::error!(?e, "publish vibration cancel preamble discovery");
         }
+        let disc_fb = discovery_payload_cover_button_vibration_feedback_switch(config);
+        if let Err(e) = client
+            .publish(
+                config.discovery_topic_cover_button_vibration_feedback(),
+                qos,
+                true,
+                disc_fb,
+            )
+            .await
+        {
+            tracing::error!(?e, "publish cover button vibration feedback discovery");
+        }
         let disc_sm = discovery_payload_sensor_message(config);
         if let Err(e) = client
             .publish(config.discovery_topic_sensor_message(), qos, true, disc_sm)
@@ -4523,6 +4664,8 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig, st: &Publish
             config.vibration_pattern_state_topic(),
             config.vibration_cancel_preamble_command_topic(),
             config.vibration_cancel_preamble_state_topic(),
+            config.cover_button_feedback_command_topic(),
+            config.cover_button_feedback_state_topic(),
         ] {
             if let Err(e) = client.subscribe(topic.as_str(), qos).await {
                 tracing::error!(?e, topic = %topic, "subscribe vibration settings topic");
@@ -4876,6 +5019,10 @@ async fn handle_publish(
             apply_vibration_cancel_preamble_mqtt(client, config, &p.payload).await;
             return;
         }
+        if p.topic == config.cover_button_feedback_command_topic() {
+            apply_cover_button_feedback_mqtt(client, config, &p.payload).await;
+            return;
+        }
         if p.topic == config.vibration_intensity_state_topic() {
             if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
                 apply_vibration_intensity_mqtt(client, config, &p.payload).await;
@@ -4897,6 +5044,12 @@ async fn handle_publish(
         if p.topic == config.vibration_cancel_preamble_state_topic() {
             if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
                 apply_vibration_cancel_preamble_mqtt(client, config, &p.payload).await;
+            }
+            return;
+        }
+        if p.topic == config.cover_button_feedback_state_topic() {
+            if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
+                apply_cover_button_feedback_mqtt(client, config, &p.payload).await;
             }
             return;
         }
@@ -5154,6 +5307,7 @@ pub async fn run(
                 if let Some((side, taps)) = cover_button_dismiss_tap_count_from_sensor_message(&msg)
                 {
                     pulse_cover_button_tap_count(&c, &cfg, side, taps).await;
+                    handle_cover_button_tap_feedback(&cfg, side, taps).await;
                 }
                 publish_sensor_message_state(&c, &cfg, &msg).await;
                 publish_ambient_from_sensor_message(&c, &cfg, &msg).await;
@@ -5779,6 +5933,8 @@ pub async fn run(
 
                         if cfg.sensor_device.is_some() {
                             publish_vibration_mqtt_states(&c, &cfg).await;
+                            let feedback_on = cfg.cover_button_feedback.load(Ordering::SeqCst);
+                            publish_cover_button_feedback_state(&c, &cfg, feedback_on).await;
                             if cfg.presence_discovery {
                                 publish_presence_bootstrap_finalize(&c, &cfg).await;
                                 let no_stored_baselines =
@@ -6608,6 +6764,44 @@ mod tests {
         let intensity: serde_json::Value =
             serde_json::from_str(&discovery_payload_vibration_intensity_number(&cfg)).unwrap();
         assert_eq!(intensity["icon"].as_str(), Some("mdi:vibrate"));
+    }
+
+    #[test]
+    fn cover_button_vibration_feedback_switch_discovery() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let cfg = BridgeConfig::from_cli(&cli);
+        let disc = discovery_payload_cover_button_vibration_feedback_switch(&cfg);
+        let v: serde_json::Value = serde_json::from_str(&disc).unwrap();
+        assert_eq!(v["name"].as_str(), Some("Cover Button Vibration Feedback"));
+        assert_eq!(v["entity_category"].as_str(), Some("config"));
+        assert_eq!(
+            v["enabled_by_default"].as_bool(),
+            Some(true),
+            "visible by default: the stock firmware always gives this feedback"
+        );
+        assert_eq!(v["icon"].as_str(), Some("mdi:vibrate"));
+        assert_eq!(v["payload_on"].as_str(), Some("ON"));
+        assert_eq!(v["payload_off"].as_str(), Some("OFF"));
+        assert_eq!(
+            v["command_topic"].as_str(),
+            Some(cfg.cover_button_feedback_command_topic().as_str())
+        );
+        assert_eq!(
+            v["state_topic"].as_str(),
+            Some(cfg.cover_button_feedback_state_topic().as_str())
+        );
+        assert!(cfg
+            .cover_button_feedback_command_topic()
+            .contains("/switch/cover_button_vibration_feedback/set"));
+        assert!(cfg
+            .cover_button_feedback_state_topic()
+            .contains("/switch/cover_button_vibration_feedback/state"));
+        assert!(cfg
+            .discovery_topic_cover_button_vibration_feedback()
+            .contains("/switch/lunaris_cover_button_vibration_feedback/config"));
+        // Runtime default matches the original firmware (feedback on).
+        assert!(cfg.cover_button_feedback.load(Ordering::SeqCst));
     }
 
     #[test]

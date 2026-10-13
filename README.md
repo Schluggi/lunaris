@@ -92,6 +92,7 @@ How Lunaris differs from other local-control projects ([free-sleep](https://gith
 |:---|:---|:---:|:---|
 | Firmware | update | No | Updates Lunaris itself by pulling the latest version from GitHub releases. |
 | Calibrate Presence | button | No | Start learning what an empty mattress looks like (keep the bed clear for ~10s afterwards). |
+| Cover Button Vibration Feedback | switch | No | Short vibration on the tapped side when you press a cover button — one pulse per tap, like the original firmware. |
 | [Presence Baseline Delta](#presence-calibration) | number | Yes | Fine-tune sensitivity after calibration. |
 | [Presence Cap Threshold](#presence-calibration) | number | Yes | Fine-tune rough “capacitance” sensitivity before calibration. |
 | LED Behavior | select | No | Chooses LED startup/runtime behavior:<br>- `Manual` (off at boot, only light entity controls it)<br>- `Status` (solid green while lunaris runs)<br>- `Startup` (green for 5s on boot, then off and manual control). |

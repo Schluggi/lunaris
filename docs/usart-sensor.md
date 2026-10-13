@@ -61,6 +61,8 @@ Cancel preamble (HA Vibration Cancel Preamble switch, default on): send `SetAlar
 
 Full vibrate batch: optional cancel, then EnableVibration → SetPiezoGain → EnablePiezo → SetPiezoFrequency → SetAlarm (5 or 6 frames). See `vibration_sequence_frames`.
 
+Cover-button feedback batch (HA **Cover Button Vibration Feedback** switch, default on): when a cover-button tap event arrives (`[lisL]`/`[lisR]` dismiss text, `N` taps), one batch with optional cancel + priming + `N` × `SetAlarm` on the tapped side — fixed feedback parameters 50 % / 1 s / Single — so the stock firmware's haptic is reproduced: `1` tap → `1` short vibration, `2` taps → `2` short vibrations. The link paces the trailing `SetAlarm` frames (each pulse duration + 500 ms) so the pulses stay distinct. See `cover_button_feedback_frames` / `VibrationBatch::Pulses`.
+
 ## TX pacing (why not burst everything at once)
 
 opensleep’s sensor manager spaces configuration commands by ~800 ms (`CONFIG_RES_TIME`) and sends each piezo command only until ACK’d (`0xAE` / `0xAB` / `0xA8` / `0xA1` / live piezo stream). `lunaris` does the same for continuous piezo setup — it does not re‑blast the full priming sequence every few seconds (that restarts MCU sampling and flushes samples). Vibration batches still stagger sub‑frames (~150 ms) and wait ~400 ms after priming before `SetAlarm`.
@@ -106,7 +108,7 @@ States are not retained; Home Assistant shows `0` whenever there is no valid rea
 
 ## MQTT / Home Assistant (summary)
 
-When the Sensor serial opens successfully, discovery includes vibrate buttons (intensity, duration, pattern as runtime entities elsewhere in the bridge), Vibration Cancel Preamble, diagnostic Sensor Message (`0x07` text), optional presence binary sensors (Left / Right / Any), calibration button, Presence Cap Threshold, Presence Baseline Delta, retained Presence Baseline Zones, Heart Rate sensor (from piezo `0x32` / `0x35` samples; HRV RMSSD is computed but not exposed for now), etc. Full topic list: [`AGENTS.md`](../AGENTS.md).
+When the Sensor serial opens successfully, discovery includes vibrate buttons (intensity, duration, pattern as runtime entities elsewhere in the bridge), Vibration Cancel Preamble, Cover Button Vibration Feedback (one short vibration per cover-button tap, like the original firmware), diagnostic Sensor Message (`0x07` text), optional presence binary sensors (Left / Right / Any), calibration button, Presence Cap Threshold, Presence Baseline Delta, retained Presence Baseline Zones, Heart Rate sensor (from piezo `0x32` / `0x35` samples; HRV RMSSD is computed but not exposed for now), etc. Full topic list: [`AGENTS.md`](../AGENTS.md).
 
 ## Source map
 
