@@ -82,6 +82,8 @@ Logging: `RUST_LOG`, plus `--log-level` (see `--help`).
 
 ## Maintaining this file
 
+Current cover-button feedback (supersedes the older `SetAlarm`, host-pacing, and feedback-number descriptions above): `docs/cover-button-feedback-analysis.md` records static analysis of the supplied `firmware-sensor-g0.bbin`. One native `0x40` response uses fixed stock power 30 and alternating 125 ms vibration / 125 ms pause; pattern/count 2/3/4 matches two/three/four-or-more taps. Single taps use one cycle of pattern 2 (an extension of the recovered hub calls). `VibrationBatch::Feedback` sends one MCU-paced sequence, bare when armed/sampling, with existing initialization fallback otherwise. Only the feedback on/off switch is exposed, default ON, retained state restored. Feedback intensity/duration number discovery is removed with empty retained payloads on every MQTT connect, even without a Sensor; their topics are no longer subscribed to or applied. Regular vibration buttons retain `0x2C` and their separate settings. No host pulse gaps or early cancels are used. The native path worked in hardware testing; the shorter stock waveform needs confirmation. MCU tap aggregation still waits roughly 500 ms before reporting. Do not claim instantaneous response, full stock gesture/heat-adjustment parity, or a measured one-second motor delay. `0x1A` in the earlier discussion was a coroutine state, not a gesture wire opcode.
+
 When you change any of the following, update AGENTS.md here:
 
 - Commit-message conventions or release automation (semantic-release, commitlint, `release.yml`).

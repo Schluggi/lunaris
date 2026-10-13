@@ -152,12 +152,6 @@ pub struct VibrationSettings {
     pub duration_sec: u32,
     pub pattern: AlarmPattern,
     pub cancel_preamble: bool,
-    /// Cover-button feedback pulse intensity (percent) — HA number **Cover Button
-    /// Vibration Feedback Intensity** (retained; restored during bootstrap).
-    pub feedback_intensity: u8,
-    /// Cover-button feedback pulse length (seconds) — HA number **Cover Button
-    /// Vibration Feedback Duration** (retained; restored during bootstrap).
-    pub feedback_duration_sec: u32,
 }
 
 impl Default for VibrationSettings {
@@ -167,8 +161,6 @@ impl Default for VibrationSettings {
             duration_sec: 15,
             pattern: AlarmPattern::Single,
             cancel_preamble: true,
-            feedback_intensity: crate::sensor_frame::COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT,
-            feedback_duration_sec: crate::sensor_frame::COVER_BUTTON_FEEDBACK_DURATION_SECS_DEFAULT,
         }
     }
 }
@@ -782,38 +774,10 @@ impl BridgeConfig {
         )
     }
 
-    pub fn cover_button_feedback_intensity_command_topic(&self) -> String {
-        format!(
-            "{}/number/cover_button_feedback_intensity/set",
-            self.topic_prefix
-        )
-    }
-
-    pub fn cover_button_feedback_intensity_state_topic(&self) -> String {
-        format!(
-            "{}/number/cover_button_feedback_intensity/state",
-            self.topic_prefix
-        )
-    }
-
     pub fn discovery_topic_cover_button_feedback_intensity(&self) -> String {
         format!(
             "{}/number/{}/config",
             self.discovery_prefix, DISCOVERY_OBJECT_ID_COVER_BUTTON_FEEDBACK_INTENSITY
-        )
-    }
-
-    pub fn cover_button_feedback_duration_command_topic(&self) -> String {
-        format!(
-            "{}/number/cover_button_feedback_duration/set",
-            self.topic_prefix
-        )
-    }
-
-    pub fn cover_button_feedback_duration_state_topic(&self) -> String {
-        format!(
-            "{}/number/cover_button_feedback_duration/state",
-            self.topic_prefix
         )
     }
 
@@ -1458,53 +1422,6 @@ fn discovery_payload_cover_button_vibration_feedback_switch(config: &BridgeConfi
         "entity_category": "config",
         "enabled_by_default": true,
         "unique_id": format!("{}_cover_button_vibration_feedback", config.device_identifier),
-        "device": config.device_json(),
-        "origin": {
-            "name": "lunaris",
-            "sw": config.sw_version,
-        },
-        "availability": config.availability_json(),
-    })
-    .to_string()
-}
-
-/// Feedback pulse intensity (percent) — how strong the per-tap confirmation buzz feels.
-fn discovery_payload_cover_button_feedback_intensity_number(config: &BridgeConfig) -> String {
-    json!({
-        "name": "Cover Button Vibration Feedback Intensity",
-        "icon": "mdi:vibrate",
-        "command_topic": config.cover_button_feedback_intensity_command_topic(),
-        "state_topic": config.cover_button_feedback_intensity_state_topic(),
-        "min": 1,
-        "max": 100,
-        "step": 1,
-        "mode": "slider",
-        "entity_category": "config",
-        "unique_id": format!("{}_cover_button_feedback_intensity", config.device_identifier),
-        "device": config.device_json(),
-        "origin": {
-            "name": "lunaris",
-            "sw": config.sw_version,
-        },
-        "availability": config.availability_json(),
-    })
-    .to_string()
-}
-
-/// Feedback pulse length (seconds; `SetAlarm` duration is whole seconds).
-fn discovery_payload_cover_button_feedback_duration_number(config: &BridgeConfig) -> String {
-    json!({
-        "name": "Cover Button Vibration Feedback Duration",
-        "icon": "mdi:vibrate",
-        "command_topic": config.cover_button_feedback_duration_command_topic(),
-        "state_topic": config.cover_button_feedback_duration_state_topic(),
-        "min": 1,
-        "max": 10,
-        "step": 1,
-        "unit_of_measurement": "s",
-        "mode": "box",
-        "entity_category": "config",
-        "unique_id": format!("{}_cover_button_feedback_duration", config.device_identifier),
         "device": config.device_json(),
         "origin": {
             "name": "lunaris",
@@ -2689,9 +2606,8 @@ async fn pulse_cover_button_tap_count(
 
 /// Stock-firmware haptic: one short vibration per cover-button tap on the tapped side
 /// (`1` tap → `1` pulse, `2` taps → `2` pulses, …). Gated by the MQTT switch **Cover
-/// Button Vibration Feedback**; needs the Sensor UART for vibration. The pulses go out
-/// as one [`VibrationBatch::Pulses`] batch (cancel preamble per the vibration setting),
-/// paced by the Sensor link so each tap is a distinct short vibration.
+/// Button Vibration Feedback**; needs the Sensor UART for vibration. One native
+/// [`VibrationBatch::Feedback`] command runs the stock waveform on the MCU.
 async fn handle_cover_button_tap_feedback(
     config: &BridgeConfig,
     side: CoverButtonTapSide,
@@ -2707,37 +2623,16 @@ async fn handle_cover_button_tap_feedback(
         CoverButtonTapSide::Left => BedSide::Left,
         CoverButtonTapSide::Right => BedSide::Right,
     };
-    // The MCU parser yields 1..=5 taps; clamp defensively.
-    let pulses = usize::from(taps.clamp(1, 5));
-    let (cancel_preamble, intensity, duration) = {
-        let g = config.vibration_settings.lock().await;
-        (
-            g.cancel_preamble,
-            g.feedback_intensity,
-            g.feedback_duration_sec,
-        )
-    };
-    let intensity = intensity.clamp(1, 100);
-    let duration = duration.clamp(1, 10);
-    let frames = cover_button_feedback_frames(
-        side,
-        pulses,
-        intensity,
-        duration,
-        cancel_preamble,
-        config.piezo_freq_hz,
-    );
+    let cancel_preamble = config.vibration_settings.lock().await.cancel_preamble;
+    let frames = cover_button_feedback_frames(side, taps, cancel_preamble, config.piezo_freq_hz);
     let frame_count = frames.len();
-    match enqueue_sensor_vibration(config, VibrationBatch::Pulses { frames, pulses }).await {
+    match enqueue_sensor_vibration(config, VibrationBatch::Feedback(frames)).await {
         Ok(()) => {
             tracing::info!(
                 ?side,
                 taps,
-                pulses,
-                intensity,
-                duration,
                 frame_count,
-                "cover button tap: vibration feedback pulses sent (one short vibration per tap)"
+                "cover button tap: stock vibration feedback queued (fixed power/timing; MCU-paced)"
             );
         }
         Err(e) => {
@@ -3032,44 +2927,6 @@ async fn apply_cover_button_feedback_mqtt(
     publish_cover_button_feedback_state(client, config, on).await;
 }
 
-async fn apply_cover_button_feedback_intensity_mqtt(
-    client: &AsyncClient,
-    config: &BridgeConfig,
-    payload: &[u8],
-) {
-    let Some(v) = parse_and_clamp_u8_intensity(payload) else {
-        tracing::trace!("ignored cover button feedback intensity MQTT payload");
-        return;
-    };
-    {
-        let mut g = config.vibration_settings.lock().await;
-        if g.feedback_intensity == v {
-            return;
-        }
-        g.feedback_intensity = v;
-    }
-    publish_cover_button_feedback_intensity_state(client, config, v).await;
-}
-
-async fn apply_cover_button_feedback_duration_mqtt(
-    client: &AsyncClient,
-    config: &BridgeConfig,
-    payload: &[u8],
-) {
-    let Some(secs) = parse_and_clamp_cover_button_feedback_duration_secs(payload) else {
-        tracing::trace!("ignored cover button feedback duration MQTT payload");
-        return;
-    };
-    {
-        let mut g = config.vibration_settings.lock().await;
-        if g.feedback_duration_sec == secs {
-            return;
-        }
-        g.feedback_duration_sec = secs;
-    }
-    publish_cover_button_feedback_duration_state(client, config, secs).await;
-}
-
 async fn handle_vibrate_press(client: &AsyncClient, config: &BridgeConfig, side: BedSide) {
     if config.sensor_device.is_none() {
         return;
@@ -3287,21 +3144,6 @@ fn parse_and_clamp_duration_secs(payload: &[u8]) -> Option<u32> {
     }
     let v = v.round() as i64;
     Some((v.clamp(1, 600)) as u32)
-}
-
-/// Cover-button feedback pulse length — matches the HA number range **1–10 s**
-/// (a feedback buzz is short; the wire duration is whole seconds).
-fn parse_and_clamp_cover_button_feedback_duration_secs(payload: &[u8]) -> Option<u32> {
-    let t = std::str::from_utf8(payload).ok()?.trim();
-    if t.is_empty() {
-        return None;
-    }
-    let v: f64 = t.parse().ok()?;
-    if !v.is_finite() {
-        return None;
-    }
-    let v = v.round() as i64;
-    Some((v.clamp(1, 10)) as u32)
 }
 
 fn parse_and_clamp_presence_cap_threshold_mqtt(payload: &[u8]) -> Option<u16> {
@@ -3558,54 +3400,12 @@ async fn publish_cover_button_feedback_state(
     }
 }
 
-async fn publish_cover_button_feedback_intensity_state(
-    client: &AsyncClient,
-    config: &BridgeConfig,
-    v: u8,
-) {
-    let qos = QoS::AtLeastOnce;
-    let body = format!("{v}");
-    if let Err(e) = client
-        .publish(
-            config.cover_button_feedback_intensity_state_topic(),
-            qos,
-            true,
-            body.as_bytes(),
-        )
-        .await
-    {
-        tracing::error!(?e, "publish cover button feedback intensity state");
-    }
-}
-
-async fn publish_cover_button_feedback_duration_state(
-    client: &AsyncClient,
-    config: &BridgeConfig,
-    secs: u32,
-) {
-    let qos = QoS::AtLeastOnce;
-    let body = format!("{secs}");
-    if let Err(e) = client
-        .publish(
-            config.cover_button_feedback_duration_state_topic(),
-            qos,
-            true,
-            body.as_bytes(),
-        )
-        .await
-    {
-        tracing::error!(?e, "publish cover button feedback duration state");
-    }
-}
-
 async fn publish_vibration_mqtt_states(client: &AsyncClient, config: &BridgeConfig) {
     let vs = *config.vibration_settings.lock().await;
     publish_vibration_intensity_state(client, config, vs.intensity).await;
     publish_vibration_duration_state(client, config, vs.duration_sec).await;
     publish_vibration_pattern_state(client, config, vs.pattern).await;
     publish_vibration_cancel_preamble_state(client, config, vs.cancel_preamble).await;
-    publish_cover_button_feedback_intensity_state(client, config, vs.feedback_intensity).await;
-    publish_cover_button_feedback_duration_state(client, config, vs.feedback_duration_sec).await;
 }
 
 async fn publish_led_behavior_state(
@@ -4175,6 +3975,17 @@ async fn internet_access_probe_loop(client: AsyncClient, config: BridgeConfig) {
     }
 }
 
+async fn remove_obsolete_feedback_tuning_discovery(client: &AsyncClient, config: &BridgeConfig) {
+    for topic in [
+        config.discovery_topic_cover_button_feedback_intensity(),
+        config.discovery_topic_cover_button_feedback_duration(),
+    ] {
+        if let Err(e) = client.publish(topic, QoS::AtLeastOnce, true, "").await {
+            tracing::error!(?e, "remove obsolete cover button feedback tuning discovery");
+        }
+    }
+}
+
 async fn publish_discovery_and_online(
     client: &AsyncClient,
     config: &BridgeConfig,
@@ -4182,6 +3993,9 @@ async fn publish_discovery_and_online(
     sensor_rx_framing: Option<&Arc<AtomicBool>>,
 ) {
     let qos = QoS::AtLeastOnce;
+    // Remove the former feedback tuning entities, even when the Sensor is disabled.
+    // Their retained settings are no longer subscribed to or applied.
+    remove_obsolete_feedback_tuning_discovery(client, config).await;
     let disc_btn = discovery_payload_button(config);
     if let Err(e) = client
         .publish(config.discovery_topic(), qos, true, disc_btn)
@@ -4497,30 +4311,6 @@ async fn publish_discovery_and_online(
             .await
         {
             tracing::error!(?e, "publish cover button vibration feedback discovery");
-        }
-        let disc_fbi = discovery_payload_cover_button_feedback_intensity_number(config);
-        if let Err(e) = client
-            .publish(
-                config.discovery_topic_cover_button_feedback_intensity(),
-                qos,
-                true,
-                disc_fbi,
-            )
-            .await
-        {
-            tracing::error!(?e, "publish cover button feedback intensity discovery");
-        }
-        let disc_fbd = discovery_payload_cover_button_feedback_duration_number(config);
-        if let Err(e) = client
-            .publish(
-                config.discovery_topic_cover_button_feedback_duration(),
-                qos,
-                true,
-                disc_fbd,
-            )
-            .await
-        {
-            tracing::error!(?e, "publish cover button feedback duration discovery");
         }
         let disc_sm = discovery_payload_sensor_message(config);
         if let Err(e) = client
@@ -4904,10 +4694,6 @@ async fn setup_session(client: &AsyncClient, config: &BridgeConfig, st: &Publish
             config.vibration_cancel_preamble_state_topic(),
             config.cover_button_feedback_command_topic(),
             config.cover_button_feedback_state_topic(),
-            config.cover_button_feedback_intensity_command_topic(),
-            config.cover_button_feedback_intensity_state_topic(),
-            config.cover_button_feedback_duration_command_topic(),
-            config.cover_button_feedback_duration_state_topic(),
         ] {
             if let Err(e) = client.subscribe(topic.as_str(), qos).await {
                 tracing::error!(?e, topic = %topic, "subscribe vibration settings topic");
@@ -5265,14 +5051,6 @@ async fn handle_publish(
             apply_cover_button_feedback_mqtt(client, config, &p.payload).await;
             return;
         }
-        if p.topic == config.cover_button_feedback_intensity_command_topic() {
-            apply_cover_button_feedback_intensity_mqtt(client, config, &p.payload).await;
-            return;
-        }
-        if p.topic == config.cover_button_feedback_duration_command_topic() {
-            apply_cover_button_feedback_duration_mqtt(client, config, &p.payload).await;
-            return;
-        }
         if p.topic == config.vibration_intensity_state_topic() {
             if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
                 apply_vibration_intensity_mqtt(client, config, &p.payload).await;
@@ -5300,18 +5078,6 @@ async fn handle_publish(
         if p.topic == config.cover_button_feedback_state_topic() {
             if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
                 apply_cover_button_feedback_mqtt(client, config, &p.payload).await;
-            }
-            return;
-        }
-        if p.topic == config.cover_button_feedback_intensity_state_topic() {
-            if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
-                apply_cover_button_feedback_intensity_mqtt(client, config, &p.payload).await;
-            }
-            return;
-        }
-        if p.topic == config.cover_button_feedback_duration_state_topic() {
-            if st.mqtt_ha_state_bootstrap.load(Ordering::SeqCst) {
-                apply_cover_button_feedback_duration_mqtt(client, config, &p.payload).await;
             }
             return;
         }
@@ -7069,73 +6835,80 @@ mod tests {
         assert!(cfg.cover_button_feedback.load(Ordering::SeqCst));
     }
 
-    #[test]
-    fn cover_button_vibration_feedback_tuning_number_discovery() {
+    #[tokio::test]
+    async fn cover_button_feedback_queues_native_frames_and_respects_switch() {
+        let cli =
+            crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
+        let mut cfg = BridgeConfig::from_cli(&cli);
+        cfg.sensor_device = Some(PathBuf::from("/not-opened-in-this-test"));
+        let (tx, mut rx) = mpsc::channel(4);
+        cfg.sensor_tx = Some(tx);
+
+        handle_cover_button_tap_feedback(&cfg, CoverButtonTapSide::Left, 2).await;
+        let batch = rx.try_recv().unwrap();
+        assert_eq!(batch.alarm_count(), 1);
+        for frame in &batch.frames()[batch.cancel_count() + 4..] {
+            assert_eq!(&frame[2..7], &[0x40, 0, 30, 2, 2]);
+        }
+
+        // The ordinary vibration settings cannot change stock tap feedback.
+        {
+            let mut settings = cfg.vibration_settings.lock().await;
+            settings.intensity = 100;
+            settings.duration_sec = 60;
+            settings.pattern = AlarmPattern::Double;
+        }
+        handle_cover_button_tap_feedback(&cfg, CoverButtonTapSide::Right, 1).await;
+        let batch = rx.try_recv().unwrap();
+        assert_eq!(&batch.frames().last().unwrap()[2..7], &[0x40, 1, 30, 2, 1]);
+
+        cfg.cover_button_feedback.store(false, Ordering::SeqCst);
+        handle_cover_button_tap_feedback(&cfg, CoverButtonTapSide::Left, 2).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "disabled feedback must not enqueue commands"
+        );
+        cfg.cover_button_feedback.store(true, Ordering::SeqCst);
+        cfg.sensor_device = None;
+        handle_cover_button_tap_feedback(&cfg, CoverButtonTapSide::Left, 1).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "disabled Sensor must not enqueue commands"
+        );
+    }
+
+    #[tokio::test]
+    async fn obsolete_cover_button_feedback_tuning_discovery_removed() {
         let cli =
             crate::cli::Cli::parse_from(["lunaris", "--pod", "4", "--mqtt-host", "localhost"]);
         let cfg = BridgeConfig::from_cli(&cli);
-        let disc_i = discovery_payload_cover_button_feedback_intensity_number(&cfg);
-        let vi: serde_json::Value = serde_json::from_str(&disc_i).unwrap();
         assert_eq!(
-            vi["name"].as_str(),
-            Some("Cover Button Vibration Feedback Intensity")
-        );
-        assert_eq!(vi["entity_category"].as_str(), Some("config"));
-        assert_eq!(vi["min"].as_i64(), Some(1));
-        assert_eq!(vi["max"].as_i64(), Some(100));
-        assert_eq!(
-            vi["command_topic"].as_str(),
-            Some(cfg.cover_button_feedback_intensity_command_topic().as_str())
+            cfg.discovery_topic_cover_button_feedback_intensity(),
+            "homeassistant/number/lunaris_cover_button_feedback_intensity/config"
         );
         assert_eq!(
-            vi["state_topic"].as_str(),
-            Some(cfg.cover_button_feedback_intensity_state_topic().as_str())
+            cfg.discovery_topic_cover_button_feedback_duration(),
+            "homeassistant/number/lunaris_cover_button_feedback_duration/config"
         );
-
-        let disc_d = discovery_payload_cover_button_feedback_duration_number(&cfg);
-        let vd: serde_json::Value = serde_json::from_str(&disc_d).unwrap();
-        assert_eq!(
-            vd["name"].as_str(),
-            Some("Cover Button Vibration Feedback Duration")
+        let (client, mut eventloop) = AsyncClient::new(
+            MqttOptions::new("feedback-migration-test", "localhost", 1883),
+            4,
         );
-        assert_eq!(vd["entity_category"].as_str(), Some("config"));
-        assert_eq!(vd["min"].as_i64(), Some(1));
-        assert_eq!(vd["max"].as_i64(), Some(10));
-        assert_eq!(vd["unit_of_measurement"].as_str(), Some("s"));
-        assert_eq!(
-            vd["command_topic"].as_str(),
-            Some(cfg.cover_button_feedback_duration_command_topic().as_str())
-        );
-
-        // Runtime defaults: clearly perceptible buzz out of the box.
-        let vs = VibrationSettings::default();
-        assert_eq!(
-            vs.feedback_intensity,
-            crate::sensor_frame::COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT
-        );
-        assert_eq!(
-            vs.feedback_duration_sec,
-            crate::sensor_frame::COVER_BUTTON_FEEDBACK_DURATION_SECS_DEFAULT
-        );
-        assert_eq!(vs.feedback_intensity, 100);
-        assert_eq!(vs.feedback_duration_sec, 1);
-        // Feedback duration parser matches the HA number range.
-        assert_eq!(
-            parse_and_clamp_cover_button_feedback_duration_secs(b"3"),
-            Some(3)
-        );
-        assert_eq!(
-            parse_and_clamp_cover_button_feedback_duration_secs(b"0"),
-            Some(1)
-        );
-        assert_eq!(
-            parse_and_clamp_cover_button_feedback_duration_secs(b"99"),
-            Some(10)
-        );
-        assert_eq!(
-            parse_and_clamp_cover_button_feedback_duration_secs(b"x"),
-            None
-        );
+        remove_obsolete_feedback_tuning_discovery(&client, &cfg).await;
+        // Inspect queued MQTT requests without connecting to a broker.
+        eventloop.clean();
+        assert_eq!(eventloop.pending.len(), 2);
+        for (request, topic) in eventloop.pending.iter().zip([
+            cfg.discovery_topic_cover_button_feedback_intensity(),
+            cfg.discovery_topic_cover_button_feedback_duration(),
+        ]) {
+            let rumqttc::Request::Publish(publish) = request else {
+                panic!("expected discovery removal publish");
+            };
+            assert_eq!(publish.topic, topic);
+            assert!(publish.retain);
+            assert!(publish.payload.is_empty());
+        }
     }
 
     #[test]

@@ -69,17 +69,14 @@ pub fn cancel_alarm_frame(side: BedSide) -> Vec<u8> {
     set_alarm_frame(side, 0, AlarmPattern::Double, 0)
 }
 
-/// Cover-button feedback pulse intensity (percent) default — a short confirmation buzz
-/// on the tapped side, not a full alarm (the stock firmware gives one short vibration
-/// per side-button press; lunaris reproduces that with the MQTT **Cover Button Vibration
-/// Feedback** switch). Full strength: the tick must be felt immediately, like the stock
-/// firmware's. Tunable at runtime via the HA number **Cover Button Vibration Feedback
-/// Intensity**.
-pub const COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT: u8 = 100;
-/// Cover-button feedback pulse length (seconds) default (`SetAlarm` duration is whole
-/// seconds). Tunable at runtime via the HA number **Cover Button Vibration Feedback
-/// Duration**.
-pub const COVER_BUTTON_FEEDBACK_DURATION_SECS_DEFAULT: u32 = 1;
+/// Native stock tap response: fixed power 30, 125 ms on / 125 ms off per tap.
+/// Patterns 2/3/4 have the same waveform; the hub selects the matching gesture
+/// code, capped at four taps. Single taps use one cycle of the same waveform.
+/// See `docs/cover-button-feedback-analysis.md` for the static evidence.
+pub fn tap_feedback_frame(side: BedSide, taps: u8) -> Vec<u8> {
+    let count = taps.clamp(1, 4);
+    encode_command(&[0x40, side as u8, 30, count.max(2), count])
+}
 
 /// `SensorCommand::EnableVibration` — MCU often ignores `set_alarm_frame` until this runs (opensleep).
 pub fn enable_vibration_frame() -> Vec<u8> {
@@ -160,32 +157,21 @@ pub fn vibration_sequence_frames_both(
     out
 }
 
-/// Cover-button feedback batch: optional cancel + piezo priming + `pulses` × `SetAlarm`
-/// on **one** side — one short vibration per side-button tap (stock-firmware haptic
-/// feedback: `1` tap → `1` pulse, `2` taps → `2` pulses). The Sensor link paces the
-/// trailing `SetAlarm` frames (pulse duration + gap) so the pulses stay distinct, and
-/// sends them bare (no cancel/priming) when the MCU is already armed + sampling.
+/// Optional cancel + piezo priming + one native stock tap response. The MCU
+/// executes the entire pulse sequence; no host-side pacing or cancel is needed.
+/// An armed, sampling link sends only the trailing feedback command.
 pub fn cover_button_feedback_frames(
     side: BedSide,
-    pulses: usize,
-    intensity_pct: u8,
-    duration_secs: u32,
+    taps: u8,
     cancel_preamble: bool,
     piezo_freq_hz: u32,
 ) -> Vec<Vec<u8>> {
-    let mut out = Vec::with_capacity(usize::from(cancel_preamble) + 4 + pulses);
+    let mut out = Vec::with_capacity(usize::from(cancel_preamble) + 5);
     if cancel_preamble {
         out.push(cancel_alarm_frame(side));
     }
     out.extend(piezo_priming_frames(piezo_freq_hz));
-    for _ in 0..pulses {
-        out.push(set_alarm_frame(
-            side,
-            intensity_pct,
-            AlarmPattern::Single,
-            duration_secs,
-        ));
-    }
+    out.push(tap_feedback_frame(side, taps));
     out
 }
 
@@ -201,10 +187,8 @@ pub enum VibrationBatch {
     Side(Vec<Vec<u8>>),
     /// Both sides at once — optional cancels + 4 priming + `SetAlarm` left + `SetAlarm` right.
     Both(Vec<Vec<u8>>),
-    /// Cover-button feedback — optional cancel + 4 priming + `pulses` × `SetAlarm` on one
-    /// side. The link paces the trailing `SetAlarm` frames (pulse duration + gap) so each
-    /// button tap gets its own short vibration instead of one long one.
-    Pulses { frames: Vec<Vec<u8>>, pulses: usize },
+    /// Optional cancel + 4 priming + one MCU-paced stock tap response.
+    Feedback(Vec<Vec<u8>>),
 }
 
 impl VibrationBatch {
@@ -213,35 +197,32 @@ impl VibrationBatch {
         match self {
             VibrationBatch::Side(frames)
             | VibrationBatch::Both(frames)
-            | VibrationBatch::Pulses { frames, .. } => frames,
+            | VibrationBatch::Feedback(frames) => frames,
         }
     }
 
     /// Cancel frames at the head of the batch (**0**/**1** for [`VibrationBatch::Side`],
-    /// **0**/**2** for [`VibrationBatch::Both`], **0**/**1** for [`VibrationBatch::Pulses`]).
+    /// **0**/**2** for [`VibrationBatch::Both`], **0**/**1** for [`VibrationBatch::Feedback`]).
     pub fn cancel_count(&self) -> usize {
         match self {
-            VibrationBatch::Side(frames) => usize::from(frames.len() == 6),
+            VibrationBatch::Side(frames) | VibrationBatch::Feedback(frames) => {
+                usize::from(frames.len() == 6)
+            }
             VibrationBatch::Both(frames) => usize::from(frames.len() == 8) * 2,
-            // cancel + 4 priming + pulses → exactly one leading cancel frame.
-            VibrationBatch::Pulses { frames, pulses } => usize::from(frames.len() == *pulses + 5),
         }
     }
 
-    /// `SetAlarm` frames at the tail of the batch (**1** for [`VibrationBatch::Side`], **2** for
-    /// [`VibrationBatch::Both`], `pulses` for [`VibrationBatch::Pulses`]).
+    /// Vibration frames at the tail of the batch (**1** for [`VibrationBatch::Side`], **2** for
+    /// [`VibrationBatch::Both`], one native command for [`VibrationBatch::Feedback`]).
     pub fn alarm_count(&self) -> usize {
         match self {
-            VibrationBatch::Side(_) => 1,
+            VibrationBatch::Side(_) | VibrationBatch::Feedback(_) => 1,
             VibrationBatch::Both(_) => 2,
-            VibrationBatch::Pulses { pulses, .. } => *pulses,
         }
     }
 
-    /// `true` when the trailing `SetAlarm` frames are **sequential pulses** (paced by the
-    /// link: pulse duration + gap) rather than simultaneous alarms sent back-to-back.
-    pub fn paced_alarms(&self) -> bool {
-        matches!(self, VibrationBatch::Pulses { .. })
+    pub fn is_feedback(&self) -> bool {
+        matches!(self, VibrationBatch::Feedback(_))
     }
 }
 
@@ -380,17 +361,38 @@ mod tests {
     }
 
     #[test]
-    fn cover_button_feedback_frames_shape() {
-        // cancel + 4 priming + pulses × SetAlarm (feedback intensity / duration / Single).
-        let frames = cover_button_feedback_frames(
-            BedSide::Right,
-            2,
-            COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT,
-            COVER_BUTTON_FEEDBACK_DURATION_SECS_DEFAULT,
-            true,
-            PIEZO_FREQ_POD4,
+    fn native_tap_feedback_matches_stock_gesture_bytes() {
+        assert_eq!(
+            tap_feedback_frame(BedSide::Left, 2),
+            vec![0x7E, 0x05, 0x40, 0x00, 0x1E, 0x02, 0x02, 0xFE, 0xE4]
         );
-        assert_eq!(frames.len(), 7);
+        assert_eq!(
+            tap_feedback_frame(BedSide::Right, 3),
+            vec![0x7E, 0x05, 0x40, 0x01, 0x1E, 0x03, 0x03, 0xAB, 0x40]
+        );
+        assert_eq!(
+            &tap_feedback_frame(BedSide::Left, 1)[2..7],
+            &[0x40, 0, 30, 2, 1]
+        );
+        assert_eq!(
+            &tap_feedback_frame(BedSide::Left, 4)[2..7],
+            &[0x40, 0, 30, 4, 4]
+        );
+        assert_eq!(
+            tap_feedback_frame(BedSide::Left, 5),
+            tap_feedback_frame(BedSide::Left, 4)
+        );
+        assert_eq!(
+            tap_feedback_frame(BedSide::Left, 0),
+            tap_feedback_frame(BedSide::Left, 1)
+        );
+    }
+
+    #[test]
+    fn cover_button_feedback_frames_shape() {
+        // cancel + 4 priming + one MCU-paced native feedback command.
+        let frames = cover_button_feedback_frames(BedSide::Right, 2, true, PIEZO_FREQ_POD4);
+        assert_eq!(frames.len(), 6);
         assert_eq!(frames[0], cancel_alarm_frame(BedSide::Right));
         assert_eq!(frames[1], enable_vibration_frame());
         assert_eq!(
@@ -399,56 +401,47 @@ mod tests {
         );
         assert_eq!(frames[3], enable_piezo_frame());
         assert_eq!(frames[4], set_piezo_freq_frame(PIEZO_FREQ_POD4));
-        for frame in &frames[5..] {
-            assert_eq!(
-                *frame,
-                set_alarm_frame(
-                    BedSide::Right,
-                    COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT,
-                    AlarmPattern::Single,
-                    COVER_BUTTON_FEEDBACK_DURATION_SECS_DEFAULT
-                )
-            );
-        }
+        assert_eq!(frames[5], tap_feedback_frame(BedSide::Right, 2));
 
-        let no_cancel =
-            cover_button_feedback_frames(BedSide::Left, 1, 55, 2, false, PIEZO_FREQ_POD4);
+        let no_cancel = cover_button_feedback_frames(BedSide::Left, 1, false, PIEZO_FREQ_POD4);
         assert_eq!(no_cancel.len(), 5);
         assert_eq!(no_cancel[0], enable_vibration_frame());
-        assert_eq!(
-            no_cancel[4],
-            set_alarm_frame(BedSide::Left, 55, AlarmPattern::Single, 2)
-        );
+        assert_eq!(no_cancel[4], tap_feedback_frame(BedSide::Left, 1));
     }
 
     #[test]
-    fn pulses_batch_counts_and_pacing_flag() {
-        let with_cancel = VibrationBatch::Pulses {
-            frames: cover_button_feedback_frames(BedSide::Left, 3, 80, 1, true, PIEZO_FREQ_POD4),
-            pulses: 3,
-        };
+    fn feedback_batch_counts_and_bare_flag() {
+        let with_cancel = VibrationBatch::Feedback(cover_button_feedback_frames(
+            BedSide::Left,
+            3,
+            true,
+            PIEZO_FREQ_POD4,
+        ));
         assert_eq!(with_cancel.cancel_count(), 1);
-        assert_eq!(with_cancel.alarm_count(), 3);
-        assert_eq!(with_cancel.frames().len(), 8);
-        assert!(with_cancel.paced_alarms());
+        assert_eq!(with_cancel.alarm_count(), 1);
+        assert_eq!(with_cancel.frames().len(), 6);
+        assert!(with_cancel.is_feedback());
 
-        let no_cancel = VibrationBatch::Pulses {
-            frames: cover_button_feedback_frames(BedSide::Left, 2, 80, 1, false, PIEZO_FREQ_POD4),
-            pulses: 2,
-        };
+        let no_cancel = VibrationBatch::Feedback(cover_button_feedback_frames(
+            BedSide::Left,
+            2,
+            false,
+            PIEZO_FREQ_POD4,
+        ));
         assert_eq!(no_cancel.cancel_count(), 0);
-        assert_eq!(no_cancel.alarm_count(), 2);
-        assert_eq!(no_cancel.frames().len(), 6);
-        assert!(no_cancel.paced_alarms());
+        assert_eq!(no_cancel.alarm_count(), 1);
+        assert_eq!(no_cancel.frames().len(), 5);
+        assert!(no_cancel.is_feedback());
 
-        // One tap = one pulse: same length as a Side batch with cancel (6) but paced.
-        let single = VibrationBatch::Pulses {
-            frames: cover_button_feedback_frames(BedSide::Right, 1, 80, 1, true, PIEZO_FREQ_POD4),
-            pulses: 1,
-        };
+        let single = VibrationBatch::Feedback(cover_button_feedback_frames(
+            BedSide::Right,
+            1,
+            true,
+            PIEZO_FREQ_POD4,
+        ));
         assert_eq!(single.cancel_count(), 1);
         assert_eq!(single.alarm_count(), 1);
-        assert!(single.paced_alarms());
+        assert!(single.is_feedback());
 
         let side = VibrationBatch::Side(vibration_sequence_frames(
             BedSide::Left,
@@ -458,7 +451,7 @@ mod tests {
             true,
             PIEZO_FREQ_POD4,
         ));
-        assert!(!side.paced_alarms());
+        assert!(!side.is_feedback());
         let both = VibrationBatch::Both(vibration_sequence_frames_both(
             50,
             AlarmPattern::Double,
@@ -466,6 +459,6 @@ mod tests {
             true,
             PIEZO_FREQ_POD4,
         ));
-        assert!(!both.paced_alarms());
+        assert!(!both.is_feedback());
     }
 }

@@ -411,41 +411,6 @@ async fn wait_firmware_answer(
 const SENSOR_PRIMING_INTER_FRAME_MS: u64 = 150;
 /// Pause after the last priming frame (`EnablePiezo`) so the MCU can settle before we wait for `0xAE` / send `SetAlarm`.
 const SENSOR_AFTER_PRIMING_MS: u64 = 400;
-/// Pause between cover-button feedback pulses: each `SetAlarm` duration plus this gap,
-/// so every button tap is a distinct short vibration (stock-firmware haptic feedback).
-const SENSOR_FEEDBACK_PULSE_GAP_MS: u64 = 500;
-
-/// `SetAlarm` duration (seconds) parsed from a framed command
-/// (`7E len 2C side intensity pattern <duration u32 BE> crc crc`) — used to pace
-/// feedback pulses. `None` when the frame is not a well-formed `SetAlarm`.
-fn set_alarm_duration_secs(frame: &[u8]) -> Option<u32> {
-    if frame.len() >= 10 && frame[0] == 0x7E && frame[2] == 0x2C {
-        Some(u32::from_be_bytes([frame[6], frame[7], frame[8], frame[9]]))
-    } else {
-        None
-    }
-}
-
-/// Writes trailing `SetAlarm` frames as **sequential pulses**: each frame is flushed and
-/// followed by its own duration plus [`SENSOR_FEEDBACK_PULSE_GAP_MS`] (except after the
-/// last pulse), so the MCU runs one short vibration per button tap.
-async fn write_paced_alarm_frames(
-    write_half: &mut tokio::io::WriteHalf<tokio_serial::SerialStream>,
-    alarms: &[Vec<u8>],
-) -> Result<(), SensorLinkError> {
-    for (i, frame) in alarms.iter().enumerate() {
-        write_half.write_all(frame).await?;
-        write_half.flush().await?;
-        if i + 1 < alarms.len() {
-            let dur_ms = set_alarm_duration_secs(frame)
-                .map(|secs| u64::from(secs) * 1000)
-                .unwrap_or(0);
-            sleep(Duration::from_millis(dur_ms + SENSOR_FEEDBACK_PULSE_GAP_MS)).await;
-        }
-    }
-    Ok(())
-}
-
 /// Next opensleep-style piezo config command, or `None` when setup looks complete.
 fn next_piezo_setup_frame(setup: &PiezoSetupState) -> Option<Vec<u8>> {
     if !setup.vibration_enabled() {
@@ -503,19 +468,22 @@ async fn write_vibration_batch(
     // Known opensleep sequence shape: cancel(s) → 4 priming frames → alarm(s).
     let cancels = batch.cancel_count();
     let alarms = batch.alarm_count();
-    let paced = batch.paced_alarms();
+    let feedback = batch.is_feedback();
     let is_sequence = frames.len() == cancels + 4 + alarms;
-    // opensleep parity: alarms go out as a **bare `SetAlarm`** into an already-armed,
+    // Feedback goes out as bare native `0x40` into an already-armed,
     // sampling MCU — the CommandScheduler sends priming only until the state flags are
     // set, and re-priming before every alarm restarts MCU sampling (and on some Pods
     // yields `0xAC` acks without physical vibration). Cover-button feedback pulses use
     // the bare path whenever vibration is armed and the piezo setup is complete; the
     // full sequence stays as the fallback when the MCU is not armed yet.
-    if paced && is_sequence && piezo_setup.vibration_enabled() && piezo_setup.piezo_ok() {
-        write_paced_alarm_frames(write_half, &frames[cancels + 4..]).await?;
+    if feedback && is_sequence && piezo_setup.vibration_enabled() && piezo_setup.piezo_ok() {
+        for frame in &frames[cancels + 4..] {
+            write_half.write_all(frame).await?;
+        }
+        write_half.flush().await?;
         tracing::debug!(
             alarms,
-            "Sensor: feedback pulses sent bare (MCU already armed + sampling; no re-priming)"
+            "Sensor: stock tap feedback sent bare (MCU-paced sequence; no re-priming)"
         );
         return Ok(());
     }
@@ -539,15 +507,10 @@ async fn write_vibration_batch(
                 };
                 sleep(pause).await;
             }
-            if paced {
-                // Feedback pulses: one short vibration per button tap, not one long one.
-                write_paced_alarm_frames(write_half, &frames[head..]).await?;
-            } else {
-                for (i, frame) in frames[head..].iter().enumerate() {
-                    write_half.write_all(frame).await?;
-                    if i + 1 < frames[head..].len() {
-                        sleep(gap).await;
-                    }
+            for (i, frame) in frames[head..].iter().enumerate() {
+                write_half.write_all(frame).await?;
+                if i + 1 < frames[head..].len() {
+                    sleep(gap).await;
                 }
             }
         } else {
@@ -585,16 +548,11 @@ async fn write_vibration_batch(
             sleep(Duration::from_millis(SENSOR_AFTER_PRIMING_MS)).await;
             wait_for_vibration_ack(write_half, piezo_setup).await?;
         }
-        if paced {
-            // Feedback pulses: pace the SetAlarm frames (pulse duration + gap).
-            write_paced_alarm_frames(write_half, alarm).await?;
-        } else {
-            // Simultaneous alarms (both sides) go back-to-back.
-            for frame in alarm {
-                write_half.write_all(frame).await?;
-            }
-            write_half.flush().await?;
+        // Both-side alarms go back-to-back; native feedback is one MCU-paced command.
+        for frame in alarm {
+            write_half.write_all(frame).await?;
         }
+        write_half.flush().await?;
     } else {
         for frame in frames {
             write_half.write_all(frame).await?;
@@ -896,31 +854,6 @@ async fn keepalive_and_health(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn set_alarm_duration_parsed_from_framed_command() {
-        // 7E 08 2C side intensity pattern <duration u32 BE> crc crc
-        let frame = crate::sensor_frame::set_alarm_frame(
-            crate::frozen_frame::BedSide::Left,
-            50,
-            crate::sensor_frame::AlarmPattern::Single,
-            1,
-        );
-        assert_eq!(set_alarm_duration_secs(&frame), Some(1));
-        let frame = crate::sensor_frame::set_alarm_frame(
-            crate::frozen_frame::BedSide::Right,
-            64,
-            crate::sensor_frame::AlarmPattern::Single,
-            600,
-        );
-        assert_eq!(set_alarm_duration_secs(&frame), Some(600));
-        // Not a SetAlarm / truncated → None.
-        assert_eq!(
-            set_alarm_duration_secs(&[0x7E, 0x01, 0x2E, 0x09, 0x30]),
-            None
-        );
-        assert_eq!(set_alarm_duration_secs(&[0x7E, 0x08, 0x2C]), None);
-    }
 
     #[test]
     fn backoff_doubles_until_cap() {
@@ -1251,7 +1184,7 @@ mod tests {
             );
         }
 
-        /// opensleep parity: cover-button feedback pulses go out as **bare `SetAlarm`**
+        /// Cover-button feedback goes out as bare native `0x40`
         /// frames when the MCU is already armed + sampling — no cancel, no priming, no
         /// `0xAE` wait (re-priming restarts MCU sampling and can ack without physical
         /// vibration on some Pods).
@@ -1268,18 +1201,16 @@ mod tests {
             let frames = crate::sensor_frame::cover_button_feedback_frames(
                 crate::frozen_frame::BedSide::Right,
                 2,
-                80,
-                1,
                 true,
                 500,
             );
-            let batch = VibrationBatch::Pulses { frames, pulses: 2 };
+            let batch = VibrationBatch::Feedback(frames);
             let t0 = std::time::Instant::now();
             let write_task = tokio::spawn(async move {
                 write_vibration_batch(&mut write_half, batch, &setup, false).await
             });
             // The reader thread must outlive the write task — it holds the PTY master
-            // (dropping it would EIO the slave writes). It exits after the two pulses
+            // (dropping it would EIO the slave writes). It exits after the sequence
             // plus a silence window (nothing else may follow on the wire).
             let reader = std::thread::spawn(move || {
                 let mut buf = Vec::new();
@@ -1287,7 +1218,7 @@ mod tests {
                 let cap = t0 + Duration::from_secs(10);
                 loop {
                     // After each frame, wait out a silence window longer than the
-                    // pulse gap (1s duration + 500ms): a further frame would mean the
+                    // MCU sequence: a further frame would mean the
                     // head (cancel/priming) leaked onto the wire. The window also
                     // keeps the master alive until the write task (which returns
                     // right after the last pulse) has fully completed.
@@ -1308,19 +1239,16 @@ mod tests {
                 .expect("write task")
                 .expect("bare feedback batch");
 
-            assert_eq!(got.len(), 2, "exactly the two pulses, no head: {got:?}");
+            assert_eq!(got.len(), 1, "one MCU-paced sequence, no head: {got:?}");
             let (first, first_at) = &got[0];
-            assert_eq!(&first[2..4], &[0x2C, 0x01], "SetAlarm right side");
-            assert!(
-                first_at.duration_since(t0) < Duration::from_millis(1000),
-                "bare pulse must not wait for priming/ack-wait"
+            assert_eq!(
+                &first[2..7],
+                &[0x40, 0x01, 30, 2, 2],
+                "stock double-tap feedback, right side"
             );
-            let (second, second_at) = &got[1];
-            assert_eq!(&second[2..4], &[0x2C, 0x01], "SetAlarm right side");
-            let gap = second_at.duration_since(*first_at);
             assert!(
-                gap >= Duration::from_millis(1000),
-                "pulses must be paced (pulse duration + gap): {gap:?}"
+                first_at.duration_since(t0) < Duration::from_millis(500),
+                "bare pulse must not wait for priming/ack-wait"
             );
         }
 
@@ -1338,12 +1266,10 @@ mod tests {
             let frames = crate::sensor_frame::cover_button_feedback_frames(
                 crate::frozen_frame::BedSide::Left,
                 2,
-                80,
-                1,
                 true,
                 500,
             );
-            let batch = VibrationBatch::Pulses { frames, pulses: 2 };
+            let batch = VibrationBatch::Feedback(frames);
             write_vibration_batch(&mut write_half, batch, &setup, true)
                 .await
                 .expect("full feedback sequence (no-ack-wait)");
@@ -1351,13 +1277,17 @@ mod tests {
             let mut buf = Vec::new();
             let mut got = Vec::new();
             let deadline = std::time::Instant::now() + Duration::from_millis(1000);
-            while got.len() < 7 {
+            while got.len() < 6 {
                 match read_frame_deadline(&mut master, &mut buf, deadline) {
                     Some((frame, _)) => got.push(frame),
                     None => break,
                 }
             }
-            assert_eq!(got.len(), 7, "cancel + 4 priming + 2 pulses: {got:?}");
+            assert_eq!(
+                got.len(),
+                6,
+                "cancel + 4 priming + one stock sequence: {got:?}"
+            );
             assert_eq!(
                 &got[0][2..6],
                 &[0x2C, 0x00, 0x00, 0x01],
@@ -1367,8 +1297,11 @@ mod tests {
             assert_eq!(&got[2][2..3], &[0x2B], "SetPiezoGain");
             assert_eq!(&got[3][2..3], &[0x28], "EnablePiezo");
             assert_eq!(&got[4][2..3], &[0x21], "SetPiezoFreq");
-            assert_eq!(&got[5][2..4], &[0x2C, 0x00], "pulse SetAlarm (left)");
-            assert_eq!(&got[6][2..4], &[0x2C, 0x00], "pulse SetAlarm (left)");
+            assert_eq!(
+                &got[5][2..7],
+                &[0x40, 0x00, 30, 2, 2],
+                "stock double-tap feedback (left)"
+            );
         }
 
         #[tokio::test]
