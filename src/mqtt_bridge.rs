@@ -5568,8 +5568,11 @@ pub async fn run(
             while let Some(msg) = sensor_msg_rx.recv().await {
                 if let Some((side, taps)) = cover_button_dismiss_tap_count_from_sensor_message(&msg)
                 {
-                    pulse_cover_button_tap_count(&c, &cfg, side, taps).await;
+                    // Time-critical first: the feedback pulse must go out before the
+                    // cover-button sensor pulse (which sleeps 400 ms between publishes)
+                    // so the haptic feels immediate, like the stock firmware.
                     handle_cover_button_tap_feedback(&cfg, side, taps).await;
+                    pulse_cover_button_tap_count(&c, &cfg, side, taps).await;
                 }
                 publish_sensor_message_state(&c, &cfg, &msg).await;
                 publish_ambient_from_sensor_message(&c, &cfg, &msg).await;
@@ -7114,7 +7117,7 @@ mod tests {
             vs.feedback_duration_sec,
             crate::sensor_frame::COVER_BUTTON_FEEDBACK_DURATION_SECS_DEFAULT
         );
-        assert_eq!(vs.feedback_intensity, 80);
+        assert_eq!(vs.feedback_intensity, 100);
         assert_eq!(vs.feedback_duration_sec, 1);
         // Feedback duration parser matches the HA number range.
         assert_eq!(

@@ -72,9 +72,10 @@ pub fn cancel_alarm_frame(side: BedSide) -> Vec<u8> {
 /// Cover-button feedback pulse intensity (percent) default — a short confirmation buzz
 /// on the tapped side, not a full alarm (the stock firmware gives one short vibration
 /// per side-button press; lunaris reproduces that with the MQTT **Cover Button Vibration
-/// Feedback** switch). Tunable at runtime via the HA number **Cover Button Vibration
-/// Feedback Intensity**.
-pub const COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT: u8 = 80;
+/// Feedback** switch). Full strength: the tick must be felt immediately, like the stock
+/// firmware's. Tunable at runtime via the HA number **Cover Button Vibration Feedback
+/// Intensity**.
+pub const COVER_BUTTON_FEEDBACK_INTENSITY_DEFAULT: u8 = 100;
 /// Cover-button feedback pulse length (seconds) default (`SetAlarm` duration is whole
 /// seconds). Tunable at runtime via the HA number **Cover Button Vibration Feedback
 /// Duration**.
